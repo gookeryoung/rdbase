@@ -28,6 +28,7 @@ import {
   EyeOutlined,
   HistoryOutlined,
   RollbackOutlined,
+  ApartmentOutlined,
 } from "@ant-design/icons";
 import {
   listDrafts,
@@ -42,6 +43,7 @@ import {
 import { listDatasources } from "@/api/datasources";
 import { useAuthStore } from "@/store/auth";
 import { isDesignerOrAdmin } from "@/utils/permission";
+import ERGraph from "@/components/ERGraph";
 import type {
   DataSource,
   Draft,
@@ -321,6 +323,16 @@ const Designer = () => {
     setEditingSpec({
       ...editingSpec,
       foreign_keys: [...editingSpec.foreign_keys, makeEmptyForeignKey()],
+    });
+    setDdlStatements(null);
+  };
+
+  // ER 图拖拽创建：直接写入指定外键
+  const addForeignKeyFromER = (fk: ForeignKeySpec) => {
+    if (!editingSpec) return;
+    setEditingSpec({
+      ...editingSpec,
+      foreign_keys: [...editingSpec.foreign_keys, fk],
     });
     setDdlStatements(null);
   };
@@ -1022,6 +1034,23 @@ const Designer = () => {
                         </Button>
                       )}
                     </>
+                  ),
+                },
+                {
+                  key: "er_graph",
+                  label: (
+                    <span>
+                      <ApartmentOutlined /> ER 图
+                    </span>
+                  ),
+                  children: (
+                    <ERGraph
+                      drafts={drafts}
+                      currentDraft={selectedDraft}
+                      canEdit={canEdit}
+                      onAddForeignKey={addForeignKeyFromER}
+                      onRemoveForeignKey={removeForeignKey}
+                    />
                   ),
                 },
                 {
