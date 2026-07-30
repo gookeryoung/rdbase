@@ -1,0 +1,46 @@
+# 版本控制
+.git
+.gitignore
+.github
+
+# Python 缓存与构建产物
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.egg-info
+*.egg
+dist
+build
+.eggs
+
+# 测试与覆盖率
+.pytest_cache
+.coverage
+htmlcov
+.tox
+coverage.xml
+
+# 虚拟环境
+.venv
+venv
+env
+
+# 工具缓存
+.uv-cache
+.ruff_cache
+.pyrefly_cache
+.mypy_cache
+
+# IDE 与编辑器
+.idea
+.vscode
+*.swp
+*.swo
+
+# 文档（按需保留）
+docs
+
+# 系统文件
+.DS_Store
+Thumbs.db
