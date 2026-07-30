@@ -1,9 +1,17 @@
+// 用户角色枚举（与后端 Role.TextChoices 保持一致）
+export enum Role {
+  ADMIN = "admin",
+  DESIGNER = "designer",
+  VIEWER = "viewer",
+}
+
 // 用户信息
 export interface User {
   id: number;
   username: string;
   email?: string;
-  isSuperuser?: boolean;
+  role: Role;
+  is_active?: boolean;
 }
 
 // 统一 API 响应结构
@@ -29,6 +37,6 @@ export interface LoginRequest {
 
 // 登录响应数据
 export interface LoginResponse {
-  token: string;
+  access: string;
   user: User;
 }

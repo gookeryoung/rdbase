@@ -1,20 +1,30 @@
 import { useState } from "react";
 import { Card, Form, Input, Button, Typography, message } from "antd";
 import { UserOutlined, LockOutlined } from "@ant-design/icons";
+import { useNavigate } from "react-router-dom";
+import { login as loginApi } from "@/api/auth";
+import { useAuthStore } from "@/store/auth";
 import type { LoginRequest } from "@/types";
 
 const { Title } = Typography;
 
-// 登录页：居中卡片表单，提交时调用登录接口（P1 阶段实现真实调用与跳转）
+// 登录页：居中卡片表单，提交时调用 /auth/login 接口
 const Login = () => {
   const [submitting, setSubmitting] = useState(false);
+  const navigate = useNavigate();
+  const storeLogin = useAuthStore((state) => state.login);
 
   const onFinish = async (values: LoginRequest) => {
-    // P1 实现：调用 /api/v1/auth/login 获取 token 与用户信息，写入 auth store 后跳转主页
     setSubmitting(true);
     try {
-      console.log("登录表单提交：", values);
-      message.info("登录功能将在 P1 阶段实现");
+      const { access, user } = await loginApi(values);
+      storeLogin(access, user);
+      message.success("登录成功");
+      navigate("/", { replace: true });
+    } catch (err) {
+      // axios 错误统一由拦截器处理 401；其它错误在此提示
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      message.error(msg ?? "登录失败，请稍后重试");
     } finally {
       setSubmitting(false);
     }

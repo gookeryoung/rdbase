@@ -3,7 +3,9 @@ import Login from "@/pages/Login";
 import Dashboard from "@/pages/Dashboard";
 import MainLayout from "@/layouts/MainLayout";
 import ProtectedRoute from "@/components/ProtectedRoute";
+import RoleRoute from "@/components/RoleRoute";
 import { Typography } from "antd";
+import { Role } from "@/types";
 
 const { Text } = Typography;
 
@@ -14,7 +16,9 @@ const Placeholder = ({ title }: { title: string }) => (
   </div>
 );
 
-// 路由配置：未登录访问受保护路由时由 ProtectedRoute 重定向到 /login
+// 路由配置：
+// - ProtectedRoute：登录守卫
+// - RoleRoute：角色守卫（未登录跳 /login，已登录但角色不足显示 403）
 export const routes: RouteObject[] = [
   {
     path: "/login",
@@ -29,7 +33,11 @@ export const routes: RouteObject[] = [
         children: [
           { index: true, element: <Dashboard /> },
           { path: "datasources", element: <Placeholder title="数据源管理" /> },
-          { path: "designer", element: <Placeholder title="数据库设计" /> },
+          {
+            path: "designer",
+            element: <RoleRoute allowedRoles={[Role.ADMIN, Role.DESIGNER]} />,
+            children: [{ index: true, element: <Placeholder title="数据库设计" /> }],
+          },
           { path: "manager", element: <Placeholder title="数据库管理" /> },
         ],
       },
