@@ -27,23 +27,28 @@ jobs:
       - name: Sync dependencies
         run: uv sync --frozen --extra lint
 
+      - name: Install system dependencies for MySQL/PostgreSQL drivers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libpq-dev default-libmysqlclient-dev pkg-config
+
       - name: Ruff check
-        run: uv run ruff check src tests
+        run: uv run ruff check backend tests
 
       - name: Ruff format check
-        run: uv run ruff format --check src tests
+        run: uv run ruff format --check backend tests
 
       - name: Pyrefly check
         run: uv run pyrefly check
 
   test:
-    name: Test (Python 3.8 & 3.14)
+    name: Test (Python 3.10 & 3.13)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.8", "3.14"]
+        python-version: ["3.10", "3.13"]
     steps:
       - uses: actions/checkout@v5
 
@@ -56,8 +61,13 @@ jobs:
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
 
+      - name: Install system dependencies for MySQL/PostgreSQL drivers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libpq-dev default-libmysqlclient-dev pkg-config
+
       - name: Sync dependencies
         run: uv sync --frozen --extra test --python ${{ matrix.python-version }}
 
       - name: Run tests
-        run: uv run pytest -m "not slow" --cov=rdbase --cov-fail-under=95 --cov-report=term-missing
+        run: uv run pytest -m "not slow" --cov=backend --cov-fail-under=95 --cov-report=term-missing

@@ -1,8 +1,14 @@
 [run]
 branch = true
 concurrency = thread
-omit = tests/*
-source = rdbase
+omit =
+    tests/*
+    backend/**/migrations/*
+    backend/manage.py
+    backend/rdbase/settings/*
+    backend/rdbase/asgi.py
+    backend/rdbase/wsgi.py
+source = backend
 
 [report]
 fail_under = 95

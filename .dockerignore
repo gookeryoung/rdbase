@@ -41,6 +41,16 @@ env
 # 文档（按需保留）
 docs
 
+# 前端依赖与构建产物（P5 多阶段构建时单独处理）
+frontend/node_modules
+frontend/dist
+frontend/.vite
+
+# Django 运行时产物
+backend/db
+backend/staticfiles
+backend/media
+
 # 系统文件
 .DS_Store
 Thumbs.db

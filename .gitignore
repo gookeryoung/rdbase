@@ -33,3 +33,14 @@ coverage.xml
 # Sphinx 文档构建输出
 docs/_build/
 .trae/ref
+
+# Django 运行时产物
+backend/db/
+backend/staticfiles/
+backend/media/
+
+# 前端依赖与构建产物
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/*.local

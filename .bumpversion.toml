@@ -13,6 +13,6 @@ search = '(version\s+=\s+)"{current_version}"'
 replace = '\1"{new_version}"'
 
 [[tool.bumpversion.files]]
-filename = "src/rdbase/__init__.py"
+filename = "backend/rdbase/__init__.py"
 search = '__version__ = "{current_version}"'
 replace = '__version__ = "{new_version}"'
