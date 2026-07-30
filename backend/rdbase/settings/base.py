@@ -30,7 +30,7 @@ INSTALLED_APPS = [
     "corsheaders",
     # 本地应用（后续阶段按需启用）：
     "apps.accounts",
-    # "apps.datasources",
+    "apps.datasources",
     # "apps.designer",
     # "apps.manager",
     # "apps.audit",

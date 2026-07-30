@@ -40,3 +40,56 @@ export interface LoginResponse {
   access: string;
   user: User;
 }
+
+// 数据源引擎类型
+export type EngineType = "mysql" | "postgresql" | "sqlite";
+
+// 数据源响应（不含密码）
+export interface DataSource {
+  id: number;
+  name: string;
+  engine: EngineType;
+  host: string;
+  port: number | null;
+  database: string;
+  username: string;
+  group: string;
+  tags: string[];
+  is_active: boolean;
+  created_at: string; // ISO 时间
+  updated_at: string;
+}
+
+// 创建数据源请求
+export interface DataSourceCreate {
+  name: string;
+  engine: EngineType;
+  host?: string;
+  port?: number | null;
+  database: string;
+  username?: string;
+  password?: string; // 明文，服务端加密
+  group?: string; // 默认 "default"
+  tags?: string[];
+}
+
+// 更新数据源请求（所有字段可选）
+export interface DataSourceUpdate extends Partial<DataSourceCreate> {
+  is_active?: boolean;
+}
+
+// 测试连接请求（临时配置）
+export interface TestConnection {
+  engine: EngineType;
+  host?: string;
+  port?: number | null;
+  database: string;
+  username?: string;
+  password?: string;
+}
+
+// 测试连接响应
+export interface TestConnectionResult {
+  ok: boolean;
+  detail: string;
+}
