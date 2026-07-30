@@ -31,7 +31,7 @@ INSTALLED_APPS = [
     # 本地应用（后续阶段按需启用）：
     "apps.accounts",
     "apps.datasources",
-    # "apps.designer",
+    "apps.designer",
     # "apps.manager",
     # "apps.audit",
 ]

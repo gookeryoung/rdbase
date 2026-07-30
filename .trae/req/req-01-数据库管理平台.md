@@ -111,27 +111,27 @@ rdbase/
 初始确认为整个项目，按阶段（里程碑）推进，阶段间自动衔接。每阶段按规则 01 走「收集→计划→实现→测试→文档→验证」六步迭代循环，默认每阶段 3~5 轮迭代。
 
 ### P0 架构搭建（里程碑：可运行的空壳 + CI 通过）
-- [ ] 01 切换后端依赖：移除 fastapi/uvicorn，引入 django/django-ninja/sqlalchemy/uvicorn，重构 pyproject.toml 与工具链配置
-- [ ] 02 Django 项目初始化：项目包、分环境 settings、ASGI/WSGI、根 URL，django-ninja API 挂载
-- [ ] 03 React 前端初始化：Vite + React + TS + Ant Design + Zustand + axios，登录页占位、路由骨架
-- [ ] 04 前后端联调基础：CORS、代理（vite proxy）、健康检查接口、登录接口占位
-- [ ] 05 迁移 src/rdbase：删除原 FastAPI app.py，平台元信息迁入 backend，更新 Makefile/CI
+- [x] 01 切换后端依赖：移除 fastapi/uvicorn，引入 django/django-ninja/sqlalchemy/uvicorn，重构 pyproject.toml 与工具链配置
+- [x] 02 Django 项目初始化：项目包、分环境 settings、ASGI/WSGI、根 URL，django-ninja API 挂载
+- [x] 03 React 前端初始化：Vite + React + TS + Ant Design + Zustand + axios，登录页占位、路由骨架
+- [x] 04 前后端联调基础：CORS、代理（vite proxy）、健康检查接口、登录接口占位
+- [x] 05 迁移 src/rdbase：删除原 FastAPI app.py，平台元信息迁入 backend，更新 Makefile/CI
 
 ### P1 用户与权限（里程碑：可登录、RBAC 生效）
-- [ ] 06 用户模型与认证：扩展 User 模型、注册/登录/登出/刷新 token 接口、HttpOnly Cookie
-- [ ] 07 RBAC 权限：角色模型、权限装饰器、前端路由守卫与按钮级权限
-- [ ] 08 用户管理界面：管理员列表/启用禁用/重置密码、个人中心改密
-- [ ] 09 P1 测试与文档：accounts 模块单元/接口测试、API 文档（django-ninja OpenAPI）、用户手册
+- [x] 06 用户模型与认证：扩展 User 模型、注册/登录/登出/刷新 token 接口、HttpOnly Cookie
+- [x] 07 RBAC 权限：角色模型、权限装饰器、前端路由守卫与按钮级权限
+- [x] 08 用户管理界面：管理员列表/启用禁用/重置密码、个人中心改密
+- [x] 09 P1 测试与文档：accounts 模块单元/接口测试、API 文档（django-ninja OpenAPI）、用户手册
 
 ### P2 数据源管理（里程碑：可连接外部数据库）
-- [ ] 10 数据源模型与加密：DataSource 模型、Fernet 加密、连接配置 Schema
-- [ ] 11 SQLAlchemy 连接引擎池：按数据源动态创建引擎、连接测试、健康检查
-- [ ] 12 数据源 CRUD 接口与界面：列表/新增/编辑/删除/测试连接、分组标签
-- [ ] 13 P2 测试与文档：datasources 模块测试、加密/连接池 Mock 策略、文档更新
+- [x] 10 数据源模型与加密：DataSource 模型、Fernet 加密、连接配置 Schema
+- [x] 11 SQLAlchemy 连接引擎池：按数据源动态创建引擎、连接测试、健康检查
+- [x] 12 数据源 CRUD 接口与界面：列表/新增/编辑/删除/测试连接、分组标签
+- [x] 13 P2 测试与文档：datasources 模块测试、加密/连接池 Mock 策略、文档更新
 
 ### P3 数据库设计（里程碑：可视化建表与 ER 图）
-- [ ] 14 Schema 反射与元数据：库/Schema/表/字段元数据读取接口（基于 SQLAlchemy inspect）
-- [ ] 15 表设计器后端：字段 Schema、DDL 生成器（CREATE/ALTER）、设计草稿模型与版本
+- [x] 14 Schema 反射与元数据：库/Schema/表/字段元数据读取接口（基于 SQLAlchemy inspect）
+- [x] 15 表设计器后端：字段 Schema、DDL 生成器（CREATE/ALTER）、设计草稿模型与版本
 - [ ] 16 表设计器前端：字段编辑表格、类型选择、索引面板、DDL 预览
 - [ ] 17 关系设计与 ER 图：外键/多对多配置、React Flow ER 图、连线同步 DDL
 - [ ] 18 P3 测试与文档：designer 模块测试、DDL 生成器多方言测试、文档更新
