@@ -7,6 +7,7 @@ import {
   TableOutlined,
   LogoutOutlined,
   UserOutlined,
+  TeamOutlined,
 } from "@ant-design/icons";
 import { Outlet, useNavigate, useLocation } from "react-router-dom";
 import { useAuthStore } from "@/store/auth";
@@ -25,7 +26,7 @@ interface MenuItem {
   roles?: Role[];
 }
 
-// 侧边栏菜单项配置（数据库设计仅 designer/admin 可见）
+// 侧边栏菜单项配置（数据库设计仅 designer/admin 可见；用户管理仅 admin 可见）
 const menuItems: MenuItem[] = [
   { key: "/", icon: <DashboardOutlined />, label: "仪表盘" },
   { key: "/datasources", icon: <DatabaseOutlined />, label: "数据源" },
@@ -36,6 +37,13 @@ const menuItems: MenuItem[] = [
     roles: [Role.ADMIN, Role.DESIGNER],
   },
   { key: "/manager", icon: <TableOutlined />, label: "数据库管理" },
+  {
+    key: "/users",
+    icon: <TeamOutlined />,
+    label: "用户管理",
+    roles: [Role.ADMIN],
+  },
+  { key: "/profile", icon: <UserOutlined />, label: "个人中心" },
 ];
 
 // 按用户角色过滤菜单项，返回 antd Menu 接受的结构

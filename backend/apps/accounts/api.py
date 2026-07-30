@@ -18,7 +18,7 @@ from .jwt import (
     decode_token,
 )
 from .models import Role, User
-from .schemas import LoginIn, RefreshOut, RegisterIn, TokenOut, UserOut
+from .schemas import LoginIn, MessageOut, PasswordChangeIn, RefreshOut, RegisterIn, TokenOut, UserOut
 
 router = Router(tags=["auth"])
 
@@ -121,3 +121,14 @@ def me(request: HttpRequest) -> HttpResponse:
     user = cast(User, getattr(request, "auth", None))
     body = UserOut(**_user_dict(user)).model_dump()
     return JsonResponse(body)
+
+
+@router.post("/change-password", response={200: MessageOut}, auth=JWTAuth())
+def change_password(request: HttpRequest, payload: PasswordChangeIn) -> HttpResponse:
+    """个人中心修改密码：校验旧密码后设置新密码."""
+    user = cast(User, getattr(request, "auth", None))
+    if not user.check_password(payload.old_password):
+        raise HttpError(400, "旧密码错误")
+    user.set_password(payload.new_password)
+    user.save()
+    return JsonResponse({"detail": "密码已修改"})

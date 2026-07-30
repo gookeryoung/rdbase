@@ -16,3 +16,15 @@ export const refresh = (): Promise<{ access: string }> =>
 // 获取当前用户：GET /auth/me
 export const fetchMe = (): Promise<User> =>
   client.get<User>("/auth/me").then((res) => res.data);
+
+// 修改当前用户密码：POST /auth/change-password
+export const changePassword = (
+  oldPassword: string,
+  newPassword: string
+): Promise<{ detail: string }> =>
+  client
+    .post<{ detail: string }>("/auth/change-password", {
+      old_password: oldPassword,
+      new_password: newPassword,
+    })
+    .then((res) => res.data);

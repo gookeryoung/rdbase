@@ -1,6 +1,8 @@
 import type { RouteObject } from "react-router-dom";
 import Login from "@/pages/Login";
 import Dashboard from "@/pages/Dashboard";
+import Users from "@/pages/Users";
+import Profile from "@/pages/Profile";
 import MainLayout from "@/layouts/MainLayout";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import RoleRoute from "@/components/RoleRoute";
@@ -39,6 +41,12 @@ export const routes: RouteObject[] = [
             children: [{ index: true, element: <Placeholder title="数据库设计" /> }],
           },
           { path: "manager", element: <Placeholder title="数据库管理" /> },
+          {
+            path: "users",
+            element: <RoleRoute allowedRoles={[Role.ADMIN]} />,
+            children: [{ index: true, element: <Users /> }],
+          },
+          { path: "profile", element: <Profile /> },
         ],
       },
     ],

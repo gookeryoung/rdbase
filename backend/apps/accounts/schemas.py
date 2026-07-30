@@ -47,3 +47,22 @@ class MessageOut(Schema):
     """通用消息响应."""
 
     detail: str
+
+
+class PasswordResetIn(Schema):
+    """管理员重置密码请求."""
+
+    new_password: str
+
+
+class PasswordChangeIn(Schema):
+    """个人中心修改密码请求."""
+
+    old_password: str
+    new_password: str
+
+
+class RoleUpdateIn(Schema):
+    """修改用户角色请求."""
+
+    role: str
