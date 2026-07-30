@@ -1,4 +1,4 @@
-"""manager 数据浏览接口测试.
+"""manager 数据浏览与 CRUD 接口测试.
 
 通过临时文件 SQLite 数据源验证 rows API 端到端行为。
 """
@@ -27,6 +27,36 @@ def _get(client: Client, url: str, headers: dict[str, str] | None = None) -> Htt
     """发送 GET 请求."""
     h = headers or {}
     return cast(HttpResponse, client.get(url, **h))
+
+
+def _post(
+    client: Client,
+    url: str,
+    body: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+) -> HttpResponse:
+    """发送 POST 请求."""
+    h = headers or {}
+    data = json.dumps(body) if body is not None else None
+    return cast(HttpResponse, client.post(url, data=data, content_type="application/json", **h))
+
+
+def _patch(
+    client: Client,
+    url: str,
+    body: dict[str, Any],
+    headers: dict[str, str] | None = None,
+) -> HttpResponse:
+    """发送 PATCH 请求."""
+    h = headers or {}
+    data = json.dumps(body)
+    return cast(HttpResponse, client.patch(url, data=data, content_type="application/json", **h))
+
+
+def _delete(client: Client, url: str, headers: dict[str, str] | None = None) -> HttpResponse:
+    """发送 DELETE 请求."""
+    h = headers or {}
+    return cast(HttpResponse, client.delete(url, **h))
 
 
 def _auth(user: User) -> dict[str, str]:
@@ -69,6 +99,13 @@ def _make_sqlite_file_ds(tmp_path: Path, name: str = "sqlite-test") -> DataSourc
         )
         # 创建一张空表，覆盖无数据时 columns 回退分支
         conn.execute(text("CREATE TABLE empty_table (id INTEGER PRIMARY KEY, label VARCHAR(50))"))
+        # 多列主键表（覆盖 P4-2 多列主键 CRUD 路径）
+        conn.execute(
+            text(
+                "CREATE TABLE composite (a INTEGER NOT NULL, b INTEGER NOT NULL, name VARCHAR(50), PRIMARY KEY (a, b))"
+            )
+        )
+        conn.execute(text("INSERT INTO composite (a, b, name) VALUES (1, 100, 'first')"))
     engine.dispose()
     return DataSource.objects.create(
         name=name,
@@ -361,3 +398,549 @@ def test_list_rows_empty_table_reflect_error_returns_empty_columns(
     assert body["items"] == []
     assert body["total"] == 0
     assert body["columns"] == []
+
+
+# ---------- P4-2 行 CRUD：POST 新增 ----------
+
+
+@pytest.mark.django_db
+def test_create_row_viewer_returns_403(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """viewer 新增行应返回 403."""
+    user = make_user(role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/tables/users/rows",
+        body={"values": {"name": "X", "email": "x@example.com", "age": 1}},
+        headers=_auth(user),
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.django_db
+def test_create_row_without_token_returns_401(tmp_path: Path) -> None:
+    """未认证访问应返回 401."""
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/tables/users/rows",
+        body={"values": {"name": "X"}},
+    )
+    assert response.status_code == 401
+
+
+@pytest.mark.django_db
+def test_create_row_designer_returns_201(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """designer 新增行应返回 201 且主键回填."""
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/tables/users/rows",
+        body={"values": {"name": "Dan", "email": "dan@example.com", "age": 22}},
+        headers=_auth(user),
+    )
+    assert response.status_code == 201
+    body = json.loads(response.content)
+    assert body["row"]["name"] == "Dan"
+    assert body["row"]["email"] == "dan@example.com"
+    assert body["row"]["age"] == 22
+    assert isinstance(body["row"]["id"], int)
+    assert body["row"]["id"] > 0
+
+
+@pytest.mark.django_db
+def test_create_row_admin_returns_201(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """admin 新增行应返回 201."""
+    user = make_user(role=Role.ADMIN)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/tables/users/rows",
+        body={"values": {"name": "Admin", "email": None, "age": 0}},
+        headers=_auth(user),
+    )
+    assert response.status_code == 201
+
+
+@pytest.mark.django_db
+def test_create_row_unknown_datasource_returns_404(make_user: Callable[..., User]) -> None:
+    """不存在的数据源应返回 404."""
+    user = make_user(role=Role.DESIGNER)
+    client = Client()
+    response = _post(
+        client,
+        "/api/v1/manager/99999/tables/users/rows",
+        body={"values": {"name": "X"}},
+        headers=_auth(user),
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_create_row_invalid_column_returns_400(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """非法列名应返回 400."""
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/tables/users/rows",
+        body={"values": {"nonexistent": "x"}},
+        headers=_auth(user),
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_create_row_composite_pk_returns_201(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """多列主键表显式提供主键列应返回 201."""
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/tables/composite/rows",
+        body={"values": {"a": 2, "b": 200, "name": "second"}},
+        headers=_auth(user),
+    )
+    assert response.status_code == 201
+    body = json.loads(response.content)
+    assert body["row"]["a"] == 2
+    assert body["row"]["b"] == 200
+    assert body["row"]["name"] == "second"
+
+
+# ---------- P4-2 行 CRUD：GET 单行 ----------
+
+
+@pytest.mark.django_db
+def test_retrieve_row_returns_200(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """按主键查单行应返回 200."""
+    user = make_user()  # viewer 可读
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    pk_json = json.dumps({"id": 1})
+    url = f"/api/v1/manager/{ds.pk}/tables/users/rows/pk?pk={quote(pk_json)}"
+    response = _get(client, url, _auth(user))
+    assert response.status_code == 200
+    body = json.loads(response.content)
+    assert body["row"]["id"] == 1
+    assert body["row"]["name"] == "Alice"
+
+
+@pytest.mark.django_db
+def test_retrieve_row_not_exists_returns_404(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """行不存在应返回 404."""
+    user = make_user()
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    pk_json = json.dumps({"id": 9999})
+    url = f"/api/v1/manager/{ds.pk}/tables/users/rows/pk?pk={quote(pk_json)}"
+    response = _get(client, url, _auth(user))
+    assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_retrieve_row_missing_pk_returns_400(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """缺 pk 参数应返回 400."""
+    user = make_user()
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    url = f"/api/v1/manager/{ds.pk}/tables/users/rows/pk"
+    response = _get(client, url, _auth(user))
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_retrieve_row_invalid_pk_json_returns_400(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """pk 非法 JSON 应返回 400."""
+    user = make_user()
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    url = f"/api/v1/manager/{ds.pk}/tables/users/rows/pk?pk=not-a-json"
+    response = _get(client, url, _auth(user))
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_retrieve_row_pk_not_object_returns_400(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """pk 为合法 JSON 但非对象应返回 400."""
+    user = make_user()
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    pk_json = json.dumps([1, 2, 3])
+    url = f"/api/v1/manager/{ds.pk}/tables/users/rows/pk?pk={quote(pk_json)}"
+    response = _get(client, url, _auth(user))
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_retrieve_row_composite_pk_returns_200(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """多列主键查单行应返回 200."""
+    user = make_user()
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    pk_json = json.dumps({"a": 1, "b": 100})
+    url = f"/api/v1/manager/{ds.pk}/tables/composite/rows/pk?pk={quote(pk_json)}"
+    response = _get(client, url, _auth(user))
+    assert response.status_code == 200
+    body = json.loads(response.content)
+    assert body["row"]["name"] == "first"
+
+
+@pytest.mark.django_db
+def test_retrieve_row_unknown_datasource_returns_404(make_user: Callable[..., User]) -> None:
+    """不存在的数据源应返回 404."""
+    user = make_user()
+    client = Client()
+    pk_json = json.dumps({"id": 1})
+    url = f"/api/v1/manager/99999/tables/users/rows/pk?pk={quote(pk_json)}"
+    response = _get(client, url, _auth(user))
+    assert response.status_code == 404
+
+
+# ---------- P4-2 行 CRUD：PATCH 更新 ----------
+
+
+@pytest.mark.django_db
+def test_update_row_viewer_returns_403(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """viewer 更新行应返回 403."""
+    user = make_user(role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    pk_json = json.dumps({"id": 1})
+    url = f"/api/v1/manager/{ds.pk}/tables/users/rows/pk?pk={quote(pk_json)}"
+    response = _patch(
+        client,
+        url,
+        body={"values": {"name": "Alice2"}},
+        headers=_auth(user),
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.django_db
+def test_update_row_designer_returns_200(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """designer 更新行应返回 200 且返回更新后的行."""
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    pk_json = json.dumps({"id": 1})
+    url = f"/api/v1/manager/{ds.pk}/tables/users/rows/pk?pk={quote(pk_json)}"
+    response = _patch(
+        client,
+        url,
+        body={"values": {"name": "Alice2", "age": 31}},
+        headers=_auth(user),
+    )
+    assert response.status_code == 200
+    body = json.loads(response.content)
+    assert body["row"]["id"] == 1
+    assert body["row"]["name"] == "Alice2"
+    assert body["row"]["age"] == 31
+    # email 应保持不变
+    assert body["row"]["email"] == "alice@example.com"
+
+
+@pytest.mark.django_db
+def test_update_row_not_exists_returns_404(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """行不存在应返回 404（乐观锁冲突）."""
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    pk_json = json.dumps({"id": 9999})
+    url = f"/api/v1/manager/{ds.pk}/tables/users/rows/pk?pk={quote(pk_json)}"
+    response = _patch(
+        client,
+        url,
+        body={"values": {"name": "ghost"}},
+        headers=_auth(user),
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_update_row_pk_in_values_returns_400(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """主键列出现在 values 中应返回 400."""
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    pk_json = json.dumps({"id": 1})
+    url = f"/api/v1/manager/{ds.pk}/tables/users/rows/pk?pk={quote(pk_json)}"
+    response = _patch(
+        client,
+        url,
+        body={"values": {"id": 2, "name": "x"}},
+        headers=_auth(user),
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_update_row_missing_pk_returns_400(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """缺 pk 参数应返回 400."""
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    url = f"/api/v1/manager/{ds.pk}/tables/users/rows/pk"
+    response = _patch(
+        client,
+        url,
+        body={"values": {"name": "x"}},
+        headers=_auth(user),
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_update_row_composite_pk_returns_200(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """多列主键更新应返回 200."""
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    pk_json = json.dumps({"a": 1, "b": 100})
+    url = f"/api/v1/manager/{ds.pk}/tables/composite/rows/pk?pk={quote(pk_json)}"
+    response = _patch(
+        client,
+        url,
+        body={"values": {"name": "updated"}},
+        headers=_auth(user),
+    )
+    assert response.status_code == 200
+    body = json.loads(response.content)
+    assert body["row"]["name"] == "updated"
+
+
+# ---------- P4-2 行 CRUD：DELETE 删除 ----------
+
+
+@pytest.mark.django_db
+def test_delete_row_viewer_returns_403(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """viewer 删除行应返回 403."""
+    user = make_user(role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    pk_json = json.dumps({"id": 1})
+    url = f"/api/v1/manager/{ds.pk}/tables/users/rows/pk?pk={quote(pk_json)}"
+    response = _delete(client, url, _auth(user))
+    assert response.status_code == 403
+
+
+@pytest.mark.django_db
+def test_delete_row_designer_returns_200(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """designer 删除行应返回 200."""
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    pk_json = json.dumps({"id": 1})
+    url = f"/api/v1/manager/{ds.pk}/tables/users/rows/pk?pk={quote(pk_json)}"
+    response = _delete(client, url, _auth(user))
+    assert response.status_code == 200
+    body = json.loads(response.content)
+    assert body["detail"] == "已删除"
+    # 数据应已删除
+    rows_url = f"/api/v1/manager/{ds.pk}/tables/users/rows"
+    rows_resp = _get(client, rows_url, _auth(user))
+    rows_body = json.loads(rows_resp.content)
+    assert rows_body["total"] == 2
+    assert all(r["id"] != 1 for r in rows_body["items"])
+
+
+@pytest.mark.django_db
+def test_delete_row_not_exists_returns_404(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """行不存在应返回 404（乐观锁冲突）."""
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    pk_json = json.dumps({"id": 9999})
+    url = f"/api/v1/manager/{ds.pk}/tables/users/rows/pk?pk={quote(pk_json)}"
+    response = _delete(client, url, _auth(user))
+    assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_delete_row_missing_pk_returns_400(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """缺 pk 参数应返回 400."""
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    url = f"/api/v1/manager/{ds.pk}/tables/users/rows/pk"
+    response = _delete(client, url, _auth(user))
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_delete_row_composite_pk_returns_200(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """多列主键删除应返回 200."""
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    pk_json = json.dumps({"a": 1, "b": 100})
+    url = f"/api/v1/manager/{ds.pk}/tables/composite/rows/pk?pk={quote(pk_json)}"
+    response = _delete(client, url, _auth(user))
+    assert response.status_code == 200
+    body = json.loads(response.content)
+    assert body["detail"] == "已删除"
+
+
+@pytest.mark.django_db
+def test_create_row_sqlalchemy_error_returns_400(
+    make_user: Callable[..., User], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """新增过程中抛 SQLAlchemyError 应返回 400."""
+
+    def _raise_sqlalchemy_error(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        raise SQLAlchemyError("connection lost")
+
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    monkeypatch.setattr("apps.manager.api.insert_row", _raise_sqlalchemy_error)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/tables/users/rows",
+        body={"values": {"name": "X"}},
+        headers=_auth(user),
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_update_row_sqlalchemy_error_returns_400(
+    make_user: Callable[..., User], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """更新过程中抛 SQLAlchemyError 应返回 400."""
+
+    def _raise_sqlalchemy_error(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        raise SQLAlchemyError("connection lost")
+
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    monkeypatch.setattr("apps.manager.api.update_row", _raise_sqlalchemy_error)
+    client = Client()
+    pk_json = json.dumps({"id": 1})
+    url = f"/api/v1/manager/{ds.pk}/tables/users/rows/pk?pk={quote(pk_json)}"
+    response = _patch(
+        client,
+        url,
+        body={"values": {"name": "x"}},
+        headers=_auth(user),
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_delete_row_sqlalchemy_error_returns_400(
+    make_user: Callable[..., User], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """删除过程中抛 SQLAlchemyError 应返回 400."""
+
+    def _raise_sqlalchemy_error(*_args: object, **_kwargs: object) -> None:
+        raise SQLAlchemyError("connection lost")
+
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    monkeypatch.setattr("apps.manager.api.delete_row", _raise_sqlalchemy_error)
+    client = Client()
+    pk_json = json.dumps({"id": 1})
+    url = f"/api/v1/manager/{ds.pk}/tables/users/rows/pk?pk={quote(pk_json)}"
+    response = _delete(client, url, _auth(user))
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_retrieve_row_sqlalchemy_error_returns_400(
+    make_user: Callable[..., User], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """查询过程中抛 SQLAlchemyError 应返回 400."""
+
+    def _raise_sqlalchemy_error(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        raise SQLAlchemyError("connection lost")
+
+    user = make_user()
+    ds = _make_sqlite_file_ds(tmp_path)
+    monkeypatch.setattr("apps.manager.api.get_row", _raise_sqlalchemy_error)
+    client = Client()
+    pk_json = json.dumps({"id": 1})
+    url = f"/api/v1/manager/{ds.pk}/tables/users/rows/pk?pk={quote(pk_json)}"
+    response = _get(client, url, _auth(user))
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_retrieve_row_pk_empty_object_returns_400(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """pk 为空对象 {} 应返回 400."""
+    user = make_user()
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    pk_json = json.dumps({})
+    url = f"/api/v1/manager/{ds.pk}/tables/users/rows/pk?pk={quote(pk_json)}"
+    response = _get(client, url, _auth(user))
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_retrieve_row_query_error_returns_400(
+    make_user: Callable[..., User], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """get_row 抛 QueryError 时应返回 400（覆盖 retrieve_row 的 QueryError 分支）."""
+
+    def _raise_query_error(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        raise QueryError("表不存在")
+
+    user = make_user()
+    ds = _make_sqlite_file_ds(tmp_path)
+    monkeypatch.setattr("apps.manager.api.get_row", _raise_query_error)
+    client = Client()
+    pk_json = json.dumps({"id": 1})
+    url = f"/api/v1/manager/{ds.pk}/tables/users/rows/pk?pk={quote(pk_json)}"
+    response = _get(client, url, _auth(user))
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_delete_row_query_error_returns_400(
+    make_user: Callable[..., User], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """delete_row 抛非「不存在」QueryError 时应返回 400（覆盖 delete 分支 400 路径）."""
+
+    def _raise_query_error(*_args: object, **_kwargs: object) -> None:
+        raise QueryError("主键不能为空")
+
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    monkeypatch.setattr("apps.manager.api.delete_row", _raise_query_error)
+    client = Client()
+    pk_json = json.dumps({"id": 1})
+    url = f"/api/v1/manager/{ds.pk}/tables/users/rows/pk?pk={quote(pk_json)}"
+    response = _delete(client, url, _auth(user))
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_update_row_query_error_returns_400(
+    make_user: Callable[..., User], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """update_row 抛非「不存在」QueryError 时应返回 400（覆盖 update 分支 400 路径）."""
+
+    def _raise_query_error(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        raise QueryError("主键不能为空")
+
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    monkeypatch.setattr("apps.manager.api.update_row", _raise_query_error)
+    client = Client()
+    pk_json = json.dumps({"id": 1})
+    url = f"/api/v1/manager/{ds.pk}/tables/users/rows/pk?pk={quote(pk_json)}"
+    response = _patch(
+        client,
+        url,
+        body={"values": {"name": "x"}},
+        headers=_auth(user),
+    )
+    assert response.status_code == 400

@@ -1,6 +1,6 @@
-"""manager 数据查询模块单元测试.
+"""manager 数据查询与 CRUD 模块单元测试.
 
-使用 SQLite 内存库 + StaticPool（单连接，确保表跨连接可见）建表后验证查询结果。
+使用 SQLite 内存库 + StaticPool（单连接，确保表跨连接可见）建表后验证查询与 CRUD 结果。
 """
 
 from __future__ import annotations
@@ -15,8 +15,13 @@ from apps.manager.query import (
     _quote_ident,
     _resolve_schema,
     count_table_rows,
+    delete_row,
     get_column_names,
+    get_pk_columns,
+    get_row,
+    insert_row,
     query_table_rows,
+    update_row,
 )
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
@@ -518,6 +523,696 @@ def test_count_table_rows_invalid_filter_column_raises() -> None:
                 "users",
                 schema=None,
                 filters={"nonexistent": {"op": "eq", "val": 1}},
+            )
+    finally:
+        engine.dispose()
+
+
+# ---------- P4-2 行 CRUD ----------
+
+
+def _setup_multi_pk_table(engine: Engine) -> None:
+    """创建多列主键表并插入数据."""
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "CREATE TABLE composite (a INTEGER NOT NULL, b INTEGER NOT NULL, name VARCHAR(50), PRIMARY KEY (a, b))"
+            )
+        )
+        conn.execute(text("INSERT INTO composite (a, b, name) VALUES (1, 100, 'first'), (2, 200, 'second')"))
+
+
+def _setup_no_pk_table(engine: Engine) -> None:
+    """创建无主键表."""
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE no_pk (label VARCHAR(50))"))
+        conn.execute(text("INSERT INTO no_pk (label) VALUES ('x'), ('y')"))
+
+
+# ---------- get_pk_columns ----------
+
+
+def test_get_pk_columns_single() -> None:
+    """单列主键表应返回 [id]."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        assert get_pk_columns(engine, "users", schema=None) == ["id"]
+    finally:
+        engine.dispose()
+
+
+def test_get_pk_columns_composite() -> None:
+    """多列主键表应返回 [a, b]."""
+    engine = _make_memory_engine()
+    try:
+        _setup_multi_pk_table(engine)
+        assert get_pk_columns(engine, "composite", schema=None) == ["a", "b"]
+    finally:
+        engine.dispose()
+
+
+def test_get_pk_columns_no_pk() -> None:
+    """无主键表应返回空列表."""
+    engine = _make_memory_engine()
+    try:
+        _setup_no_pk_table(engine)
+        assert get_pk_columns(engine, "no_pk", schema=None) == []
+    finally:
+        engine.dispose()
+
+
+def test_get_pk_columns_unknown_table_raises() -> None:
+    """不存在的表应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        with pytest.raises(QueryError):
+            get_pk_columns(engine, "nonexistent", schema=None)
+    finally:
+        engine.dispose()
+
+
+# ---------- insert_row ----------
+
+
+def test_insert_row_with_autoincrement_pk() -> None:
+    """自增主键场景应回填主键并返回完整行."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        row = insert_row(
+            engine,
+            "users",
+            schema=None,
+            values={"name": "Frank", "email": "frank@example.com", "age": 40},
+        )
+        # 主键 id 应被回填（>5，因为已有 5 行）
+        assert row["id"] > 5
+        assert row["name"] == "Frank"
+        assert row["email"] == "frank@example.com"
+        assert row["age"] == 40
+        # 数据应已写入
+        _rows, total = query_table_rows(engine, "users", schema=None)
+        assert total == 6
+    finally:
+        engine.dispose()
+
+
+def test_insert_row_with_explicit_pk() -> None:
+    """显式提供主键值时应使用该值."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        row = insert_row(
+            engine,
+            "users",
+            schema=None,
+            values={"id": 100, "name": "Greg", "email": None, "age": 50},
+        )
+        assert row["id"] == 100
+        assert row["name"] == "Greg"
+    finally:
+        engine.dispose()
+
+
+def test_insert_row_composite_pk_explicit() -> None:
+    """多列主键表需显式提供全部主键列."""
+    engine = _make_memory_engine()
+    try:
+        _setup_multi_pk_table(engine)
+        row = insert_row(
+            engine,
+            "composite",
+            schema=None,
+            values={"a": 3, "b": 300, "name": "third"},
+        )
+        assert row["a"] == 3
+        assert row["b"] == 300
+        assert row["name"] == "third"
+    finally:
+        engine.dispose()
+
+
+def test_insert_row_empty_values_raises() -> None:
+    """values 为空应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        with pytest.raises(QueryError):
+            insert_row(engine, "users", schema=None, values={})
+    finally:
+        engine.dispose()
+
+
+def test_insert_row_invalid_column_raises() -> None:
+    """非法列名应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        with pytest.raises(QueryError):
+            insert_row(
+                engine,
+                "users",
+                schema=None,
+                values={"nonexistent": "x"},
+            )
+    finally:
+        engine.dispose()
+
+
+def test_insert_row_unknown_table_raises() -> None:
+    """不存在的表应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        with pytest.raises(QueryError):
+            insert_row(
+                engine,
+                "nonexistent",
+                schema=None,
+                values={"a": 1},
+            )
+    finally:
+        engine.dispose()
+
+
+def test_insert_row_no_pk_returns_values() -> None:
+    """无主键表应直接返回传入的 values."""
+    engine = _make_memory_engine()
+    try:
+        _setup_no_pk_table(engine)
+        row = insert_row(
+            engine,
+            "no_pk",
+            schema=None,
+            values={"label": "z"},
+        )
+        assert row == {"label": "z"}
+        # 数据应已写入
+        _rows, total = query_table_rows(engine, "no_pk", schema=None)
+        assert total == 3
+    finally:
+        engine.dispose()
+
+
+def test_insert_row_composite_pk_missing_raises() -> None:
+    """多列自增主键场景：未提供全部主键列且无法用 lastrowid 回填多列应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        _setup_multi_pk_table(engine)
+        with pytest.raises(QueryError):
+            # 只提供 a，缺 b，且 b 非自增（多列主键 lastrowid 无法定位单列）
+            insert_row(
+                engine,
+                "composite",
+                schema=None,
+                values={"a": 5, "name": "missing"},
+            )
+    finally:
+        engine.dispose()
+
+
+# ---------- update_row ----------
+
+
+def test_update_row_success() -> None:
+    """成功更新单行并返回更新后的行."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        row = update_row(
+            engine,
+            "users",
+            schema=None,
+            pk={"id": 1},
+            values={"name": "Alice2", "age": 31},
+        )
+        assert row["id"] == 1
+        assert row["name"] == "Alice2"
+        assert row["age"] == 31
+        # email 应保持不变
+        assert row["email"] == "alice@example.com"
+    finally:
+        engine.dispose()
+
+
+def test_update_row_composite_pk() -> None:
+    """多列主键表更新应支持."""
+    engine = _make_memory_engine()
+    try:
+        _setup_multi_pk_table(engine)
+        row = update_row(
+            engine,
+            "composite",
+            schema=None,
+            pk={"a": 1, "b": 100},
+            values={"name": "updated"},
+        )
+        assert row["a"] == 1
+        assert row["b"] == 100
+        assert row["name"] == "updated"
+    finally:
+        engine.dispose()
+
+
+def test_update_row_not_exists_raises() -> None:
+    """行不存在应抛 QueryError（乐观锁 0 行）."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        with pytest.raises(QueryError, match="不存在"):
+            update_row(
+                engine,
+                "users",
+                schema=None,
+                pk={"id": 9999},
+                values={"name": "ghost"},
+            )
+    finally:
+        engine.dispose()
+
+
+def test_update_row_empty_pk_raises() -> None:
+    """主键为空应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        with pytest.raises(QueryError):
+            update_row(
+                engine,
+                "users",
+                schema=None,
+                pk={},
+                values={"name": "x"},
+            )
+    finally:
+        engine.dispose()
+
+
+def test_update_row_empty_values_raises() -> None:
+    """values 为空应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        with pytest.raises(QueryError):
+            update_row(
+                engine,
+                "users",
+                schema=None,
+                pk={"id": 1},
+                values={},
+            )
+    finally:
+        engine.dispose()
+
+
+def test_update_row_invalid_pk_column_raises() -> None:
+    """非法主键列名应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        with pytest.raises(QueryError):
+            update_row(
+                engine,
+                "users",
+                schema=None,
+                pk={"nonexistent": 1},
+                values={"name": "x"},
+            )
+    finally:
+        engine.dispose()
+
+
+def test_update_row_invalid_value_column_raises() -> None:
+    """非法更新列名应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        with pytest.raises(QueryError):
+            update_row(
+                engine,
+                "users",
+                schema=None,
+                pk={"id": 1},
+                values={"nonexistent": "x"},
+            )
+    finally:
+        engine.dispose()
+
+
+def test_update_row_pk_in_values_raises() -> None:
+    """主键列出现在 values 中应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        with pytest.raises(QueryError, match="主键列"):
+            update_row(
+                engine,
+                "users",
+                schema=None,
+                pk={"id": 1},
+                values={"id": 2, "name": "x"},
+            )
+    finally:
+        engine.dispose()
+
+
+def test_update_row_no_pk_table_raises() -> None:
+    """无主键表更新应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        _setup_no_pk_table(engine)
+        with pytest.raises(QueryError, match="无主键"):
+            update_row(
+                engine,
+                "no_pk",
+                schema=None,
+                pk={"label": "x"},
+                values={"label": "y"},
+            )
+    finally:
+        engine.dispose()
+
+
+def test_update_row_pk_mismatch_raises() -> None:
+    """主键列不匹配应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        with pytest.raises(QueryError, match="不匹配"):
+            update_row(
+                engine,
+                "users",
+                schema=None,
+                pk={"id": 1, "name": "Alice"},
+                values={"age": 99},
+            )
+    finally:
+        engine.dispose()
+
+
+def test_update_row_composite_pk_partial_raises() -> None:
+    """多列主键只提供部分应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        _setup_multi_pk_table(engine)
+        with pytest.raises(QueryError, match="不匹配"):
+            update_row(
+                engine,
+                "composite",
+                schema=None,
+                pk={"a": 1},
+                values={"name": "x"},
+            )
+    finally:
+        engine.dispose()
+
+
+def test_update_row_unknown_table_raises() -> None:
+    """不存在的表应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        with pytest.raises(QueryError):
+            update_row(
+                engine,
+                "nonexistent",
+                schema=None,
+                pk={"id": 1},
+                values={"name": "x"},
+            )
+    finally:
+        engine.dispose()
+
+
+# ---------- delete_row ----------
+
+
+def test_delete_row_success() -> None:
+    """成功删除单行."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        delete_row(engine, "users", schema=None, pk={"id": 1})
+        rows, total = query_table_rows(engine, "users", schema=None)
+        assert total == 4
+        assert all(r["id"] != 1 for r in rows)
+    finally:
+        engine.dispose()
+
+
+def test_delete_row_composite_pk() -> None:
+    """多列主键表删除应支持."""
+    engine = _make_memory_engine()
+    try:
+        _setup_multi_pk_table(engine)
+        delete_row(engine, "composite", schema=None, pk={"a": 1, "b": 100})
+        rows, total = query_table_rows(engine, "composite", schema=None)
+        assert total == 1
+        assert rows[0]["a"] == 2
+    finally:
+        engine.dispose()
+
+
+def test_delete_row_not_exists_raises() -> None:
+    """行不存在应抛 QueryError（乐观锁 0 行）."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        with pytest.raises(QueryError, match="不存在"):
+            delete_row(engine, "users", schema=None, pk={"id": 9999})
+    finally:
+        engine.dispose()
+
+
+def test_delete_row_empty_pk_raises() -> None:
+    """主键为空应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        with pytest.raises(QueryError):
+            delete_row(engine, "users", schema=None, pk={})
+    finally:
+        engine.dispose()
+
+
+def test_delete_row_invalid_pk_column_raises() -> None:
+    """非法主键列名应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        with pytest.raises(QueryError):
+            delete_row(engine, "users", schema=None, pk={"nonexistent": 1})
+    finally:
+        engine.dispose()
+
+
+def test_delete_row_no_pk_table_raises() -> None:
+    """无主键表删除应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        _setup_no_pk_table(engine)
+        with pytest.raises(QueryError, match="无主键"):
+            delete_row(engine, "no_pk", schema=None, pk={"label": "x"})
+    finally:
+        engine.dispose()
+
+
+def test_delete_row_pk_mismatch_raises() -> None:
+    """主键列不匹配应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        with pytest.raises(QueryError, match="不匹配"):
+            delete_row(
+                engine,
+                "users",
+                schema=None,
+                pk={"id": 1, "name": "Alice"},
+            )
+    finally:
+        engine.dispose()
+
+
+def test_delete_row_unknown_table_raises() -> None:
+    """不存在的表应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        with pytest.raises(QueryError):
+            delete_row(engine, "nonexistent", schema=None, pk={"id": 1})
+    finally:
+        engine.dispose()
+
+
+# ---------- get_row ----------
+
+
+def test_get_row_success() -> None:
+    """按主键查单行应返回完整行."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        row = get_row(engine, "users", schema=None, pk={"id": 2})
+        assert row is not None
+        assert row["id"] == 2
+        assert row["name"] == "Bob"
+    finally:
+        engine.dispose()
+
+
+def test_get_row_not_exists_returns_none() -> None:
+    """行不存在应返回 None."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        assert get_row(engine, "users", schema=None, pk={"id": 9999}) is None
+    finally:
+        engine.dispose()
+
+
+def test_get_row_composite_pk() -> None:
+    """多列主键查单行应支持."""
+    engine = _make_memory_engine()
+    try:
+        _setup_multi_pk_table(engine)
+        row = get_row(engine, "composite", schema=None, pk={"a": 2, "b": 200})
+        assert row is not None
+        assert row["name"] == "second"
+    finally:
+        engine.dispose()
+
+
+def test_get_row_empty_pk_raises() -> None:
+    """主键为空应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        with pytest.raises(QueryError):
+            get_row(engine, "users", schema=None, pk={})
+    finally:
+        engine.dispose()
+
+
+def test_get_row_invalid_pk_column_raises() -> None:
+    """非法主键列名应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        with pytest.raises(QueryError):
+            get_row(engine, "users", schema=None, pk={"nonexistent": 1})
+    finally:
+        engine.dispose()
+
+
+def test_get_row_no_pk_table_raises() -> None:
+    """无主键表查询应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        _setup_no_pk_table(engine)
+        with pytest.raises(QueryError, match="无主键"):
+            get_row(engine, "no_pk", schema=None, pk={"label": "x"})
+    finally:
+        engine.dispose()
+
+
+def test_get_row_pk_mismatch_raises() -> None:
+    """主键列不匹配应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        with pytest.raises(QueryError, match="不匹配"):
+            get_row(engine, "users", schema=None, pk={"id": 1, "name": "Alice"})
+    finally:
+        engine.dispose()
+
+
+def test_get_row_unknown_table_raises() -> None:
+    """不存在的表应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        with pytest.raises(QueryError):
+            get_row(engine, "nonexistent", schema=None, pk={"id": 1})
+    finally:
+        engine.dispose()
+
+
+# ---------- insert_row / update_row 异常分支补充（覆盖 query.py:402/408/481）----------
+
+
+def test_insert_row_lastrowid_none_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """lastrowid 为 None（dialect 不支持自增回填）应抛 QueryError（覆盖 query.py:402）.
+
+    通过在 query 模块命名空间注入 ``getattr`` 替身，使 ``result.lastrowid`` 解析为 None，
+    触发单列自增主键无法回填的异常分支。
+    """
+    real_getattr = getattr
+
+    def mock_getattr(obj: Any, name: str, *default: Any) -> Any:
+        if name == "lastrowid":
+            return None
+        return real_getattr(obj, name, *default)
+
+    monkeypatch.setattr("apps.manager.query.getattr", mock_getattr, raising=False)
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        with pytest.raises(QueryError, match="无法获取自增主键"):
+            insert_row(
+                engine,
+                "users",
+                schema=None,
+                values={"name": "Ghost", "email": "g@e.com", "age": 1},
+            )
+    finally:
+        engine.dispose()
+
+
+def test_insert_row_post_select_none_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """插入后回查返回 None 应抛 QueryError（覆盖 query.py:408）.
+
+    模拟插入成功但同一事务内按主键反查返回 None（并发删除等极端场景）。
+    """
+    monkeypatch.setattr(
+        "apps.manager.query._select_row_by_pk",
+        lambda *_args, **_kw: None,
+    )
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        with pytest.raises(QueryError, match="插入后回查失败"):
+            insert_row(
+                engine,
+                "users",
+                schema=None,
+                values={"name": "Ghost", "email": "g@e.com", "age": 1},
+            )
+    finally:
+        engine.dispose()
+
+
+def test_update_row_post_select_none_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """更新后回查返回 None 应抛 QueryError（覆盖 query.py:481）.
+
+    模拟更新成功（rowcount=1）但同一事务内按主键反查返回 None（并发删除等极端场景）。
+    """
+    monkeypatch.setattr(
+        "apps.manager.query._select_row_by_pk",
+        lambda *_args, **_kw: None,
+    )
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        with pytest.raises(QueryError, match="更新后回查失败"):
+            update_row(
+                engine,
+                "users",
+                schema=None,
+                pk={"id": 1},
+                values={"name": "Alice2"},
             )
     finally:
         engine.dispose()

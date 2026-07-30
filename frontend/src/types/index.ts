@@ -284,3 +284,23 @@ export interface RowListResponse {
   page_size: number;
   columns: string[];
 }
+
+// 行新增请求
+export interface RowCreate {
+  values: Record<string, unknown>;
+}
+
+// 行更新请求
+export interface RowUpdate {
+  values: Record<string, unknown>;
+}
+
+// 单行响应
+export interface RowOut {
+  row: Record<string, unknown>;
+}
+
+// 通用消息响应
+export interface MessageOut {
+  detail: string;
+}

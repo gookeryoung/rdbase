@@ -12,6 +12,10 @@ import {
   Checkbox,
   Empty,
   Tooltip,
+  Modal,
+  Form,
+  InputNumber,
+  Popconfirm,
   message,
 } from "antd";
 import type { ColumnsType, TableProps } from "antd/es/table";
@@ -21,10 +25,15 @@ import {
   ReloadOutlined,
   ColumnHeightOutlined,
   SearchOutlined,
+  PlusOutlined,
+  EditOutlined,
+  DeleteOutlined,
 } from "@ant-design/icons";
 import { listDatasources } from "@/api/datasources";
-import { listSchemas, listTables } from "@/api/designer";
-import { listRows } from "@/api/manager";
+import { listSchemas, listTables, retrieveTable } from "@/api/designer";
+import { createRow, deleteRow, listRows, updateRow } from "@/api/manager";
+import { useAuthStore } from "@/store/auth";
+import { isDesignerOrAdmin } from "@/utils/permission";
 import type {
   DataSource,
   EngineType,
@@ -51,8 +60,27 @@ const errMsg = (err: unknown, fallback: string): string => {
   return detail ?? fallback;
 };
 
+// 判断值是否为数字（用于表单控件选择 Input vs InputNumber）
+const isNumericValue = (val: unknown): boolean =>
+  typeof val === "number" || (typeof val === "string" && /^-?\d+(\.\d+)?$/.test(val));
+
+// Modal 表单模式
+type ModalMode = "create" | "edit";
+
+interface ModalState {
+  open: boolean;
+  mode: ModalMode;
+  // 编辑模式下的主键值
+  pk: Record<string, unknown> | null;
+  // 表单初始值
+  initialValues: Record<string, unknown>;
+}
+
 // 数据库管理页：左侧数据源+表树，右侧数据表格
 const Manager = () => {
+  const user = useAuthStore((state) => state.user);
+  const canEdit = isDesignerOrAdmin(user);
+
   const [datasources, setDatasources] = useState<DataSource[]>([]);
   const [selectedDsId, setSelectedDsId] = useState<number | null>(null);
   const [schemas, setSchemas] = useState<NameItem[]>([]);
@@ -69,6 +97,7 @@ const Manager = () => {
   const [rows, setRows] = useState<Record<string, unknown>[]>([]);
   const [total, setTotal] = useState(0);
   const [columns, setColumns] = useState<string[]>([]);
+  const [pkColumns, setPkColumns] = useState<string[]>([]);
   const [loadingRows, setLoadingRows] = useState(false);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
@@ -78,6 +107,16 @@ const Manager = () => {
   const [visibleCols, setVisibleCols] = useState<string[] | null>(null);
   // 列头筛选输入：列名 → 关键词（like 模糊匹配）
   const [filterInputs, setFilterInputs] = useState<Record<string, string>>({});
+
+  // 编辑/新增 Modal 状态
+  const [modalState, setModalState] = useState<ModalState>({
+    open: false,
+    mode: "create",
+    pk: null,
+    initialValues: {},
+  });
+  const [modalSubmitting, setModalSubmitting] = useState(false);
+  const [form] = Form.useForm<Record<string, unknown>>();
 
   // 加载数据源列表
   const loadDatasources = useCallback(async () => {
@@ -113,6 +152,7 @@ const Manager = () => {
       setSelectedTable(null);
       setRows([]);
       setColumns([]);
+      setPkColumns([]);
       setTotal(0);
     }
   }, [selectedDsId, loadSchemas]);
@@ -189,6 +229,12 @@ const Manager = () => {
     setOrderDir("asc");
     setVisibleCols(null);
     setFilterInputs({});
+    // 异步加载主键列名
+    if (selectedDsId != null) {
+      retrieveTable(selectedDsId, tableName, schemaName)
+        .then((detail) => setPkColumns(detail.primary_key))
+        .catch(() => setPkColumns([]));
+    }
   };
 
   // 加载行数据
@@ -269,12 +315,116 @@ const Manager = () => {
     setPage(1);
   };
 
+  // 从行数据中提取主键 dict
+  const extractPk = (row: Record<string, unknown>): Record<string, unknown> => {
+    const pk: Record<string, unknown> = {};
+    pkColumns.forEach((col) => {
+      if (col in row) pk[col] = row[col];
+    });
+    return pk;
+  };
+
+  // 打开新增 Modal
+  const handleOpenCreate = () => {
+    if (pkColumns.length === 0) {
+      message.warning("该表无主键，新增后无法回查定位");
+    }
+    // 初始值：所有列都为空，主键列若为自增可留空
+    const initialValues: Record<string, unknown> = {};
+    columns.forEach((col) => {
+      initialValues[col] = null;
+    });
+    setModalState({ open: true, mode: "create", pk: null, initialValues });
+    form.setFieldsValue(initialValues as never);
+  };
+
+  // 打开编辑 Modal
+  const handleOpenEdit = (row: Record<string, unknown>) => {
+    if (pkColumns.length === 0) {
+      message.warning("该表无主键，无法定位行");
+      return;
+    }
+    const pk = extractPk(row);
+    // 编辑表单只显示非主键列
+    const initialValues: Record<string, unknown> = {};
+    columns.forEach((col) => {
+      if (!pkColumns.includes(col)) {
+        initialValues[col] = row[col] ?? null;
+      }
+    });
+    setModalState({ open: true, mode: "edit", pk, initialValues });
+    form.setFieldsValue(initialValues as never);
+  };
+
+  // Modal 提交
+  const handleModalSubmit = async () => {
+    if (selectedDsId == null || !selectedTable) return;
+    let values: Record<string, unknown>;
+    try {
+      // 触发表单校验（空值允许，仅校验类型）
+      values = await form.validateFields();
+    } catch {
+      return;
+    }
+    // 过滤掉 null/undefined/空字符串（避免覆盖默认值）
+    const cleaned: Record<string, unknown> = {};
+    Object.entries(values).forEach(([k, v]) => {
+      if (v !== null && v !== undefined && v !== "") {
+        cleaned[k] = v;
+      }
+    });
+    setModalSubmitting(true);
+    try {
+      if (modalState.mode === "create") {
+        await createRow(selectedDsId, selectedTable.name, {
+          values: cleaned,
+        }, selectedTable.schemaName);
+        message.success("新增成功");
+      } else if (modalState.pk) {
+        await updateRow(selectedDsId, selectedTable.name, modalState.pk, {
+          values: cleaned,
+        }, selectedTable.schemaName);
+        message.success("更新成功");
+      }
+      setModalState((prev) => ({ ...prev, open: false }));
+      await loadRows();
+    } catch (err) {
+      message.error(errMsg(err, modalState.mode === "create" ? "新增失败" : "更新失败"));
+    } finally {
+      setModalSubmitting(false);
+    }
+  };
+
+  // 删除行
+  const handleDelete = async (row: Record<string, unknown>) => {
+    if (selectedDsId == null || !selectedTable) return;
+    if (pkColumns.length === 0) {
+      message.warning("该表无主键，无法定位行");
+      return;
+    }
+    const pk = extractPk(row);
+    try {
+      await deleteRow(selectedDsId, selectedTable.name, pk, selectedTable.schemaName);
+      message.success("删除成功");
+      await loadRows();
+    } catch (err) {
+      message.error(errMsg(err, "删除失败"));
+    }
+  };
+
   // 构造表格列定义
   const tableColumns: ColumnsType<Record<string, unknown>> = useMemo(() => {
-    return columns.map((col) => ({
+    const cols: ColumnsType<Record<string, unknown>> = columns.map((col) => ({
       title: (
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          <Text strong>{col}</Text>
+          <Space size={4}>
+            <Text strong>{col}</Text>
+            {pkColumns.includes(col) && (
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                PK
+              </Text>
+            )}
+          </Space>
           <Input
             size="small"
             allowClear
@@ -304,8 +454,48 @@ const Manager = () => {
         return String(val);
       },
     }));
+    // 操作列（designer+ 可见）
+    if (canEdit) {
+      cols.push({
+        title: "操作",
+        key: "__actions__",
+        fixed: "right",
+        width: 120,
+        render: (_val: unknown, row: Record<string, unknown>) => (
+          <Space size={4}>
+            <Button
+              type="link"
+              size="small"
+              icon={<EditOutlined />}
+              onClick={() => handleOpenEdit(row)}
+              disabled={pkColumns.length === 0}
+            >
+              编辑
+            </Button>
+            <Popconfirm
+              title="确认删除该行？"
+              okText="删除"
+              okButtonProps={{ danger: true }}
+              cancelText="取消"
+              onConfirm={() => handleDelete(row)}
+            >
+              <Button
+                type="link"
+                size="small"
+                danger
+                icon={<DeleteOutlined />}
+                disabled={pkColumns.length === 0}
+              >
+                删除
+              </Button>
+            </Popconfirm>
+          </Space>
+        ),
+      });
+    }
+    return cols;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [columns, filterInputs, orderBy, orderDir]);
+  }, [columns, filterInputs, orderBy, orderDir, pkColumns, canEdit]);
 
   // 列显隐菜单
   const columnVisibilityMenu: MenuProps = {
@@ -346,6 +536,11 @@ const Manager = () => {
       },
     ],
   };
+
+  // Modal 表单字段（编辑模式排除主键列）
+  const modalFormFields = modalState.mode === "edit"
+    ? columns.filter((c) => !pkColumns.includes(c))
+    : columns;
 
   return (
     <Layout style={{ minHeight: "calc(100vh - 112px)", background: "transparent" }}>
@@ -407,8 +602,22 @@ const Manager = () => {
                   <Text type="secondary">({selectedTable.schemaName})</Text>
                 )}
                 <Text type="secondary">共 {total} 行</Text>
+                {pkColumns.length === 0 && (
+                  <Text type="warning" style={{ fontSize: 12 }}>
+                    （无主键，禁用编辑/删除）
+                  </Text>
+                )}
               </Space>
               <Space>
+                {canEdit && (
+                  <Button
+                    type="primary"
+                    icon={<PlusOutlined />}
+                    onClick={handleOpenCreate}
+                  >
+                    新增行
+                  </Button>
+                )}
                 <Tooltip title="列显隐">
                   <Dropdown
                     menu={columnVisibilityMenu}
@@ -446,6 +655,31 @@ const Manager = () => {
           </>
         )}
       </Content>
+      <Modal
+        title={modalState.mode === "create" ? "新增行" : "编辑行"}
+        open={modalState.open}
+        onOk={() => void handleModalSubmit()}
+        onCancel={() => setModalState((prev) => ({ ...prev, open: false }))}
+        confirmLoading={modalSubmitting}
+        destroyOnClose
+        width={600}
+      >
+        <Form form={form} layout="vertical" preserve={false}>
+          {modalFormFields.map((col) => {
+            // 根据初始值类型选择控件：数字用 InputNumber，其他用 Input
+            const initVal = modalState.initialValues[col];
+            const isNumeric = isNumericValue(initVal);
+            return (
+              <Form.Item key={col} name={col} label={col}>
+                {isNumeric ? <InputNumber style={{ width: "100%" }} /> : <Input />}
+              </Form.Item>
+            );
+          })}
+          {modalFormFields.length === 0 && (
+            <Text type="secondary">无可编辑列</Text>
+          )}
+        </Form>
+      </Modal>
     </Layout>
   );
 };

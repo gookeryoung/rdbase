@@ -1,14 +1,17 @@
-"""数据查询模块.
+"""数据查询与 CRUD 模块.
 
-提供表数据浏览的查询与计数能力，基于 SQLAlchemy ``text()`` 手动构造 SQL，
-通过列名白名单校验防 SQL 注入，支持分页/排序/筛选/列显隐。
+提供表数据浏览的查询与计数能力，以及行的增删改查（CRUD）能力。
+基于 SQLAlchemy ``text()`` 手动构造 SQL，通过列名白名单校验防 SQL 注入。
 
 设计要点：
 - ``query_table_rows``: 查询表数据，返回 ``(rows, total)``
 - ``count_table_rows``: 统计满足筛选条件的行数
+- ``insert_row``/``update_row``/``delete_row``/``get_row``: 单行 CRUD，主键反查定位
 - 标识符引用：MySQL 反引号、PG/SQLite 双引号（独立实现，避免跨模块依赖）
-- 白名单：通过 SQLAlchemy inspect 获取列名集合，校验 ``columns``/``order_by``/``filters``
+- 白名单：通过 SQLAlchemy inspect 获取列名集合，校验 ``columns``/``order_by``/``filters``/``values``/``pk``
 - SQLite schema 强制 None
+- 乐观锁极简方案：UPDATE/DELETE 影响 0 行抛 ``QueryError``，不做 version 列推断
+- 所有写操作在单个 ``engine.begin()`` 事务内
 """
 
 from __future__ import annotations
@@ -256,9 +259,328 @@ def count_table_rows(
         return cast(int, conn.execute(text(count_sql), params).scalar())
 
 
+# ============================================================
+# P4-2 行 CRUD
+# ============================================================
+
+
+def get_pk_columns(engine: Engine, table_name: str, schema: str | None) -> list[str]:
+    """通过 SQLAlchemy inspect 获取表的主键列名列表.
+
+    Args:
+        engine: SQLAlchemy 引擎。
+        table_name: 表名。
+        schema: Schema 名（SQLite 强制 None）。
+
+    Returns:
+        主键列名列表（无主键时返回空列表）。
+
+    Raises:
+        QueryError: 表不存在或反射失败。
+    """
+    insp = inspect(engine)
+    effective_schema = _resolve_schema(engine, schema)
+    try:
+        pk = insp.get_pk_constraint(table_name, schema=effective_schema)
+    except SQLAlchemyError as exc:
+        raise QueryError(f"无法读取表 {table_name} 的主键信息: {exc}") from None
+    return [cast(str, c) for c in pk.get("constrained_columns", [])]
+
+
+def _build_pk_where_clause(
+    pk: dict[str, Any],
+    dialect: str,
+    param_prefix: str = "p",
+) -> tuple[str, dict[str, Any]]:
+    """构造主键 WHERE 子句与参数（不含 ``WHERE`` 关键字）.
+
+    Args:
+        pk: 主键列名 → 值的 dict。
+        dialect: 方言名。
+        param_prefix: 参数名前缀，避免与 SET 子句参数冲突。
+
+    Returns:
+        ``(where_sql, params)``：空主键时 ``where_sql`` 为空字符串。
+    """
+    clauses: list[str] = []
+    params: dict[str, Any] = {}
+    for i, (col, val) in enumerate(pk.items()):
+        clauses.append(f"{_quote_ident(col, dialect)} = :{param_prefix}{i}")
+        params[f"{param_prefix}{i}"] = val
+    return " AND ".join(clauses), params
+
+
+def _select_row_by_pk(
+    conn: Any,
+    table_ref: str,
+    dialect: str,
+    pk: dict[str, Any],
+) -> dict[str, Any] | None:
+    """在同一连接内按主键查单行.
+
+    Args:
+        conn: SQLAlchemy 连接（已在事务内）。
+        table_ref: 已格式化的表引用。
+        dialect: 方言名。
+        pk: 主键列名 → 值的 dict。
+
+    Returns:
+        行数据 dict；不存在时返回 None。
+    """
+    where_sql, params = _build_pk_where_clause(pk, dialect)
+    select_sql = f"SELECT * FROM {table_ref} WHERE {where_sql} LIMIT 1"
+    row = conn.execute(text(select_sql), params).fetchone()
+    if row is None:
+        return None
+    return cast("dict[str, Any]", dict(row._mapping))
+
+
+def insert_row(
+    engine: Engine,
+    table_name: str,
+    schema: str | None,
+    values: dict[str, Any],
+) -> dict[str, Any]:
+    """插入单行并返回插入后的行（含自增主键回填）.
+
+    Args:
+        engine: SQLAlchemy 引擎。
+        table_name: 表名。
+        schema: Schema 名（SQLite 强制 None）。
+        values: 列名 → 值的 dict。
+
+    Returns:
+        插入后的完整行数据（含自增主键回填）。
+
+    Raises:
+        QueryError: 列名非法、表不存在、主键缺失且无法回填等。
+        SQLAlchemyError: 底层 SQL 执行失败（如约束冲突）。
+    """
+    if not values:
+        raise QueryError("values 不能为空")
+
+    allowed = set(get_column_names(engine, table_name, schema))
+    for col in values:
+        if col not in allowed:
+            raise QueryError(f"非法列名: {col}")
+
+    dialect = engine.dialect.name
+    effective_schema = _resolve_schema(engine, schema)
+    table_ref = _format_table_ref(table_name, effective_schema, dialect)
+
+    cols = list(values.keys())
+    col_refs = ", ".join(_quote_ident(c, dialect) for c in cols)
+    placeholders = ", ".join(f":v{i}" for i in range(len(cols)))
+    params = {f"v{i}": val for i, val in enumerate(values.values())}
+    insert_sql = f"INSERT INTO {table_ref} ({col_refs}) VALUES ({placeholders})"
+
+    pk_cols = get_pk_columns(engine, table_name, schema)
+    if not pk_cols:
+        # 无主键表：直接返回传入的 values（无法回查定位）
+        with engine.begin() as conn:
+            conn.execute(text(insert_sql), params)
+        return dict(values)
+
+    # 构造主键值：优先用 values 中提供的，缺失的用 lastrowid（单列自增主键场景）
+    pk_values: dict[str, Any] = {}
+    for pk_col in pk_cols:
+        if pk_col in values:
+            pk_values[pk_col] = values[pk_col]
+    missing_pk = [c for c in pk_cols if c not in pk_values]
+    # 多列主键场景：只要任一主键列缺失就抛错（lastrowid 仅能回填单列，无法定位多列主键）
+    if missing_pk and len(pk_cols) > 1:
+        raise QueryError(
+            f"多列主键 {pk_cols} 须显式提供全部主键列，缺失: {missing_pk}",
+        )
+
+    with engine.begin() as conn:
+        result = conn.execute(text(insert_sql), params)
+        if missing_pk:
+            # 单列自增主键场景：用 lastrowid 回填
+            lastrowid = getattr(result, "lastrowid", None)
+            if lastrowid is None:
+                raise QueryError(
+                    f"无法获取自增主键 {missing_pk}（dialect={dialect} 不支持 lastrowid）",
+                )
+            pk_values[missing_pk[0]] = lastrowid
+        row = _select_row_by_pk(conn, table_ref, dialect, pk_values)
+        if row is None:
+            raise QueryError("插入后回查失败：行不存在")
+        return row
+
+
+def update_row(  # noqa: PLR0912
+    engine: Engine,
+    table_name: str,
+    schema: str | None,
+    pk: dict[str, Any],
+    values: dict[str, Any],
+) -> dict[str, Any]:
+    """按主键更新单行并返回更新后的行.
+
+    乐观锁极简方案：UPDATE 影响 0 行抛 ``QueryError``（行不存在或已被修改）。
+
+    Args:
+        engine: SQLAlchemy 引擎。
+        table_name: 表名。
+        schema: Schema 名（SQLite 强制 None）。
+        pk: 主键列名 → 值的 dict（多列主键支持）。
+        values: 待更新列名 → 值的 dict。
+
+    Returns:
+        更新后的完整行数据。
+
+    Raises:
+        QueryError: 主键为空、values 为空、列名非法、主键列出现在 values 中、行不存在等。
+        SQLAlchemyError: 底层 SQL 执行失败。
+    """
+    if not pk:
+        raise QueryError("主键不能为空")
+    if not values:
+        raise QueryError("更新值不能为空")
+
+    allowed = set(get_column_names(engine, table_name, schema))
+    for col in pk:
+        if col not in allowed:
+            raise QueryError(f"非法主键列名: {col}")
+    for col in values:
+        if col not in allowed:
+            raise QueryError(f"非法列名: {col}")
+
+    pk_cols = get_pk_columns(engine, table_name, schema)
+    if not pk_cols:
+        raise QueryError("该表无主键，无法定位行")
+    if set(pk.keys()) != set(pk_cols):
+        raise QueryError(
+            f"主键列不匹配：期望 {pk_cols}，实际 {list(pk.keys())}",
+        )
+    # 主键列不能在 values 中（避免修改主键）
+    for col in values:
+        if col in pk:
+            raise QueryError(f"不能修改主键列: {col}")
+
+    dialect = engine.dialect.name
+    effective_schema = _resolve_schema(engine, schema)
+    table_ref = _format_table_ref(table_name, effective_schema, dialect)
+
+    set_clauses: list[str] = []
+    params: dict[str, Any] = {}
+    for i, (col, val) in enumerate(values.items()):
+        set_clauses.append(f"{_quote_ident(col, dialect)} = :s{i}")
+        params[f"s{i}"] = val
+    where_sql, where_params = _build_pk_where_clause(pk, dialect)
+    params.update(where_params)
+    update_sql = f"UPDATE {table_ref} SET {', '.join(set_clauses)} WHERE {where_sql}"
+
+    with engine.begin() as conn:
+        result = conn.execute(text(update_sql), params)
+        if result.rowcount == 0:
+            raise QueryError("行不存在或已被修改")
+        row = _select_row_by_pk(conn, table_ref, dialect, pk)
+        if row is None:
+            raise QueryError("更新后回查失败：行不存在")
+        return row
+
+
+def delete_row(
+    engine: Engine,
+    table_name: str,
+    schema: str | None,
+    pk: dict[str, Any],
+) -> None:
+    """按主键删除单行.
+
+    乐观锁极简方案：DELETE 影响 0 行抛 ``QueryError``（行不存在或已被删除）。
+
+    Args:
+        engine: SQLAlchemy 引擎。
+        table_name: 表名。
+        schema: Schema 名（SQLite 强制 None）。
+        pk: 主键列名 → 值的 dict（多列主键支持）。
+
+    Raises:
+        QueryError: 主键为空、列名非法、表无主键、主键列不匹配、行不存在等。
+        SQLAlchemyError: 底层 SQL 执行失败。
+    """
+    if not pk:
+        raise QueryError("主键不能为空")
+
+    allowed = set(get_column_names(engine, table_name, schema))
+    for col in pk:
+        if col not in allowed:
+            raise QueryError(f"非法主键列名: {col}")
+
+    pk_cols = get_pk_columns(engine, table_name, schema)
+    if not pk_cols:
+        raise QueryError("该表无主键，无法定位行")
+    if set(pk.keys()) != set(pk_cols):
+        raise QueryError(
+            f"主键列不匹配：期望 {pk_cols}，实际 {list(pk.keys())}",
+        )
+
+    dialect = engine.dialect.name
+    effective_schema = _resolve_schema(engine, schema)
+    table_ref = _format_table_ref(table_name, effective_schema, dialect)
+    where_sql, params = _build_pk_where_clause(pk, dialect)
+    delete_sql = f"DELETE FROM {table_ref} WHERE {where_sql}"
+
+    with engine.begin() as conn:
+        result = conn.execute(text(delete_sql), params)
+        if result.rowcount == 0:
+            raise QueryError("行不存在或已被删除")
+
+
+def get_row(
+    engine: Engine,
+    table_name: str,
+    schema: str | None,
+    pk: dict[str, Any],
+) -> dict[str, Any] | None:
+    """按主键查单行.
+
+    Args:
+        engine: SQLAlchemy 引擎。
+        table_name: 表名。
+        schema: Schema 名（SQLite 强制 None）。
+        pk: 主键列名 → 值的 dict（多列主键支持）。
+
+    Returns:
+        行数据 dict；不存在时返回 None。
+
+    Raises:
+        QueryError: 主键为空、列名非法、表无主键、主键列不匹配等。
+    """
+    if not pk:
+        raise QueryError("主键不能为空")
+
+    allowed = set(get_column_names(engine, table_name, schema))
+    for col in pk:
+        if col not in allowed:
+            raise QueryError(f"非法主键列名: {col}")
+
+    pk_cols = get_pk_columns(engine, table_name, schema)
+    if not pk_cols:
+        raise QueryError("该表无主键，无法定位行")
+    if set(pk.keys()) != set(pk_cols):
+        raise QueryError(
+            f"主键列不匹配：期望 {pk_cols}，实际 {list(pk.keys())}",
+        )
+
+    dialect = engine.dialect.name
+    effective_schema = _resolve_schema(engine, schema)
+    table_ref = _format_table_ref(table_name, effective_schema, dialect)
+    with engine.connect() as conn:
+        return _select_row_by_pk(conn, table_ref, dialect, pk)
+
+
 __all__ = [
     "QueryError",
     "count_table_rows",
+    "delete_row",
     "get_column_names",
+    "get_pk_columns",
+    "get_row",
+    "insert_row",
     "query_table_rows",
+    "update_row",
 ]
