@@ -29,12 +29,15 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "corsheaders",
     # 本地应用（后续阶段按需启用）：
-    # "apps.accounts",
+    "apps.accounts",
     # "apps.datasources",
     # "apps.designer",
     # "apps.manager",
     # "apps.audit",
 ]
+
+# 自定义用户模型（须在首次 migrate 前设置）
+AUTH_USER_MODEL = "accounts.User"
 
 # 中间件
 MIDDLEWARE = [

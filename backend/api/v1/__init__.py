@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from apps.accounts.api import router as accounts_router
 from ninja import NinjaAPI
 
 api = NinjaAPI(
@@ -12,3 +13,5 @@ api = NinjaAPI(
     version="1.0.0",
     description="通用数据库管理平台 API",
 )
+
+api.add_router("/auth", accounts_router)

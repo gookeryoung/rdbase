@@ -20,6 +20,8 @@ dependencies = [
     "psycopg[binary]>=3.2",
     # 凭证加密
     "cryptography>=43.0",
+    # JWT 认证（access/refresh 双 token）
+    "pyjwt>=2.9",
     # ASGI/WSGI 服务器
     "uvicorn[standard]>=0.30",
     "gunicorn>=23.0",

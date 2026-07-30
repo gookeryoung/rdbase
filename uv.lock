@@ -936,6 +936,18 @@ wheels = [
 ]
 
 [[package]]
+name = "pyjwt"
+version = "2.13.0"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
+dependencies = [
+    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+]
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/3b/81/58d0ac84e1ef3a3843791d6954d94c0b33d526c75eeb1efbce9d0a4c4077/pyjwt-2.13.0.tar.gz", hash = "sha256:41571c89ca91598c79e8ef18a2d07367d4810fbbd6f637794879baf1b7703423" }
+wheels = [
+    { url = "https://mirrors.aliyun.com/pypi/packages/a3/5e/ecf12fdb62546d64385c158514e9b2b671f7832108ef2ecd2020ce0af2d1/pyjwt-2.13.0-py3-none-any.whl", hash = "sha256:66adcc2aff09b3f1bbd95fc1e1577df8ac8723c978552fd43304c8a290ac5728" },
+]
+
+[[package]]
 name = "pyrefly"
 version = "1.1.1"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
@@ -1122,6 +1134,7 @@ dependencies = [
     { name = "gunicorn" },
     { name = "mysqlclient" },
     { name = "psycopg", extra = ["binary"] },
+    { name = "pyjwt" },
     { name = "sqlalchemy" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -1160,6 +1173,7 @@ requires-dist = [
     { name = "gunicorn", specifier = ">=23.0" },
     { name = "mysqlclient", specifier = ">=2.2" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
+    { name = "pyjwt", specifier = ">=2.9" },
     { name = "pyrefly", marker = "extra == 'lint'", specifier = ">=1.1.1" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0.0" },
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=5.0.0" },

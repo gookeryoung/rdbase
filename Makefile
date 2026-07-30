@@ -33,16 +33,18 @@ typecheck: ## 类型检查 (pyrefly)
 check: lint typecheck cov ## 运行全套门禁 (lint + typecheck + cov)
 
 makemigrations: ## 生成数据库迁移
-	cd $(BACKEND_DIR) && python manage.py makemigrations
+	cd $(BACKEND_DIR) && uv run python manage.py makemigrations
 
 migrate: ## 应用数据库迁移
-	cd $(BACKEND_DIR) && python manage.py migrate
+	cd $(BACKEND_DIR) && uv run python manage.py migrate
 
 run-be: ## 启动后端开发服务器 (0.0.0.0:8000)
-	cd $(BACKEND_DIR) && python manage.py runserver 0.0.0.0:8000
+	cd $(BACKEND_DIR) && uv run python manage.py runserver 0.0.0.0:8000
 
 run-fe: ## 启动前端开发服务器
 	cd $(FRONTEND_DIR) && npm run dev
+
+run: run-be run-fe ## 同时启动后端和前端开发服务器
 
 doc: ## 构建 Sphinx 文档
 	uv run sphinx-build -b html docs docs/_build/html
