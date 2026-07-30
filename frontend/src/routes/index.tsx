@@ -4,6 +4,7 @@ import Dashboard from "@/pages/Dashboard";
 import Users from "@/pages/Users";
 import Profile from "@/pages/Profile";
 import Datasources from "@/pages/Datasources";
+import Designer from "@/pages/Designer";
 import MainLayout from "@/layouts/MainLayout";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import RoleRoute from "@/components/RoleRoute";
@@ -39,7 +40,7 @@ export const routes: RouteObject[] = [
           {
             path: "designer",
             element: <RoleRoute allowedRoles={[Role.ADMIN, Role.DESIGNER]} />,
-            children: [{ index: true, element: <Placeholder title="数据库设计" /> }],
+            children: [{ index: true, element: <Designer /> }],
           },
           { path: "manager", element: <Placeholder title="数据库管理" /> },
           {

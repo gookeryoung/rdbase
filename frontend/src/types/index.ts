@@ -93,3 +93,155 @@ export interface TestConnectionResult {
   ok: boolean;
   detail: string;
 }
+
+// ----------------- 数据库设计（P3） -----------------
+
+// 草稿状态
+export type DraftStatus = "draft" | "applied" | "archived";
+
+// 字段定义
+export interface FieldSpec {
+  name: string;
+  type: string;
+  length?: number | null;
+  nullable: boolean;
+  default?: string | null;
+  comment?: string | null;
+  primary_key: boolean;
+  unique: boolean;
+  autoincrement: boolean;
+}
+
+// 索引定义
+export interface IndexSpec {
+  name: string;
+  columns: string[];
+  unique: boolean;
+}
+
+// 外键定义
+export interface ForeignKeySpec {
+  name?: string | null;
+  columns: string[];
+  referred_table: string;
+  referred_columns: string[];
+  on_delete: string;
+}
+
+// 完整表设计规范
+export interface TableDesignSpec {
+  name: string;
+  schema_name?: string | null;
+  comment?: string | null;
+  fields: FieldSpec[];
+  indexes: IndexSpec[];
+  foreign_keys: ForeignKeySpec[];
+}
+
+// 草稿响应
+export interface Draft {
+  id: number;
+  name: string;
+  datasource_id: number;
+  table_name: string;
+  schema_name: string | null;
+  spec: TableDesignSpec;
+  status: DraftStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+// 草稿创建请求
+export interface DraftCreate {
+  name: string;
+  datasource_id: number;
+  table_name: string;
+  schema_name?: string | null;
+  spec: TableDesignSpec;
+}
+
+// 草稿更新请求（部分字段可选）
+export interface DraftUpdate {
+  name?: string;
+  table_name?: string;
+  schema_name?: string | null;
+  spec?: TableDesignSpec;
+}
+
+// 版本响应
+export interface Version {
+  id: number;
+  draft_id: number;
+  version_no: number;
+  spec: TableDesignSpec;
+  created_at: string;
+}
+
+// DDL 预览请求
+export interface DDLPreviewRequest {
+  datasource_id: number;
+  spec: TableDesignSpec;
+  old_spec?: TableDesignSpec | null;
+}
+
+// DDL 预览/执行响应
+export interface DDLResult {
+  statements: string[];
+  executed?: number;
+}
+
+// DDL 执行请求
+export interface DDLExecuteRequest {
+  old_spec?: TableDesignSpec | null;
+}
+
+// 元数据反射：库/Schema 条目
+export interface NameItem {
+  name: string;
+}
+
+// 表/视图摘要
+export interface TableBrief {
+  name: string;
+  schema_name: string | null;
+}
+
+// 字段元数据
+export interface ColumnMeta {
+  name: string;
+  type: string;
+  nullable: boolean;
+  default?: string | null;
+  autoincrement: boolean;
+  comment?: string | null;
+  primary_key: boolean;
+  unique: boolean;
+}
+
+// 索引元数据
+export interface IndexMeta {
+  name: string;
+  columns: string[];
+  unique: boolean;
+}
+
+// 外键元数据
+export interface ForeignKeyMeta {
+  name: string | null;
+  columns: string[];
+  referred_table: string;
+  referred_schema: string | null;
+  referred_columns: string[];
+}
+
+// 表完整元数据
+export interface TableDetail {
+  name: string;
+  schema_name: string | null;
+  comment: string | null;
+  columns: ColumnMeta[];
+  primary_key: string[];
+  foreign_keys: ForeignKeyMeta[];
+  indexes: IndexMeta[];
+  unique_constraints: string[][];
+}
