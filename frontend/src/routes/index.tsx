@@ -6,6 +6,7 @@ import Profile from "@/pages/Profile";
 import Datasources from "@/pages/Datasources";
 import Designer from "@/pages/Designer";
 import Manager from "@/pages/Manager";
+import SqlConsole from "@/pages/SqlConsole";
 import MainLayout from "@/layouts/MainLayout";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import RoleRoute from "@/components/RoleRoute";
@@ -34,6 +35,7 @@ export const routes: RouteObject[] = [
             children: [{ index: true, element: <Designer /> }],
           },
           { path: "manager", element: <Manager /> },
+          { path: "sql-console", element: <SqlConsole /> },
           {
             path: "users",
             element: <RoleRoute allowedRoles={[Role.ADMIN]} />,

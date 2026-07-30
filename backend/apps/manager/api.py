@@ -8,6 +8,10 @@ P4-2 数据 CRUD：单行新增/查询/编辑/删除。
 - 读操作（GET）：所有登录用户
 - 主键通过 URL 查询参数 ``pk`` 传递（JSON 字符串，如 ``pk={"id":1}``）
 - 乐观锁：UPDATE/DELETE 影响 0 行返回 404 ``行不存在或已被修改``
+
+P4-3 SQL 查询控制台：执行任意 SQL 与获取执行计划。
+- POST ``/{ds_id}/query``：SELECT 所有登录用户可执行；DDL/DML 须 designer+
+- POST ``/{ds_id}/explain``：所有登录用户可读（EXPLAIN 本身只读）
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ from ninja.errors import HttpError
 from sqlalchemy.exc import SQLAlchemyError
 
 from apps.accounts.auth import JWTAuth
+from apps.accounts.models import Role
 from apps.accounts.permissions import require_designer_or_admin
 from apps.datasources.engine import get_engine
 from apps.datasources.models import DataSource
@@ -28,13 +33,25 @@ from apps.datasources.models import DataSource
 from .query import (
     QueryError,
     delete_row,
+    execute_sql,
+    explain_sql,
     get_column_names,
     get_row,
     insert_row,
     query_table_rows,
     update_row,
 )
-from .schemas import MessageOut, RowCreateIn, RowListOut, RowOut, RowUpdateIn
+from .schemas import (
+    ExplainIn,
+    ExplainOut,
+    MessageOut,
+    RowCreateIn,
+    RowListOut,
+    RowOut,
+    RowUpdateIn,
+    SqlExecIn,
+    SqlResultOut,
+)
 
 router = Router(tags=["manager"], auth=JWTAuth())
 
@@ -307,6 +324,91 @@ def delete_row_view(
     except SQLAlchemyError as exc:
         raise HttpError(400, f"删除失败: {exc}") from None
     return JsonResponse({"detail": "已删除"})
+
+
+# ============================================================
+# P4-3 SQL 查询控制台
+# ============================================================
+
+
+@router.post("/{ds_id}/query", response={200: SqlResultOut})
+def execute_sql_view(
+    request: HttpRequest,
+    ds_id: int,
+    payload: SqlExecIn,
+) -> HttpResponse:
+    """执行任意 SQL（所有登录用户可调，写操作须 designer+）.
+
+    权限分层：
+
+    - viewer 角色：仅允许只读语句（SELECT/WITH/SHOW/DESCRIBE/EXPLAIN），写操作返回 403。
+    - designer/admin 角色：允许 SELECT 与 DDL/DML。
+
+    Body: ``{"sql": "SELECT * FROM users"}``。
+
+    返回 ``SqlResultOut``：
+
+    - SELECT 时 ``columns``/``rows`` 为结果集，``rowcount`` 为结果集行数。
+    - DDL/DML 时 ``columns``/``rows`` 为空，``rowcount`` 为影响行数（DDL 为 -1）。
+    - ``elapsed_ms`` 为执行耗时，``read_only`` 标识实际语句类型。
+    """
+    user = getattr(request, "auth", None)
+    user_role = getattr(user, "role", None)
+    # viewer 仅允许只读；designer/admin 允许任意
+    read_only = user_role not in (Role.ADMIN, Role.DESIGNER)
+    ds = _get_ds_or_404(ds_id)
+    try:
+        engine = get_engine(ds)
+        result = execute_sql(engine, payload.sql, read_only=read_only)
+    except QueryError as exc:
+        # viewer 越权写操作 → 403；其他 QueryError → 400
+        if "仅允许执行只读" in str(exc):
+            raise HttpError(403, str(exc)) from None
+        raise HttpError(400, str(exc)) from None
+    except SQLAlchemyError as exc:
+        raise HttpError(400, f"SQL 执行失败: {exc}") from None
+    body = SqlResultOut(
+        columns=result["columns"],
+        rows=result["rows"],
+        rowcount=result["rowcount"],
+        elapsed_ms=result["elapsed_ms"],
+        read_only=result["read_only"],
+    ).model_dump()
+    return JsonResponse(body)
+
+
+@router.post("/{ds_id}/explain", response={200: ExplainOut})
+def explain_sql_view(
+    request: HttpRequest,
+    ds_id: int,
+    payload: ExplainIn,
+) -> HttpResponse:
+    """获取 SQL 执行计划（所有登录用户可读）.
+
+    EXPLAIN 本身只读，所有登录用户均可调用。多方言适配：
+
+    - SQLite: ``EXPLAIN QUERY PLAN <sql>``（``analyze`` 参数忽略）
+    - PostgreSQL/MySQL: ``EXPLAIN [ANALYZE] <sql>``
+
+    Body: ``{"sql": "SELECT * FROM users", "analyze": false}``。
+    """
+    del request  # 仅认证用
+    ds = _get_ds_or_404(ds_id)
+    try:
+        engine = get_engine(ds)
+        result = explain_sql(engine, payload.sql, analyze=payload.analyze)
+    except QueryError as exc:
+        raise HttpError(400, str(exc)) from None
+    except SQLAlchemyError as exc:
+        raise HttpError(400, f"EXPLAIN 执行失败: {exc}") from None
+    body = ExplainOut(
+        plan=result["plan"],
+        rows=result["rows"],
+        columns=result["columns"],
+        analyze=result["analyze"],
+        dialect=result["dialect"],
+    ).model_dump()
+    return JsonResponse(body)
 
 
 __all__ = ["router"]

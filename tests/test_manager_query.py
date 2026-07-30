@@ -12,10 +12,14 @@ from apps.manager.query import (
     QueryError,
     _build_where_clause,
     _format_table_ref,
+    _is_read_only,
     _quote_ident,
     _resolve_schema,
+    _strip_sql,
     count_table_rows,
     delete_row,
+    execute_sql,
+    explain_sql,
     get_column_names,
     get_pk_columns,
     get_row,
@@ -1214,5 +1218,362 @@ def test_update_row_post_select_none_raises(
                 pk={"id": 1},
                 values={"name": "Alice2"},
             )
+    finally:
+        engine.dispose()
+
+
+# ============================================================
+# P4-3 SQL 查询控制台 - _strip_sql / _is_read_only
+# ============================================================
+
+
+def test_strip_sql_strips_whitespace_and_semicolon() -> None:
+    """应去除首尾空白与末尾分号."""
+    assert _strip_sql("  SELECT 1;  ") == "SELECT 1"
+    assert _strip_sql("SELECT 1") == "SELECT 1"
+    assert _strip_sql("  SELECT 1; ") == "SELECT 1"
+
+
+def test_strip_sql_empty_raises() -> None:
+    """空 SQL 应抛 QueryError."""
+    with pytest.raises(QueryError, match="不能为空"):
+        _strip_sql("")
+    with pytest.raises(QueryError, match="不能为空"):
+        _strip_sql("   ")
+    with pytest.raises(QueryError, match="不能为空"):
+        _strip_sql(";")
+    with pytest.raises(QueryError, match="不能为空"):
+        _strip_sql("  ;  ")
+
+
+def test_is_read_only_select() -> None:
+    """SELECT/WITH 应识别为只读（输入须已去首尾空白）."""
+    assert _is_read_only("SELECT * FROM users") is True
+    assert _is_read_only("select * from users") is True
+    assert _is_read_only("SELECT 1") is True
+    assert _is_read_only("WITH t AS (SELECT 1) SELECT * FROM t") is True
+
+
+def test_is_read_only_show_describe_explain() -> None:
+    """SHOW/DESCRIBE/DESC/EXPLAIN 应识别为只读."""
+    assert _is_read_only("SHOW TABLES") is True
+    assert _is_read_only("DESCRIBE users") is True
+    assert _is_read_only("DESC users") is True
+    assert _is_read_only("EXPLAIN SELECT 1") is True
+
+
+def test_is_read_only_dml_ddl() -> None:
+    """DML/DDL 应识别为非只读."""
+    assert _is_read_only("INSERT INTO users VALUES (1)") is False
+    assert _is_read_only("UPDATE users SET name='x'") is False
+    assert _is_read_only("DELETE FROM users") is False
+    assert _is_read_only("CREATE TABLE t (id INT)") is False
+    assert _is_read_only("DROP TABLE t") is False
+    assert _is_read_only("ALTER TABLE t ADD COLUMN c INT") is False
+
+
+# ============================================================
+# P4-3 SQL 查询控制台 - execute_sql
+# ============================================================
+
+
+def test_execute_sql_select_returns_resultset() -> None:
+    """SELECT 应返回结果集（columns/rows/rowcount/elapsed_ms/read_only）."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        result = execute_sql(engine, "SELECT id, name FROM users WHERE id = 1")
+        assert result["read_only"] is True
+        assert result["columns"] == ["id", "name"]
+        assert len(result["rows"]) == 1
+        assert result["rows"][0]["name"] == "Alice"
+        assert result["rowcount"] == 1
+        assert result["elapsed_ms"] >= 0
+    finally:
+        engine.dispose()
+
+
+def test_execute_sql_select_trailing_semicolon() -> None:
+    """末尾分号应被正确处理."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        result = execute_sql(engine, "SELECT COUNT(*) AS cnt FROM users;")
+        assert result["columns"] == ["cnt"]
+        assert result["rows"][0]["cnt"] == 5
+    finally:
+        engine.dispose()
+
+
+def test_execute_sql_select_star() -> None:
+    """SELECT * 应返回所有列."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        result = execute_sql(engine, "SELECT * FROM users")
+        assert set(result["columns"]) == {"id", "name", "email", "age"}
+        assert len(result["rows"]) == 5
+    finally:
+        engine.dispose()
+
+
+def test_execute_sql_insert_returns_rowcount() -> None:
+    """INSERT 应返回影响行数，read_only=False."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        result = execute_sql(
+            engine,
+            "INSERT INTO users (name, email, age) VALUES ('Frank', 'f@e.com', 40)",
+        )
+        assert result["read_only"] is False
+        assert result["columns"] == []
+        assert result["rows"] == []
+        assert result["rowcount"] == 1
+    finally:
+        engine.dispose()
+
+
+def test_execute_sql_update_returns_rowcount() -> None:
+    """UPDATE 应返回影响行数."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        result = execute_sql(
+            engine,
+            "UPDATE users SET age = 99 WHERE id = 1",
+        )
+        assert result["read_only"] is False
+        assert result["rowcount"] == 1
+    finally:
+        engine.dispose()
+
+
+def test_execute_sql_delete_returns_rowcount() -> None:
+    """DELETE 应返回影响行数."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        result = execute_sql(engine, "DELETE FROM users WHERE id = 1")
+        assert result["read_only"] is False
+        assert result["rowcount"] == 1
+    finally:
+        engine.dispose()
+
+
+def test_execute_sql_ddl_create_table_returns_negative_one() -> None:
+    """DDL CREATE TABLE 应返回 rowcount=-1（SQLite DDL 不影响行数）."""
+    engine = _make_memory_engine()
+    try:
+        result = execute_sql(engine, "CREATE TABLE foo (id INTEGER PRIMARY KEY)")
+        assert result["read_only"] is False
+        assert result["rowcount"] == -1
+        assert result["columns"] == []
+    finally:
+        engine.dispose()
+
+
+def test_execute_sql_read_only_mode_allows_select() -> None:
+    """read_only=True 时 SELECT 应正常执行."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        result = execute_sql(engine, "SELECT 1", read_only=True)
+        assert result["read_only"] is True
+        assert result["rows"][0].get(1) == 1 or list(result["rows"][0].values()) == [1]
+    finally:
+        engine.dispose()
+
+
+def test_execute_sql_read_only_mode_blocks_insert() -> None:
+    """read_only=True 时 INSERT 应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        with pytest.raises(QueryError, match="仅允许执行只读"):
+            execute_sql(
+                engine,
+                "INSERT INTO users (name) VALUES ('blocked')",
+                read_only=True,
+            )
+    finally:
+        engine.dispose()
+
+
+def test_execute_sql_read_only_mode_blocks_update() -> None:
+    """read_only=True 时 UPDATE 应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        with pytest.raises(QueryError, match="仅允许执行只读"):
+            execute_sql(
+                engine,
+                "UPDATE users SET age = 1 WHERE id = 1",
+                read_only=True,
+            )
+    finally:
+        engine.dispose()
+
+
+def test_execute_sql_read_only_mode_blocks_delete() -> None:
+    """read_only=True 时 DELETE 应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        with pytest.raises(QueryError, match="仅允许执行只读"):
+            execute_sql(
+                engine,
+                "DELETE FROM users WHERE id = 1",
+                read_only=True,
+            )
+    finally:
+        engine.dispose()
+
+
+def test_execute_sql_read_only_mode_blocks_ddl() -> None:
+    """read_only=True 时 DDL DROP 应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        with pytest.raises(QueryError, match="仅允许执行只读"):
+            execute_sql(engine, "DROP TABLE users", read_only=True)
+    finally:
+        engine.dispose()
+
+
+def test_execute_sql_empty_raises() -> None:
+    """空 SQL 应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        with pytest.raises(QueryError, match="不能为空"):
+            execute_sql(engine, "")
+    finally:
+        engine.dispose()
+
+
+def test_execute_sql_syntax_error_raises_sqlalchemy_error() -> None:
+    """语法错误应抛 SQLAlchemyError."""
+    engine = _make_memory_engine()
+    try:
+        from sqlalchemy.exc import SQLAlchemyError
+
+        with pytest.raises(SQLAlchemyError):
+            execute_sql(engine, "SELECT FROM WHERE")
+    finally:
+        engine.dispose()
+
+
+def test_execute_sql_write_committed() -> None:
+    """DML 写入后应能在新连接读到（事务已提交）."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        execute_sql(
+            engine,
+            "INSERT INTO users (name, email, age) VALUES ('Gina', 'g@e.com', 28)",
+        )
+        result = execute_sql(engine, "SELECT COUNT(*) AS cnt FROM users")
+        assert result["rows"][0]["cnt"] == 6
+    finally:
+        engine.dispose()
+
+
+def test_execute_sql_with_cte_read_only() -> None:
+    """WITH 语句应识别为只读."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        result = execute_sql(
+            engine,
+            "WITH t AS (SELECT * FROM users WHERE age > 25) SELECT COUNT(*) AS cnt FROM t",
+        )
+        assert result["read_only"] is True
+        assert result["rows"][0]["cnt"] == 3  # Alice/David/Charlie
+    finally:
+        engine.dispose()
+
+
+# ============================================================
+# P4-3 SQL 查询控制台 - explain_sql
+# ============================================================
+
+
+def test_explain_sql_sqlite_returns_plan() -> None:
+    """SQLite EXPLAIN QUERY PLAN 应返回 plan/rows/columns/dialect."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        result = explain_sql(engine, "SELECT * FROM users WHERE id = 1")
+        assert result["dialect"] == "sqlite"
+        assert result["analyze"] is False
+        assert isinstance(result["plan"], list)
+        assert len(result["plan"]) > 0
+        assert isinstance(result["rows"], list)
+        assert "detail" in result["rows"][0]
+        assert "id" in result["columns"]
+        assert "parent" in result["columns"]
+        assert "notused" in result["columns"]
+        assert "detail" in result["columns"]
+    finally:
+        engine.dispose()
+
+
+def test_explain_sql_analyze_ignored_on_sqlite() -> None:
+    """SQLite 应忽略 analyze 参数."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        result = explain_sql(engine, "SELECT * FROM users", analyze=True)
+        assert result["analyze"] is False
+        assert result["dialect"] == "sqlite"
+    finally:
+        engine.dispose()
+
+
+def test_explain_sql_empty_raises() -> None:
+    """空 SQL 应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        with pytest.raises(QueryError, match="不能为空"):
+            explain_sql(engine, "")
+    finally:
+        engine.dispose()
+
+
+def test_explain_sql_trailing_semicolon() -> None:
+    """末尾分号应被正确处理."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        result = explain_sql(engine, "SELECT * FROM users;")
+        assert len(result["plan"]) > 0
+    finally:
+        engine.dispose()
+
+
+def test_explain_sql_unsupported_dialect_raises() -> None:
+    """不支持的方言应抛 QueryError（用 FakeEngine 模拟）."""
+
+    class _FakeDialect:
+        name = "oracle"
+
+    class _FakeEngine:
+        dialect = _FakeDialect()
+
+        def connect(self) -> Any:  # pragma: no cover
+            raise AssertionError("不应调用 connect")
+
+    with pytest.raises(QueryError, match="暂不支持 EXPLAIN"):
+        explain_sql(cast(Engine, _FakeEngine()), "SELECT 1")
+
+
+def test_explain_sql_syntax_error_raises_sqlalchemy_error() -> None:
+    """SQL 语法错误应抛 SQLAlchemyError."""
+    engine = _make_memory_engine()
+    try:
+        from sqlalchemy.exc import SQLAlchemyError
+
+        with pytest.raises(SQLAlchemyError):
+            explain_sql(engine, "SELECT FROM WHERE")
     finally:
         engine.dispose()

@@ -1,11 +1,15 @@
 import client from "./client";
 import type {
+  ExplainRequest,
+  ExplainResult,
   MessageOut,
   RowCreate,
   RowListResponse,
   RowOut,
   RowQuery,
   RowUpdate,
+  SqlExecRequest,
+  SqlResult,
 } from "@/types";
 
 // 主键序列化为 JSON 字符串并 URL 编码（用于 query 参数）
@@ -102,3 +106,23 @@ export const deleteRow = (
     })
     .then((res) => res.data);
 };
+
+// ----------------- SQL 查询控制台（P4-3） -----------------
+
+// 执行任意 SQL（viewer 仅 SELECT；designer+ 可执行 DDL/DML）
+export const executeSql = (
+  dsId: number,
+  body: SqlExecRequest
+): Promise<SqlResult> =>
+  client
+    .post<SqlResult>(`/manager/${dsId}/query`, body)
+    .then((res) => res.data);
+
+// 获取 SQL 执行计划（所有登录用户可读）
+export const explainSql = (
+  dsId: number,
+  body: ExplainRequest
+): Promise<ExplainResult> =>
+  client
+    .post<ExplainResult>(`/manager/${dsId}/explain`, body)
+    .then((res) => res.data);

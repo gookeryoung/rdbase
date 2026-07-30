@@ -944,3 +944,374 @@ def test_update_row_query_error_returns_400(
         headers=_auth(user),
     )
     assert response.status_code == 400
+
+
+# ============================================================
+# P4-3 SQL 查询控制台 - /query 接口
+# ============================================================
+
+
+@pytest.mark.django_db
+def test_execute_sql_select_returns_200(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """viewer 执行 SELECT 应返回 200 + 结果集."""
+    user = make_user(role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/query",
+        body={"sql": "SELECT id, name FROM users WHERE id = 1"},
+        headers=_auth(user),
+    )
+    assert response.status_code == 200
+    body = json.loads(response.content)
+    assert body["read_only"] is True
+    assert body["columns"] == ["id", "name"]
+    assert len(body["rows"]) == 1
+    assert body["rows"][0]["name"] == "Alice"
+    assert body["rowcount"] == 1
+    assert body["elapsed_ms"] >= 0
+
+
+@pytest.mark.django_db
+def test_execute_sql_select_trailing_semicolon(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """末尾分号应被正确处理."""
+    user = make_user(role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/query",
+        body={"sql": "SELECT COUNT(*) AS cnt FROM users;"},
+        headers=_auth(user),
+    )
+    assert response.status_code == 200
+    body = json.loads(response.content)
+    assert body["rows"][0]["cnt"] == 3
+
+
+@pytest.mark.django_db
+def test_execute_sql_insert_by_designer_returns_200(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """designer 执行 INSERT 应返回 200 + rowcount."""
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/query",
+        body={"sql": "INSERT INTO users (name, email, age) VALUES ('Dan', 'd@e.com', 33)"},
+        headers=_auth(user),
+    )
+    assert response.status_code == 200
+    body = json.loads(response.content)
+    assert body["read_only"] is False
+    assert body["rowcount"] == 1
+    assert body["columns"] == []
+    assert body["rows"] == []
+
+
+@pytest.mark.django_db
+def test_execute_sql_insert_by_admin_returns_200(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """admin 执行 INSERT 应返回 200."""
+    user = make_user(role=Role.ADMIN)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/query",
+        body={"sql": "INSERT INTO users (name, email, age) VALUES ('Eve', 'e@e.com', 22)"},
+        headers=_auth(user),
+    )
+    assert response.status_code == 200
+    body = json.loads(response.content)
+    assert body["rowcount"] == 1
+
+
+@pytest.mark.django_db
+def test_execute_sql_insert_by_viewer_returns_403(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """viewer 执行 INSERT 应返回 403."""
+    user = make_user(role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/query",
+        body={"sql": "INSERT INTO users (name) VALUES ('blocked')"},
+        headers=_auth(user),
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.django_db
+def test_execute_sql_update_by_viewer_returns_403(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """viewer 执行 UPDATE 应返回 403."""
+    user = make_user(role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/query",
+        body={"sql": "UPDATE users SET age = 1 WHERE id = 1"},
+        headers=_auth(user),
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.django_db
+def test_execute_sql_delete_by_viewer_returns_403(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """viewer 执行 DELETE 应返回 403."""
+    user = make_user(role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/query",
+        body={"sql": "DELETE FROM users WHERE id = 1"},
+        headers=_auth(user),
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.django_db
+def test_execute_sql_ddl_by_viewer_returns_403(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """viewer 执行 DDL DROP 应返回 403."""
+    user = make_user(role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/query",
+        body={"sql": "DROP TABLE users"},
+        headers=_auth(user),
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.django_db
+def test_execute_sql_ddl_by_designer_returns_200(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """designer 执行 DDL CREATE TABLE 应返回 200 + rowcount=-1."""
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/query",
+        body={"sql": "CREATE TABLE foo (id INTEGER PRIMARY KEY)"},
+        headers=_auth(user),
+    )
+    assert response.status_code == 200
+    body = json.loads(response.content)
+    assert body["rowcount"] == -1
+
+
+@pytest.mark.django_db
+def test_execute_sql_without_token_returns_401() -> None:
+    """未认证访问应返回 401."""
+    client = Client()
+    response = _post(client, "/api/v1/manager/1/query", body={"sql": "SELECT 1"})
+    assert response.status_code == 401
+
+
+@pytest.mark.django_db
+def test_execute_sql_unknown_datasource_returns_404(make_user: Callable[..., User]) -> None:
+    """不存在的数据源应返回 404."""
+    user = make_user()
+    client = Client()
+    response = _post(
+        client,
+        "/api/v1/manager/99999/query",
+        body={"sql": "SELECT 1"},
+        headers=_auth(user),
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_execute_sql_empty_returns_400(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """空 SQL 应返回 400."""
+    user = make_user()
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/query",
+        body={"sql": ""},
+        headers=_auth(user),
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_execute_sql_syntax_error_returns_400(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """SQL 语法错误应返回 400."""
+    user = make_user()
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/query",
+        body={"sql": "SELECT FROM WHERE"},
+        headers=_auth(user),
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_execute_sql_write_committed(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """DML 写入后应能在新连接读到（事务已提交）."""
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/query",
+        body={"sql": "INSERT INTO users (name, email, age) VALUES ('Gina', 'g@e.com', 28)"},
+        headers=_auth(user),
+    )
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/query",
+        body={"sql": "SELECT COUNT(*) AS cnt FROM users"},
+        headers=_auth(user),
+    )
+    body = json.loads(response.content)
+    assert body["rows"][0]["cnt"] == 4
+
+
+# ============================================================
+# P4-3 SQL 查询控制台 - /explain 接口
+# ============================================================
+
+
+@pytest.mark.django_db
+def test_explain_sql_returns_200(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """viewer 调用 EXPLAIN 应返回 200 + 计划."""
+    user = make_user(role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/explain",
+        body={"sql": "SELECT * FROM users WHERE id = 1"},
+        headers=_auth(user),
+    )
+    assert response.status_code == 200
+    body = json.loads(response.content)
+    assert body["dialect"] == "sqlite"
+    assert body["analyze"] is False
+    assert isinstance(body["plan"], list)
+    assert len(body["plan"]) > 0
+    assert "detail" in body["rows"][0]
+
+
+@pytest.mark.django_db
+def test_explain_sql_analyze_ignored_on_sqlite(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """SQLite 应忽略 analyze 参数."""
+    user = make_user()
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/explain",
+        body={"sql": "SELECT * FROM users", "analyze": True},
+        headers=_auth(user),
+    )
+    assert response.status_code == 200
+    body = json.loads(response.content)
+    assert body["analyze"] is False
+
+
+@pytest.mark.django_db
+def test_explain_sql_without_token_returns_401() -> None:
+    """未认证访问应返回 401."""
+    client = Client()
+    response = _post(client, "/api/v1/manager/1/explain", body={"sql": "SELECT 1"})
+    assert response.status_code == 401
+
+
+@pytest.mark.django_db
+def test_explain_sql_unknown_datasource_returns_404(make_user: Callable[..., User]) -> None:
+    """不存在的数据源应返回 404."""
+    user = make_user()
+    client = Client()
+    response = _post(
+        client,
+        "/api/v1/manager/99999/explain",
+        body={"sql": "SELECT 1"},
+        headers=_auth(user),
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_explain_sql_empty_returns_400(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """空 SQL 应返回 400."""
+    user = make_user()
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/explain",
+        body={"sql": ""},
+        headers=_auth(user),
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_explain_sql_syntax_error_returns_400(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """SQL 语法错误应返回 400."""
+    user = make_user()
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/explain",
+        body={"sql": "SELECT FROM WHERE"},
+        headers=_auth(user),
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_explain_sql_query_error_returns_400(
+    make_user: Callable[..., User], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """explain_sql 抛 QueryError 时应返回 400（覆盖 explain QueryError 分支）."""
+
+    def _raise_query_error(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        raise QueryError("方言不支持")
+
+    user = make_user()
+    ds = _make_sqlite_file_ds(tmp_path)
+    monkeypatch.setattr("apps.manager.api.explain_sql", _raise_query_error)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/explain",
+        body={"sql": "SELECT 1"},
+        headers=_auth(user),
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_explain_sql_sqlalchemy_error_returns_400(
+    make_user: Callable[..., User], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """explain_sql 抛 SQLAlchemyError 时应返回 400."""
+
+    def _raise_sqlalchemy_error(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        raise SQLAlchemyError("connection lost")
+
+    user = make_user()
+    ds = _make_sqlite_file_ds(tmp_path)
+    monkeypatch.setattr("apps.manager.api.explain_sql", _raise_sqlalchemy_error)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/explain",
+        body={"sql": "SELECT 1"},
+        headers=_auth(user),
+    )
+    assert response.status_code == 400

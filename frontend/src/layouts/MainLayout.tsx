@@ -5,6 +5,7 @@ import {
   DatabaseOutlined,
   ApartmentOutlined,
   TableOutlined,
+  CodeOutlined,
   LogoutOutlined,
   UserOutlined,
   TeamOutlined,
@@ -37,6 +38,7 @@ const menuItems: MenuItem[] = [
     roles: [Role.ADMIN, Role.DESIGNER],
   },
   { key: "/manager", icon: <TableOutlined />, label: "数据库管理" },
+  { key: "/sql-console", icon: <CodeOutlined />, label: "SQL 控制台" },
   {
     key: "/users",
     icon: <TeamOutlined />,

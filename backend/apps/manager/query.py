@@ -7,6 +7,8 @@
 - ``query_table_rows``: 查询表数据，返回 ``(rows, total)``
 - ``count_table_rows``: 统计满足筛选条件的行数
 - ``insert_row``/``update_row``/``delete_row``/``get_row``: 单行 CRUD，主键反查定位
+- ``execute_sql``: 执行任意 SQL，自动区分 SELECT（返回结果集）与 DDL/DML（返回影响行数）
+- ``explain_sql``: 多方言执行计划（SQLite ``EXPLAIN QUERY PLAN``、MySQL/PG ``EXPLAIN`` 可选 ``ANALYZE``）
 - 标识符引用：MySQL 反引号、PG/SQLite 双引号（独立实现，避免跨模块依赖）
 - 白名单：通过 SQLAlchemy inspect 获取列名集合，校验 ``columns``/``order_by``/``filters``/``values``/``pk``
 - SQLite schema 强制 None
@@ -16,6 +18,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, cast
 
 from sqlalchemy import inspect, text
@@ -573,10 +576,193 @@ def get_row(
         return _select_row_by_pk(conn, table_ref, dialect, pk)
 
 
+# ============================================================
+# P4-3 SQL 查询控制台
+# ============================================================
+
+
+# 只读语句前缀（不区分大小写、去前导空白后判断）：这些语句不修改数据，
+# viewer 角色可执行；其他语句（INSERT/UPDATE/DELETE/DDL）须 designer+。
+_READ_ONLY_PREFIXES: tuple[str, ...] = ("select", "with", "show", "describe", "desc", "explain")
+
+# 执行计划支持的方言 → EXPLAIN 语法模板
+# 模板占位 ``{sql}`` 为原始 SQL，``{analyze}`` 在 PG/MySQL 8.0+ 用于追加 ANALYZE 关键字。
+_EXPLAIN_TEMPLATES: dict[str, str] = {
+    EngineType.SQLITE: "EXPLAIN QUERY PLAN {sql}",
+    EngineType.POSTGRESQL: "EXPLAIN {analyze}{sql}",
+    EngineType.MYSQL: "EXPLAIN {analyze}{sql}",
+}
+
+
+def _strip_sql(sql: str) -> str:
+    """去除 SQL 末尾的分号与首尾空白，便于前缀判断与 EXPLAIN 拼接.
+
+    Args:
+        sql: 原始 SQL 字符串。
+
+    Returns:
+        去除首尾空白与末尾分号后的 SQL。
+
+    Raises:
+        QueryError: SQL 为空或仅含空白/分号。
+    """
+    cleaned = sql.strip().rstrip(";").strip()
+    if not cleaned:
+        raise QueryError("SQL 不能为空")
+    return cleaned
+
+
+def _is_read_only(sql: str) -> bool:
+    """判断 SQL 是否为只读语句（SELECT/WITH/SHOW/DESCRIBE/DESC/EXPLAIN）.
+
+    Args:
+        sql: 已去空白与末尾分号的 SQL。
+
+    Returns:
+        True 表示只读；False 表示 DDL/DML（写操作）。
+    """
+    lowered = sql.lower()
+    return lowered.startswith(_READ_ONLY_PREFIXES)
+
+
+def execute_sql(
+    engine: Engine,
+    sql: str,
+    *,
+    read_only: bool = False,
+) -> dict[str, Any]:
+    """执行任意 SQL，自动区分 SELECT（返回结果集）与 DDL/DML（返回影响行数）.
+
+    Args:
+        engine: SQLAlchemy 引擎。
+        sql: 原始 SQL 字符串（可含末尾分号）。
+        read_only: 是否强制只读模式（True 时非只读语句抛 QueryError）。
+            用于 viewer 角色限制：调用方传 ``read_only=True`` 拦截写操作。
+
+    Returns:
+        dict 含以下字段：
+
+        - ``columns``: 列名列表（SELECT 时为结果集列名，DDL/DML 时为空列表）。
+        - ``rows``: 行 dict 列表（SELECT 时为结果集；DDL/DML 时为空列表）。
+        - ``rowcount``: 影响行数（SELECT 时为结果集行数；DDL/DML 时为底层 rowcount，无法获取时为 -1）。
+        - ``elapsed_ms``: 执行耗时（毫秒，float）。
+        - ``read_only``: 实际执行的语句是否为只读。
+
+    Raises:
+        QueryError: SQL 为空、``read_only=True`` 但语句非只读。
+        SQLAlchemyError: 底层 SQL 执行失败（语法错误、约束冲突等）。
+    """
+    cleaned = _strip_sql(sql)
+    is_read = _is_read_only(cleaned)
+    if read_only and not is_read:
+        raise QueryError("当前角色仅允许执行只读查询（SELECT/WITH/SHOW/DESCRIBE/EXPLAIN）")
+
+    start = time.perf_counter()
+    if is_read:
+        # SELECT/WITH：使用 connect() 读取结果集，无显式事务
+        with engine.connect() as conn:
+            result = conn.execute(text(cleaned))
+            columns_list: list[str] = list(result.keys()) if result.returns_rows else []
+            rows_list: list[dict[str, Any]] = (
+                [cast("dict[str, Any]", dict(row._mapping)) for row in result.fetchall()] if result.returns_rows else []
+            )
+        elapsed = (time.perf_counter() - start) * 1000
+        return {
+            "columns": columns_list,
+            "rows": rows_list,
+            "rowcount": len(rows_list),
+            "elapsed_ms": round(elapsed, 3),
+            "read_only": True,
+        }
+
+    # DDL/DML：使用 begin() 显式事务，统一 commit
+    with engine.begin() as conn:
+        result = conn.execute(text(cleaned))
+        # rowcount：INSERT/UPDATE/DELETE 为影响行数；DDL 通常为 -1
+        rowcount = result.rowcount
+    elapsed = (time.perf_counter() - start) * 1000
+    return {
+        "columns": [],
+        "rows": [],
+        "rowcount": rowcount,
+        "elapsed_ms": round(elapsed, 3),
+        "read_only": False,
+    }
+
+
+def explain_sql(
+    engine: Engine,
+    sql: str,
+    *,
+    analyze: bool = False,
+) -> dict[str, Any]:
+    """获取 SQL 执行计划.
+
+    多方言适配：
+
+    - SQLite: ``EXPLAIN QUERY PLAN <sql>``（不支持 ANALYZE，``analyze`` 参数忽略）
+    - PostgreSQL: ``EXPLAIN [ANALYZE] <sql>``
+    - MySQL: ``EXPLAIN [ANALYZE] <sql>``（MySQL 8.0+ 支持 ANALYZE）
+
+    Args:
+        engine: SQLAlchemy 引擎。
+        sql: 待分析的 SQL（通常为 SELECT；部分方言支持 DML 的 EXPLAIN）。
+        analyze: 是否实际执行以获取真实执行统计（PG/MySQL 8.0+ 支持）。
+            SQLite 忽略此参数。
+
+    Returns:
+        dict 含以下字段：
+
+        - ``plan``: 执行计划文本行列表（每行一个字符串）。
+        - ``rows``: 结构化行 dict 列表（保留原始列，便于前端表格展示）。
+        - ``columns``: 结果列名列表。
+        - ``analyze``: 实际是否启用 ANALYZE。
+        - ``dialect``: 方言名。
+
+    Raises:
+        QueryError: SQL 为空、方言不支持 EXPLAIN。
+        SQLAlchemyError: 底层执行失败。
+    """
+    cleaned = _strip_sql(sql)
+    dialect = engine.dialect.name
+    template = _EXPLAIN_TEMPLATES.get(dialect)
+    if template is None:
+        raise QueryError(f"方言 {dialect} 暂不支持 EXPLAIN")
+
+    # SQLite 不支持 ANALYZE；其他方言按用户意图拼接
+    analyze_keyword = "ANALYZE " if analyze and dialect != EngineType.SQLITE else ""
+    explain_sql_str = template.format(sql=cleaned, analyze=analyze_keyword)
+
+    with engine.connect() as conn:
+        result = conn.execute(text(explain_sql_str))
+        columns_list: list[str] = list(result.keys()) if result.returns_rows else []
+        rows_raw: list[Any] = list(result.fetchall()) if result.returns_rows else []
+
+    # SQLite EXPLAIN QUERY PLAN 返回 (id, parent, notused, detail) 四列；
+    # PG/MySQL EXPLAIN 通常返回单列文本行（每行一段计划文本）。
+    # 统一构造结构化行 + 文本行两种视图，便于前端展示。
+    rows_list: list[dict[str, Any]] = [cast("dict[str, Any]", dict(row._mapping)) for row in rows_raw]
+    plan_lines: list[str]
+    if columns_list:
+        plan_lines = [" | ".join(str(row.get(col, "")) for col in columns_list) for row in rows_list]
+    else:  # pragma: no cover - 主流方言 EXPLAIN 均返回行集，防御性兜底
+        plan_lines = []
+
+    return {
+        "plan": plan_lines,
+        "rows": rows_list,
+        "columns": columns_list,
+        "analyze": bool(analyze_keyword),
+        "dialect": dialect,
+    }
+
+
 __all__ = [
     "QueryError",
     "count_table_rows",
     "delete_row",
+    "execute_sql",
+    "explain_sql",
     "get_column_names",
     "get_pk_columns",
     "get_row",

@@ -304,3 +304,34 @@ export interface RowOut {
 export interface MessageOut {
   detail: string;
 }
+
+// ----------------- SQL 查询控制台（P4-3） -----------------
+
+// SQL 执行请求
+export interface SqlExecRequest {
+  sql: string;
+}
+
+// SQL 执行结果响应
+export interface SqlResult {
+  columns: string[];
+  rows: Record<string, unknown>[];
+  rowcount: number;
+  elapsed_ms: number;
+  read_only: boolean;
+}
+
+// 执行计划请求
+export interface ExplainRequest {
+  sql: string;
+  analyze?: boolean;
+}
+
+// 执行计划响应
+export interface ExplainResult {
+  plan: string[];
+  rows: Record<string, unknown>[];
+  columns: string[];
+  analyze: boolean;
+  dialect: string;
+}
