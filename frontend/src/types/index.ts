@@ -245,3 +245,42 @@ export interface TableDetail {
   indexes: IndexMeta[];
   unique_constraints: string[][];
 }
+
+// ----------------- 数据库管理（P4） -----------------
+
+// 行筛选操作符
+export type RowFilterOp =
+  | "eq"
+  | "ne"
+  | "gt"
+  | "lt"
+  | "ge"
+  | "le"
+  | "like"
+  | "in";
+
+// 单列筛选条件
+export interface RowFilter {
+  op: RowFilterOp;
+  val: unknown;
+}
+
+// 行查询参数
+export interface RowQuery {
+  schema_name?: string | null;
+  page?: number;
+  page_size?: number;
+  order_by?: string | null;
+  order_dir?: "asc" | "desc";
+  columns?: string[] | null;
+  filters?: Record<string, RowFilter> | null;
+}
+
+// 行列表响应
+export interface RowListResponse {
+  items: Record<string, unknown>[];
+  total: number;
+  page: number;
+  page_size: number;
+  columns: string[];
+}

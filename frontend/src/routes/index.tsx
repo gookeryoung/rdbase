@@ -5,20 +5,11 @@ import Users from "@/pages/Users";
 import Profile from "@/pages/Profile";
 import Datasources from "@/pages/Datasources";
 import Designer from "@/pages/Designer";
+import Manager from "@/pages/Manager";
 import MainLayout from "@/layouts/MainLayout";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import RoleRoute from "@/components/RoleRoute";
-import { Typography } from "antd";
 import { Role } from "@/types";
-
-const { Text } = Typography;
-
-// 占位页面组件：未实现模块统一占位
-const Placeholder = ({ title }: { title: string }) => (
-  <div style={{ padding: 24, textAlign: "center" }}>
-    <Text type="secondary">{title}（占位页面，待后续阶段实现）</Text>
-  </div>
-);
 
 // 路由配置：
 // - ProtectedRoute：登录守卫
@@ -42,7 +33,7 @@ export const routes: RouteObject[] = [
             element: <RoleRoute allowedRoles={[Role.ADMIN, Role.DESIGNER]} />,
             children: [{ index: true, element: <Designer /> }],
           },
-          { path: "manager", element: <Placeholder title="数据库管理" /> },
+          { path: "manager", element: <Manager /> },
           {
             path: "users",
             element: <RoleRoute allowedRoles={[Role.ADMIN]} />,

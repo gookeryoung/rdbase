@@ -32,7 +32,7 @@ INSTALLED_APPS = [
     "apps.accounts",
     "apps.datasources",
     "apps.designer",
-    # "apps.manager",
+    "apps.manager",
     # "apps.audit",
 ]
 

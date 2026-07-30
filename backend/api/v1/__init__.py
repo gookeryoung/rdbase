@@ -9,6 +9,7 @@ from apps.accounts.api import router as accounts_router
 from apps.accounts.users import router as users_router
 from apps.datasources.api import router as datasources_router
 from apps.designer.api import router as designer_router
+from apps.manager.api import router as manager_router
 from ninja import NinjaAPI
 
 api = NinjaAPI(
@@ -21,3 +22,4 @@ api.add_router("/auth", accounts_router)
 api.add_router("/users", users_router)
 api.add_router("/datasources", datasources_router)
 api.add_router("/designer", designer_router)
+api.add_router("/manager", manager_router)
