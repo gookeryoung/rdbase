@@ -242,3 +242,27 @@ def test_admin_registers_user_model() -> None:
     from django.contrib import admin
 
     assert User in admin.site._registry
+
+
+@pytest.mark.django_db
+def test_refresh_with_non_int_user_id_returns_401() -> None:
+    """refresh token 的 user_id 非 int 应返回 401（覆盖 api.py 第 106 行分支）."""
+    from datetime import datetime, timedelta, timezone
+
+    import jwt as jwt_mod
+    from django.conf import settings
+
+    now = datetime.now(timezone.utc)
+    payload = {
+        "user_id": "not-int",
+        "token_type": "refresh",
+        "exp": now + timedelta(days=1),
+        "iat": now,
+    }
+    key = settings.SECRET_KEY
+    assert key is not None
+    token = jwt_mod.encode(payload, key, algorithm="HS256")
+    client = Client()
+    client.cookies["refresh_token"] = token
+    response = _post(client, "/api/v1/auth/refresh")
+    assert response.status_code == 401
