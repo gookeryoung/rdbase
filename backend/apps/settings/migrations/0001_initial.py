@@ -4,27 +4,41 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     initial = True
 
-    dependencies = [
-    ]
+    dependencies = []
 
     operations = [
         migrations.CreateModel(
-            name='SystemSetting',
+            name="SystemSetting",
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('key', models.CharField(help_text='点分路径格式，如 session.access_token_minutes', max_length=128, unique=True, verbose_name='设置键')),
-                ('value', models.TextField(blank=True, default='', verbose_name='设置值（字符串存储）')),
-                ('value_type', models.CharField(choices=[('str', '字符串'), ('int', '整数'), ('bool', '布尔'), ('json', 'JSON')], default='str', max_length=16, verbose_name='值类型')),
-                ('description', models.CharField(blank=True, default='', max_length=255, verbose_name='描述')),
-                ('updated_at', models.DateTimeField(auto_now=True, verbose_name='更新时间')),
+                ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")),
+                (
+                    "key",
+                    models.CharField(
+                        help_text="点分路径格式，如 session.access_token_minutes",
+                        max_length=128,
+                        unique=True,
+                        verbose_name="设置键",
+                    ),
+                ),
+                ("value", models.TextField(blank=True, default="", verbose_name="设置值（字符串存储）")),
+                (
+                    "value_type",
+                    models.CharField(
+                        choices=[("str", "字符串"), ("int", "整数"), ("bool", "布尔"), ("json", "JSON")],
+                        default="str",
+                        max_length=16,
+                        verbose_name="值类型",
+                    ),
+                ),
+                ("description", models.CharField(blank=True, default="", max_length=255, verbose_name="描述")),
+                ("updated_at", models.DateTimeField(auto_now=True, verbose_name="更新时间")),
             ],
             options={
-                'verbose_name': '系统设置',
-                'verbose_name_plural': '系统设置',
-                'ordering': ['key'],
+                "verbose_name": "系统设置",
+                "verbose_name_plural": "系统设置",
+                "ordering": ["key"],
             },
         ),
     ]

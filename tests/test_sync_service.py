@@ -390,7 +390,9 @@ class TestSyncServiceScheduled:
         sync_ds_for_service: DataSource,
     ) -> None:
         """到达执行时间的调度配置应被执行."""
-        from datetime import datetime, timedelta
+        from datetime import timedelta
+
+        from django.utils import timezone
 
         config = SyncConfig.objects.create(
             name="调度测试配置",
@@ -401,7 +403,7 @@ class TestSyncServiceScheduled:
             status=SyncStatus.ACTIVE,
             scheduler_enabled=True,
             cron_expression="*/5 * * * *",
-            next_run_at=datetime.now() - timedelta(minutes=10),  # 10分钟前
+            next_run_at=timezone.now() - timedelta(minutes=10),  # 10分钟前
             max_retries=1,
             created_by=admin_user,
         )
@@ -631,7 +633,9 @@ class TestSyncServiceExecution:
         sync_ds_for_service: DataSource,
     ) -> None:
         """增量模式应使用 last_sync_at 过滤."""
-        from datetime import datetime, timedelta
+        from datetime import timedelta
+
+        from django.utils import timezone
 
         config = SyncConfig.objects.create(
             name="增量读取测试",
@@ -641,7 +645,7 @@ class TestSyncServiceExecution:
             sync_mode=SyncMode.INCREMENTAL,
             status=SyncStatus.ACTIVE,
             timestamp_field="date_joined",
-            last_sync_at=datetime.now() - timedelta(days=365),
+            last_sync_at=timezone.now() - timedelta(days=365),
             created_by=admin_user,
         )
         SyncFieldMapping.objects.create(
@@ -663,9 +667,8 @@ class TestSyncServiceExecution:
         sync_ds_for_service: DataSource,
     ) -> None:
         """_finalize_log 应正确设置日志字段."""
-        from datetime import datetime
-
         from apps.sync.models import SyncLog, SyncLogStatus
+        from django.utils import timezone
 
         config = SyncConfig.objects.create(
             name="finalize_test",
@@ -676,9 +679,9 @@ class TestSyncServiceExecution:
         )
         log = SyncLog.objects.create(
             config=config,
-            started_at=datetime.now(),
+            started_at=timezone.now(),
         )
-        started = datetime.now()
+        started = timezone.now()
         SyncService._finalize_log(log, SyncLogStatus.SUCCESS, 10, 8, started, "ok")
         assert log.status == SyncLogStatus.SUCCESS
         assert log.rows_read == 10

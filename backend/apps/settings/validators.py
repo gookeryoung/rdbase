@@ -58,7 +58,7 @@ class ConfigurablePasswordValidator:
                 code="password_no_special",
             )
 
-    def get_help_text(self) -> str:  # noqa: ARG002
+    def get_help_text(self) -> str:
         """返回帮助文本."""
         from apps.settings.models import get_setting_bool, get_setting_int
 
@@ -109,7 +109,7 @@ class PasswordHistoryValidator:
                 code="password_reused",
             )
 
-    def validate_password(self, password: str, user: Any = None) -> None:  # noqa: D401
+    def validate_password(self, password: str, user: Any = None) -> None:
         """更新密码时将旧密码加入历史（由 django.contrib.auth 密码重置流程调用）."""
         from apps.accounts.models import PasswordHistory
         from apps.accounts.models import User as UserModel

@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 from django.db import transaction
 from django.http import HttpRequest, HttpResponse, JsonResponse
@@ -45,7 +45,7 @@ def _setting_dict(setting: SystemSetting) -> dict[str, Any]:
 
 
 @router.get("/settings", response={200: SystemSettingListOut})
-def list_settings_view(request: HttpRequest) -> HttpResponse:  # noqa: ARG001
+def list_settings_view(request: HttpRequest) -> HttpResponse:
     """列出所有系统设置（仅管理员）."""
     require_admin(request)
     qs = SystemSetting.objects.all().order_by("key")
@@ -60,7 +60,7 @@ def list_settings_view(request: HttpRequest) -> HttpResponse:  # noqa: ARG001
 
 
 @router.get("/settings/presets", response={200: list[SystemSettingOut]})
-def list_presets_view(request: HttpRequest) -> HttpResponse:  # noqa: ARG001
+def list_presets_view(request: HttpRequest) -> HttpResponse:
     """列出预置设置项定义（仅管理员，供前端参考类型与默认值）."""
     require_admin(request)
     items: list[SystemSettingOut] = []

@@ -171,7 +171,7 @@ class TestSyncLog:
 
     def test_create_log(self, sync_config: SyncConfig) -> None:
         """创建同步日志成功."""
-        from datetime import datetime
+        from django.utils import timezone
 
         log = SyncLog.objects.create(
             config=sync_config,
@@ -180,7 +180,7 @@ class TestSyncLog:
             rows_read=100,
             rows_written=98,
             rows_skipped=2,
-            started_at=datetime.now(),
+            started_at=timezone.now(),
         )
         assert log.pk > 0
         assert log.rows_read == 100
@@ -189,7 +189,8 @@ class TestSyncLog:
     def test_log_duration_calculation(self, sync_config: SyncConfig) -> None:
         """同步日志应计算耗时."""
         import time
-        from datetime import datetime
+
+        from django.utils import timezone
 
         log = SyncLog.objects.create(
             config=sync_config,
@@ -197,7 +198,7 @@ class TestSyncLog:
             mode=SyncMode.INCREMENTAL,
             rows_read=0,
             rows_written=0,
-            started_at=datetime.now(),
+            started_at=timezone.now(),
         )
         time.sleep(0.1)
         log.status = SyncLogStatus.SUCCESS
@@ -208,13 +209,13 @@ class TestSyncLog:
 
     def test_log_default_ordering(self, sync_config: SyncConfig) -> None:
         """日志应按开始时间降序排列."""
-        from datetime import datetime
+        from django.utils import timezone
 
         SyncLog.objects.create(
-            config=sync_config, status=SyncLogStatus.SUCCESS, mode=SyncMode.FULL, started_at=datetime.now()
+            config=sync_config, status=SyncLogStatus.SUCCESS, mode=SyncMode.FULL, started_at=timezone.now()
         )
         SyncLog.objects.create(
-            config=sync_config, status=SyncLogStatus.SUCCESS, mode=SyncMode.FULL, started_at=datetime.now()
+            config=sync_config, status=SyncLogStatus.SUCCESS, mode=SyncMode.FULL, started_at=timezone.now()
         )
         logs = list(SyncLog.objects.all())
         assert len(logs) == 2
@@ -224,12 +225,12 @@ class TestSyncLog:
 
         此处 config 是 PROTECT，所以删除配置前必须先清理日志。
         """
-        from datetime import datetime
+        from django.utils import timezone
 
         log = SyncLog.objects.create(
             config=sync_config,
             status=SyncLogStatus.SUCCESS,
             mode=SyncMode.FULL,
-            started_at=datetime.now(),
+            started_at=timezone.now(),
         )
         assert log.config_id == sync_config.pk

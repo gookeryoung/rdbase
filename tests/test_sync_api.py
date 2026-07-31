@@ -222,6 +222,75 @@ class TestSyncConfigAPI:
         response = _delete(client, "/api/v1/sync/configs/99999", _auth(admin_user))
         assert response.status_code == 404
 
+    def test_update_config_not_found(self, client: Client, admin_user: User) -> None:
+        """更新不存在的配置应返回 404."""
+        response = _patch(
+            client,
+            "/api/v1/sync/configs/99999",
+            {"description": "new"},
+            _auth(admin_user),
+        )
+        assert response.status_code == 404
+
+    def test_update_config_with_field_mappings(
+        self, client: Client, admin_user: User, sync_config_for_api: SyncConfig
+    ) -> None:
+        """更新配置时传入 field_mappings 应全量替换映射."""
+        original_count = sync_config_for_api.field_mappings.count()  # type: ignore[missing-attribute]
+        assert original_count == 2  # fixture 中创建了 2 条映射
+        payload = {
+            "field_mappings": [
+                {
+                    "source_field": "id",
+                    "target_field": "new_id",
+                    "mapping_type": "direct",
+                    "fixed_value": "",
+                    "is_pk": True,
+                }
+            ]
+        }
+        response = _patch(
+            client,
+            f"/api/v1/sync/configs/{sync_config_for_api.pk}",
+            payload,
+            _auth(admin_user),
+        )
+        assert response.status_code == 200
+        data = response.json()  # type: ignore[missing-attribute]
+        assert len(data["field_mappings"]) == 1
+        assert data["field_mappings"][0]["target_field"] == "new_id"
+        # 数据库中应只剩 1 条
+        sync_config_for_api.refresh_from_db()
+        assert sync_config_for_api.field_mappings.count() == 1  # type: ignore[missing-attribute]
+
+    def test_create_config_unauthenticated_via_view(self, db: Any, sync_ds_for_api: DataSource) -> None:
+        """直接调用 view 函数，覆盖 user 未认证分支.
+
+        require_admin 已通过（mock），但 request.auth 和 request.user 均无认证态，
+        用于覆盖 line 176 的防御性 401 分支。
+        """
+        from unittest.mock import MagicMock, patch
+
+        from apps.sync.api import create_config
+        from apps.sync.schemas import SyncConfigCreateIn
+        from ninja.errors import HttpError
+
+        request = MagicMock()
+        request.auth = None  # require_admin 通过防御性 mock 跳过
+        unauthenticated_user = MagicMock(is_authenticated=False)
+        request.user = unauthenticated_user
+
+        payload = SyncConfigCreateIn(
+            name="测试未认证",
+            source_table="auth_user",
+            target_datasource_id=sync_ds_for_api.pk,
+            target_table="ext_user",
+        )
+
+        with patch("apps.sync.api.require_admin"), pytest.raises(HttpError) as exc:
+            create_config(request, payload)
+        assert exc.value.status_code == 401
+
 
 class TestSyncTriggerAPI:
     """同步触发 API 测试."""
@@ -260,6 +329,49 @@ class TestSyncTriggerAPI:
         )
         logs = SyncLog.objects.filter(config=sync_config_for_api)
         assert logs.count() >= 1
+
+    def test_trigger_config_not_found(self, client: Client, admin_user: User) -> None:
+        """触发不存在的配置应返回 404."""
+        response = _post(
+            client,
+            "/api/v1/sync/configs/99999/trigger",
+            {"confirm": True},
+            _auth(admin_user),
+        )
+        assert response.status_code == 404
+
+    def test_trigger_success_response(self, client: Client, admin_user: User, sync_config_for_api: SyncConfig) -> None:
+        """触发同步成功时应返回 200 与结果数据."""
+        from unittest.mock import MagicMock, patch
+
+        from apps.sync.api import trigger_sync
+        from apps.sync.schemas import SyncTriggerIn
+
+        # 直接调用 view，mock SyncService.run 返回成功 log
+        request = MagicMock()
+        request.auth = admin_user
+        request.user = admin_user
+
+        fake_log = MagicMock()
+        fake_log.pk = 12345
+        fake_log.status = "success"
+        fake_log.mode = "full"
+        fake_log.rows_read = 10
+        fake_log.rows_written = 8
+        fake_log.rows_skipped = 2
+        fake_log.error_message = ""
+        fake_log.duration_ms = 100
+
+        with patch("apps.sync.api.SyncService") as mock_service_cls:
+            mock_service_cls.return_value.run.return_value = fake_log
+            response = trigger_sync(request, sync_config_for_api.pk, SyncTriggerIn(confirm=True, force_full=True))
+
+        assert response.status_code == 200
+        data = json.loads(response.content)
+        assert data["log_id"] == 12345
+        assert data["status"] == "success"
+        assert data["rows_read"] == 10
+        assert data["rows_written"] == 8
 
 
 class TestSyncPreviewAPI:
@@ -405,9 +517,7 @@ class TestSyncColumnsAPI:
         )
         assert response.status_code == 400
 
-    def test_target_columns(
-        self, client: Client, admin_user: User, sync_config_for_api: SyncConfig
-    ) -> None:
+    def test_target_columns(self, client: Client, admin_user: User, sync_config_for_api: SyncConfig) -> None:
         """获取目标表列信息（:memory: SQLite 无表，返回 500）."""
         ds_id = sync_config_for_api.target_datasource_id
         response = client.get(

@@ -6,78 +6,163 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     initial = True
 
     dependencies = [
-        ('datasources', '0001_initial'),
+        ("datasources", "0001_initial"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
     operations = [
         migrations.CreateModel(
-            name='SyncConfig',
+            name="SyncConfig",
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('name', models.CharField(max_length=128, unique=True, verbose_name='配置名称')),
-                ('description', models.CharField(blank=True, default='', max_length=255, verbose_name='描述')),
-                ('source_table', models.CharField(max_length=128, verbose_name='源表名')),
-                ('source_schema', models.CharField(blank=True, default='', max_length=128, verbose_name='源 Schema')),
-                ('source_db_alias', models.CharField(blank=True, default='default', max_length=64, verbose_name='源数据库别名（Django DATABASES key）')),
-                ('target_table', models.CharField(max_length=128, verbose_name='目标表名')),
-                ('target_schema', models.CharField(blank=True, default='', max_length=128, verbose_name='目标 Schema')),
-                ('sync_mode', models.CharField(choices=[('full', '全量'), ('incremental', '增量')], default='incremental', max_length=20, verbose_name='同步模式')),
-                ('status', models.CharField(choices=[('active', '启用'), ('paused', '暂停'), ('error', '错误')], default='active', max_length=20, verbose_name='状态')),
-                ('timestamp_field', models.CharField(blank=True, default='updated_at', max_length=64, verbose_name='增量时间戳字段')),
-                ('batch_size', models.PositiveIntegerField(default=500, verbose_name='批量大小')),
-                ('created_at', models.DateTimeField(auto_now_add=True, verbose_name='创建时间')),
-                ('updated_at', models.DateTimeField(auto_now=True, verbose_name='更新时间')),
-                ('last_sync_at', models.DateTimeField(blank=True, null=True, verbose_name='最近同步时间')),
-                ('created_by', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='sync_configs', to=settings.AUTH_USER_MODEL, verbose_name='创建人')),
-                ('target_datasource', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='sync_configs', to='datasources.datasource', verbose_name='目标数据源')),
+                ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")),
+                ("name", models.CharField(max_length=128, unique=True, verbose_name="配置名称")),
+                ("description", models.CharField(blank=True, default="", max_length=255, verbose_name="描述")),
+                ("source_table", models.CharField(max_length=128, verbose_name="源表名")),
+                ("source_schema", models.CharField(blank=True, default="", max_length=128, verbose_name="源 Schema")),
+                (
+                    "source_db_alias",
+                    models.CharField(
+                        blank=True,
+                        default="default",
+                        max_length=64,
+                        verbose_name="源数据库别名（Django DATABASES key）",
+                    ),
+                ),
+                ("target_table", models.CharField(max_length=128, verbose_name="目标表名")),
+                ("target_schema", models.CharField(blank=True, default="", max_length=128, verbose_name="目标 Schema")),
+                (
+                    "sync_mode",
+                    models.CharField(
+                        choices=[("full", "全量"), ("incremental", "增量")],
+                        default="incremental",
+                        max_length=20,
+                        verbose_name="同步模式",
+                    ),
+                ),
+                (
+                    "status",
+                    models.CharField(
+                        choices=[("active", "启用"), ("paused", "暂停"), ("error", "错误")],
+                        default="active",
+                        max_length=20,
+                        verbose_name="状态",
+                    ),
+                ),
+                (
+                    "timestamp_field",
+                    models.CharField(blank=True, default="updated_at", max_length=64, verbose_name="增量时间戳字段"),
+                ),
+                ("batch_size", models.PositiveIntegerField(default=500, verbose_name="批量大小")),
+                ("created_at", models.DateTimeField(auto_now_add=True, verbose_name="创建时间")),
+                ("updated_at", models.DateTimeField(auto_now=True, verbose_name="更新时间")),
+                ("last_sync_at", models.DateTimeField(blank=True, null=True, verbose_name="最近同步时间")),
+                (
+                    "created_by",
+                    models.ForeignKey(
+                        blank=True,
+                        null=True,
+                        on_delete=django.db.models.deletion.SET_NULL,
+                        related_name="sync_configs",
+                        to=settings.AUTH_USER_MODEL,
+                        verbose_name="创建人",
+                    ),
+                ),
+                (
+                    "target_datasource",
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="sync_configs",
+                        to="datasources.datasource",
+                        verbose_name="目标数据源",
+                    ),
+                ),
             ],
             options={
-                'verbose_name': '同步配置',
-                'verbose_name_plural': '同步配置',
-                'ordering': ['-id'],
+                "verbose_name": "同步配置",
+                "verbose_name_plural": "同步配置",
+                "ordering": ["-id"],
             },
         ),
         migrations.CreateModel(
-            name='SyncFieldMapping',
+            name="SyncFieldMapping",
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('source_field', models.CharField(max_length=128, verbose_name='源字段名')),
-                ('target_field', models.CharField(max_length=128, verbose_name='目标字段名')),
-                ('mapping_type', models.CharField(choices=[('direct', '直接映射'), ('constant', '常量')], default='direct', max_length=20, verbose_name='映射类型')),
-                ('fixed_value', models.CharField(blank=True, default='', max_length=255, verbose_name='常量值（mapping_type=constant 时使用）')),
-                ('is_pk', models.BooleanField(default=False, verbose_name='是否主键')),
-                ('config', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='field_mappings', to='sync.syncconfig', verbose_name='同步配置')),
+                ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")),
+                ("source_field", models.CharField(max_length=128, verbose_name="源字段名")),
+                ("target_field", models.CharField(max_length=128, verbose_name="目标字段名")),
+                (
+                    "mapping_type",
+                    models.CharField(
+                        choices=[("direct", "直接映射"), ("constant", "常量")],
+                        default="direct",
+                        max_length=20,
+                        verbose_name="映射类型",
+                    ),
+                ),
+                (
+                    "fixed_value",
+                    models.CharField(
+                        blank=True, default="", max_length=255, verbose_name="常量值（mapping_type=constant 时使用）"
+                    ),
+                ),
+                ("is_pk", models.BooleanField(default=False, verbose_name="是否主键")),
+                (
+                    "config",
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="field_mappings",
+                        to="sync.syncconfig",
+                        verbose_name="同步配置",
+                    ),
+                ),
             ],
             options={
-                'verbose_name': '同步字段映射',
-                'verbose_name_plural': '同步字段映射',
-                'ordering': ['id'],
+                "verbose_name": "同步字段映射",
+                "verbose_name_plural": "同步字段映射",
+                "ordering": ["id"],
             },
         ),
         migrations.CreateModel(
-            name='SyncLog',
+            name="SyncLog",
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('status', models.CharField(choices=[('success', '成功'), ('partial', '部分成功'), ('failed', '失败')], max_length=20, verbose_name='执行状态')),
-                ('mode', models.CharField(choices=[('full', '全量'), ('incremental', '增量')], max_length=20, verbose_name='本次同步模式')),
-                ('rows_read', models.PositiveIntegerField(default=0, verbose_name='读取行数')),
-                ('rows_written', models.PositiveIntegerField(default=0, verbose_name='写入行数')),
-                ('rows_skipped', models.PositiveIntegerField(default=0, verbose_name='跳过行数')),
-                ('error_message', models.TextField(blank=True, default='', verbose_name='错误信息')),
-                ('started_at', models.DateTimeField(verbose_name='开始时间')),
-                ('finished_at', models.DateTimeField(blank=True, null=True, verbose_name='结束时间')),
-                ('duration_ms', models.PositiveIntegerField(default=0, verbose_name='耗时（毫秒）')),
-                ('config', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='logs', to='sync.syncconfig', verbose_name='同步配置')),
+                ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")),
+                (
+                    "status",
+                    models.CharField(
+                        choices=[("success", "成功"), ("partial", "部分成功"), ("failed", "失败")],
+                        max_length=20,
+                        verbose_name="执行状态",
+                    ),
+                ),
+                (
+                    "mode",
+                    models.CharField(
+                        choices=[("full", "全量"), ("incremental", "增量")], max_length=20, verbose_name="本次同步模式"
+                    ),
+                ),
+                ("rows_read", models.PositiveIntegerField(default=0, verbose_name="读取行数")),
+                ("rows_written", models.PositiveIntegerField(default=0, verbose_name="写入行数")),
+                ("rows_skipped", models.PositiveIntegerField(default=0, verbose_name="跳过行数")),
+                ("error_message", models.TextField(blank=True, default="", verbose_name="错误信息")),
+                ("started_at", models.DateTimeField(verbose_name="开始时间")),
+                ("finished_at", models.DateTimeField(blank=True, null=True, verbose_name="结束时间")),
+                ("duration_ms", models.PositiveIntegerField(default=0, verbose_name="耗时（毫秒）")),
+                (
+                    "config",
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="logs",
+                        to="sync.syncconfig",
+                        verbose_name="同步配置",
+                    ),
+                ),
             ],
             options={
-                'verbose_name': '同步日志',
-                'verbose_name_plural': '同步日志',
-                'ordering': ['-started_at'],
+                "verbose_name": "同步日志",
+                "verbose_name_plural": "同步日志",
+                "ordering": ["-started_at"],
             },
         ),
     ]

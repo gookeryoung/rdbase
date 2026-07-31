@@ -6,8 +6,6 @@ get_setting/get_setting_int/get_setting_bool 便捷函数。
 
 from __future__ import annotations
 
-import json
-
 import pytest
 from apps.settings.models import (
     PRESET_SETTINGS,
@@ -39,8 +37,10 @@ class TestSystemSettingCRUD:
 
     def test_unique_key_constraint(self) -> None:
         """重复 key 应抛 IntegrityError."""
+        from django.db import IntegrityError
+
         SystemSetting.objects.create(key="unique.key", value="1")
-        with pytest.raises(Exception):
+        with pytest.raises(IntegrityError):
             SystemSetting.objects.create(key="unique.key", value="2")
 
     def test_ordering_by_key(self) -> None:
@@ -119,7 +119,7 @@ class TestDeserialize:
         assert _deserialize("false", ValueType.BOOL) is False
 
     def test_json_type(self) -> None:
-        assert _deserialize('[1, 2, 3]', ValueType.JSON) == [1, 2, 3]
+        assert _deserialize("[1, 2, 3]", ValueType.JSON) == [1, 2, 3]
 
 
 @pytest.mark.django_db
@@ -180,7 +180,7 @@ class TestPresets:
 
     def test_presets_format(self) -> None:
         """每个预置项应为 (value, type, desc) 三元组."""
-        for key, entry in PRESET_SETTINGS.items():
+        for _key, entry in PRESET_SETTINGS.items():
             assert len(entry) == 3
             value, vtype, desc = entry
             assert isinstance(value, str)

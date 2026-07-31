@@ -23,6 +23,7 @@ from datetime import datetime
 from typing import Any
 
 from django.db import connection
+from django.utils import timezone
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
@@ -130,7 +131,7 @@ class SyncService:
     def _do_run(self, *, force_full: bool = False) -> SyncLog:
         """执行单次同步（内部方法）."""
         config = self.config
-        started_at = datetime.now()
+        started_at = timezone.now()
         mode = SyncMode.FULL if force_full else config.sync_mode
 
         log = SyncLog.objects.create(
@@ -182,10 +183,10 @@ class SyncService:
             )
 
         except Exception as exc:
-            elapsed_ms = int((datetime.now() - started_at).total_seconds() * 1000)
+            elapsed_ms = int((timezone.now() - started_at).total_seconds() * 1000)
             log.status = SyncLogStatus.FAILED
             log.error_message = str(exc)
-            log.finished_at = datetime.now()
+            log.finished_at = timezone.now()
             log.duration_ms = elapsed_ms
             log.save()
 
@@ -324,7 +325,7 @@ class SyncService:
         Returns:
             BatchSyncResult: 批量同步结果。
         """
-        now = datetime.now()
+        now = timezone.now()
         configs = SyncConfig.objects.filter(
             status=SyncStatus.ACTIVE,
             scheduler_enabled=True,
@@ -588,11 +589,11 @@ class SyncService:
         started_at: datetime,
         message: str = "",
     ) -> None:
-        elapsed_ms = int((datetime.now() - started_at).total_seconds() * 1000)
+        elapsed_ms = int((timezone.now() - started_at).total_seconds() * 1000)
         log.status = status
         log.rows_read = rows_read
         log.rows_written = rows_written
-        log.finished_at = datetime.now()
+        log.finished_at = timezone.now()
         log.duration_ms = elapsed_ms
         if message:
             log.error_message = message
