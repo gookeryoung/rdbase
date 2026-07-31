@@ -1,55 +1,62 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
-  Box,
   Button,
-  Card,
-  Dialog,
-  DialogActions,
-  DialogContent,
-  DialogTitle,
-  FormControl,
-  Grid,
-  InputLabel,
-  MenuItem,
-  Paper,
+  Checkbox,
+  InputNumber,
+  Modal,
+  Popconfirm,
   Select,
-  Stack,
+  Space,
+  Switch,
   Table,
-  TableBody,
-  TableCell,
-  TableContainer,
-  TableHead,
-  TableRow,
-  TextField,
+  Tag,
   Typography,
-  Tooltip,
-  IconButton,
-  Snackbar,
+  message,
+  Spin,
   Alert,
-  Chip,
-} from "@mui/material";
-import AddIcon from "@mui/icons-material/Add";
-import PlayArrowIcon from "@mui/icons-material/PlayArrow";
-import EditIcon from "@mui/icons-material/Edit";
-import DeleteIcon from "@mui/icons-material/Delete";
-import VisibilityIcon from "@mui/icons-material/Visibility";
-import RefresherIcon from "@mui/icons-material/Refresh";
+  Input,
+  Form,
+  Statistic,
+  Row,
+  Col,
+} from "antd";
+import type { ColumnsType } from "antd/es/table";
+import {
+  PlusOutlined,
+  PlayCircleOutlined,
+  EditOutlined,
+  DeleteOutlined,
+  EyeOutlined,
+  ScheduleOutlined,
+  FileSearchOutlined,
+  ReloadOutlined,
+  ThunderboltOutlined,
+} from "@ant-design/icons";
 
 import {
+  listSyncConfigs,
+  createSyncConfig,
+  updateSyncConfig,
+  deleteSyncConfig,
+  triggerSync,
+  previewSync,
+  batchTriggerSync,
+  updateSchedule,
+  listSyncLogs,
+} from "@/api/sync";
+import { listDatasources } from "@/api/datasources";
+import type {
   DataSource,
   SyncConfig,
   SyncConfigCreate,
   SyncFieldMapping,
   SyncLog,
-  SyncResult,
-  TargetColumnInfo,
-} from "../types";
-import { apiFetch } from "../lib/api";
+  SyncPreview,
+  SyncBatchResult,
+  SyncScheduleUpdate,
+} from "@/types";
 
-interface ToastState {
-  message: string;
-  severity: "success" | "error" | "info" | "warning";
-}
+const { Text, Title } = Typography;
 
 const emptyMapping = (): SyncFieldMapping => ({
   source_field: "",
@@ -72,8 +79,24 @@ const createEmptyConfig = (): SyncConfigCreate => ({
   status: "active",
   timestamp_field: "updated_at",
   batch_size: 500,
+  scheduler_enabled: false,
+  cron_expression: "",
+  max_retries: 3,
   field_mappings: [emptyMapping()],
 });
+
+// 状态标签颜色
+const statusColor: Record<string, string> = {
+  active: "success",
+  paused: "default",
+  error: "error",
+};
+
+// 模式标签
+const modeLabel: Record<string, string> = {
+  full: "全量",
+  incremental: "增量",
+};
 
 export default function SyncPage() {
   const [configs, setConfigs] = useState<SyncConfig[]>([]);
@@ -81,51 +104,73 @@ export default function SyncPage() {
   const [logs, setLogs] = useState<SyncLog[]>([]);
   const [logsOpen, setLogsOpen] = useState(false);
   const [viewingLogsConfigId, setViewingLogsConfigId] = useState<number | null>(null);
+  const [loading, setLoading] = useState(false);
 
+  // 创建/编辑对话框
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingConfig, setEditingConfig] = useState<SyncConfigCreate | null>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
+  const [saving, setSaving] = useState(false);
 
-  const [toast, setToast] = useState<ToastState | null>(null);
+  // 调度设置对话框
+  const [scheduleOpen, setScheduleOpen] = useState(false);
+  const [scheduleConfig, setScheduleConfig] = useState<SyncConfig | null>(null);
+  const [scheduleForm, setScheduleForm] = useState<SyncScheduleUpdate>({
+    scheduler_enabled: false,
+    cron_expression: "",
+    max_retries: 3,
+  });
+
+  // 预览对话框
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewData, setPreviewData] = useState<SyncPreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+
+  // 批量触发
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [batchOpen, setBatchOpen] = useState(false);
+  const [batchForceFull, setBatchForceFull] = useState(false);
+  const [batchStopOnError, setBatchStopOnError] = useState(false);
+  const [batchResult, setBatchResult] = useState<SyncBatchResult | null>(null);
+  const [batchLoading, setBatchLoading] = useState(false);
 
   // 加载数据
+  const loadConfigs = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await listSyncConfigs();
+      setConfigs(data.items);
+    } catch {
+      message.error("加载同步配置失败");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const loadDatasources = useCallback(async () => {
+    try {
+      const data = await listDatasources();
+      setDatasources(data);
+    } catch {
+      // 数据源接口可能不可用
+    }
+  }, []);
+
+  const loadLogs = useCallback(async (configId?: number) => {
+    try {
+      const data = await listSyncLogs(configId, 50);
+      setLogs(data.items);
+    } catch {
+      message.error("加载同步日志失败");
+    }
+  }, []);
+
   useEffect(() => {
     loadConfigs();
     loadDatasources();
-  }, []);
+  }, [loadConfigs, loadDatasources]);
 
-  const loadConfigs = async () => {
-    try {
-      const data = await apiFetch<SyncConfigList>("sync/configs");
-      setConfigs(data.items);
-    } catch {
-      showToast("加载同步配置失败", "error");
-    }
-  };
-
-  const loadDatasources = async () => {
-    try {
-      const data = await apiFetch<DataSourceList>("datasources");
-      setDatasources(data.items);
-    } catch {
-      // 数据源接口可能不存在，忽略
-    }
-  };
-
-  const loadLogs = async (configId?: number) => {
-    try {
-      const params = configId ? `?config_id=${configId}` : "?limit=50";
-      const data = await apiFetch<SyncLogList>(`sync/logs${params}`);
-      setLogs(data.items);
-    } catch {
-      showToast("加载同步日志失败", "error");
-    }
-  };
-
-  const showToast = (message: string, severity: ToastState["severity"] = "success") => {
-    setToast({ message, severity });
-  };
-
+  // --- 创建/编辑 ---
   const handleOpenCreate = () => {
     setEditingConfig(createEmptyConfig());
     setEditingId(null);
@@ -146,6 +191,9 @@ export default function SyncPage() {
       status: config.status,
       timestamp_field: config.timestamp_field,
       batch_size: config.batch_size,
+      scheduler_enabled: config.scheduler_enabled,
+      cron_expression: config.cron_expression,
+      max_retries: config.max_retries,
       field_mappings: config.field_mappings.map((m) => ({
         source_field: m.source_field,
         target_field: m.target_field,
@@ -167,78 +215,72 @@ export default function SyncPage() {
   const handleSave = async () => {
     if (!editingConfig) return;
     if (!editingConfig.name.trim()) {
-      showToast("请填写配置名称", "warning");
+      message.warning("请填写配置名称");
       return;
     }
     if (!editingConfig.source_table.trim()) {
-      showToast("请填写源表名", "warning");
+      message.warning("请填写源表名");
       return;
     }
     if (!editingConfig.target_datasource_id) {
-      showToast("请选择目标数据源", "warning");
+      message.warning("请选择目标数据源");
       return;
     }
     if (!editingConfig.target_table.trim()) {
-      showToast("请填写目标表名", "warning");
+      message.warning("请填写目标表名");
       return;
     }
-    // 校验至少一个有效字段映射
     const validMappings = editingConfig.field_mappings.filter(
       (m) => m.source_field.trim() || m.mapping_type === "constant"
     );
     if (validMappings.length === 0) {
-      showToast("请添加至少一个有效字段映射", "warning");
+      message.warning("请添加至少一个有效字段映射");
       return;
     }
 
+    setSaving(true);
     try {
       if (editingId) {
-        await apiFetch<SyncConfig>(`sync/configs/${editingId}`, {
-          method: "PATCH",
-          body: JSON.stringify(editingConfig),
-        });
-        showToast("同步配置已更新");
+        await updateSyncConfig(editingId, editingConfig);
+        message.success("同步配置已更新");
       } else {
-        await apiFetch<SyncConfig>("sync/configs", {
-          method: "POST",
-          body: JSON.stringify(editingConfig),
-        });
-        showToast("同步配置已创建");
+        await createSyncConfig(editingConfig);
+        message.success("同步配置已创建");
       }
       handleCloseDialog();
       loadConfigs();
     } catch (err) {
-      showToast(err instanceof Error ? err.message : "保存失败", "error");
+      message.error(err instanceof Error ? err.message : "保存失败");
+    } finally {
+      setSaving(false);
     }
   };
 
   const handleDelete = async (id: number) => {
-    if (!window.confirm("确定删除此同步配置？关联的日志将保留。")) return;
     try {
-      await apiFetch<{ detail: string }>(`sync/configs/${id}`, {
-        method: "DELETE",
-      });
-      showToast("同步配置已删除");
+      await deleteSyncConfig(id);
+      message.success("同步配置已删除");
       loadConfigs();
     } catch (err) {
-      showToast(err instanceof Error ? err.message : "删除失败", "error");
+      message.error(err instanceof Error ? err.message : "删除失败");
     }
   };
 
   const handleTriggerSync = async (id: number) => {
-    const forceFull = window.confirm("增量同步点取消 = 强制全量同步，确定执行？");
     try {
-      const result = await apiFetch<SyncResult>(`sync/configs/${id}/trigger`, {
-        method: "POST",
-        body: JSON.stringify({ confirm: true, force_full: !forceFull }),
-      });
-      showToast(
-        `同步${result.status === "success" ? "成功" : "失败"}：读取 ${result.rows_read}，写入 ${result.rows_written}，跳过 ${result.rows_skipped}`,
-        result.status === "success" ? "success" : "error"
-      );
+      const result = await triggerSync(id, { confirm: true, force_full: false });
+      if (result.status === "success") {
+        message.success(
+          `同步成功：读取 ${result.rows_read}，写入 ${result.rows_written}，跳过 ${result.rows_skipped}`
+        );
+      } else {
+        message.error(
+          `同步失败：读取 ${result.rows_read}，写入 ${result.rows_written}，跳过 ${result.rows_skipped}`
+        );
+      }
       loadConfigs();
     } catch (err) {
-      showToast(err instanceof Error ? err.message : "同步触发失败", "error");
+      message.error(err instanceof Error ? err.message : "同步触发失败");
     }
   };
 
@@ -248,7 +290,7 @@ export default function SyncPage() {
     setLogsOpen(true);
   };
 
-  // 编辑时添加字段映射
+  // --- 字段映射编辑 ---
   const addMapping = () => {
     if (!editingConfig) return;
     setEditingConfig({
@@ -271,454 +313,937 @@ export default function SyncPage() {
     setEditingConfig({ ...editingConfig, field_mappings: mappings });
   };
 
+  // --- 调度设置 ---
+  const handleOpenSchedule = (config: SyncConfig) => {
+    setScheduleConfig(config);
+    setScheduleForm({
+      scheduler_enabled: config.scheduler_enabled,
+      cron_expression: config.cron_expression,
+      max_retries: config.max_retries,
+    });
+    setScheduleOpen(true);
+  };
+
+  const handleSaveSchedule = async () => {
+    if (!scheduleConfig) return;
+    if (scheduleForm.scheduler_enabled && !scheduleForm.cron_expression?.trim()) {
+      message.warning("启用调度时须填写 Cron 表达式");
+      return;
+    }
+    try {
+      await updateSchedule(scheduleConfig.id, scheduleForm);
+      message.success("调度设置已更新");
+      setScheduleOpen(false);
+      loadConfigs();
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "调度设置失败");
+    }
+  };
+
+  // --- 预览 ---
+  const handlePreview = async (id: number) => {
+    setPreviewOpen(true);
+    setPreviewData(null);
+    setPreviewLoading(true);
+    try {
+      const data = await previewSync(id, { force_full: false });
+      setPreviewData(data);
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "预览失败");
+      setPreviewOpen(false);
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  // --- 批量触发 ---
+  const handleBatchTrigger = async () => {
+    setBatchLoading(true);
+    setBatchResult(null);
+    try {
+      const result = await batchTriggerSync({
+        config_ids: selectedIds,
+        force_full: batchForceFull,
+        stop_on_error: batchStopOnError,
+        confirm: true,
+      });
+      setBatchResult(result);
+      message.success(
+        `批量同步完成：成功 ${result.succeeded}，失败 ${result.failed}，跳过 ${result.skipped}`
+      );
+      loadConfigs();
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "批量触发失败");
+    } finally {
+      setBatchLoading(false);
+    }
+  };
+
   const getDatasourceName = (id: number) =>
     datasources.find((d) => d.id === id)?.name || `#${id}`;
 
-  return (
-    <Box sx={{ p: 3, maxWidth: 1400, mx: "auto" }}>
-      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 3 }}>
-        <Typography variant="h4" component="h1">
-          数据同步
-        </Typography>
-        <Button variant="contained" startIcon={<AddIcon />} onClick={handleOpenCreate}>
-          新建同步配置
-        </Button>
-      </Stack>
+  // --- 表格列定义 ---
+  const columns: ColumnsType<SyncConfig> = [
+    { title: "名称", dataIndex: "name", width: 150, ellipsis: true },
+    {
+      title: "源表",
+      dataIndex: "source_table",
+      width: 150,
+      render: (_, r) =>
+        r.source_schema ? `${r.source_schema}.${r.source_table}` : r.source_table,
+    },
+    {
+      title: "目标数据源",
+      dataIndex: "target_datasource_id",
+      width: 120,
+      render: (id: number) => getDatasourceName(id),
+    },
+    {
+      title: "目标表",
+      width: 150,
+      render: (_, r) =>
+        r.target_schema ? `${r.target_schema}.${r.target_table}` : r.target_table,
+    },
+    {
+      title: "模式",
+      dataIndex: "sync_mode",
+      width: 80,
+      render: (mode: string) => (
+        <Tag color={mode === "full" ? "blue" : "cyan"}>
+          {modeLabel[mode] || mode}
+        </Tag>
+      ),
+    },
+    {
+      title: "状态",
+      dataIndex: "status",
+      width: 80,
+      render: (status: string) => (
+        <Tag color={statusColor[status] || "default"}>
+          {status === "active" ? "启用" : status === "paused" ? "暂停" : "错误"}
+        </Tag>
+      ),
+    },
+    {
+      title: "调度",
+      width: 100,
+      render: (_, r) =>
+        r.scheduler_enabled ? (
+          <Tag color="purple" title={r.cron_expression}>
+            {r.cron_expression || "已启用"}
+          </Tag>
+        ) : (
+          <Text type="secondary">-</Text>
+        ),
+    },
+    {
+      title: "最近同步",
+      dataIndex: "last_sync_at",
+      width: 160,
+      render: (v: string | null) =>
+        v ? new Date(v).toLocaleString("zh-CN") : "-",
+    },
+    {
+      title: "操作",
+      width: 200,
+      render: (_, record) => (
+        <Space size={0}>
+          <Button
+            type="link"
+            size="small"
+            icon={<EyeOutlined />}
+            onClick={() => handleViewLogs(record.id)}
+            title="查看日志"
+          />
+          <Button
+            type="link"
+            size="small"
+            icon={<FileSearchOutlined />}
+            onClick={() => handlePreview(record.id)}
+            title="预览"
+          />
+          <Button
+            type="link"
+            size="small"
+            icon={<ScheduleOutlined />}
+            onClick={() => handleOpenSchedule(record)}
+            title="调度设置"
+          />
+          <Button
+            type="link"
+            size="small"
+            icon={<PlayCircleOutlined />}
+            onClick={() => handleTriggerSync(record.id)}
+            title="执行同步"
+          />
+          <Button
+            type="link"
+            size="small"
+            icon={<EditOutlined />}
+            onClick={() => handleOpenEdit(record)}
+            title="编辑"
+          />
+          <Popconfirm
+            title="确定删除此同步配置？"
+            onConfirm={() => handleDelete(record.id)}
+          >
+            <Button
+              type="link"
+              size="small"
+              danger
+              icon={<DeleteOutlined />}
+              title="删除"
+            />
+          </Popconfirm>
+        </Space>
+      ),
+    },
+  ];
 
-      {configs.length === 0 ? (
-        <Card sx={{ p: 4, textAlign: "center" }}>
-          <Typography variant="body1" color="text.secondary">
-            暂无同步配置，点击右上角按钮创建第一个配置
-          </Typography>
-        </Card>
-      ) : (
-        <TableContainer component={Paper}>
-          <Table size="small">
-            <TableHead>
-              <TableRow>
-                <TableCell>名称</TableCell>
-                <TableCell>源表</TableCell>
-                <TableCell>目标数据源</TableCell>
-                <TableCell>目标表</TableCell>
-                <TableCell>模式</TableCell>
-                <TableCell>状态</TableCell>
-                <TableCell>最近同步</TableCell>
-                <TableCell align="right">操作</TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {configs.map((config) => (
-                <TableRow key={config.id} hover>
-                  <TableCell>
-                    <Tooltip title={config.description}>
-                      <Typography fontWeight={500}>{config.name}</Typography>
-                    </Tooltip>
-                  </TableCell>
-                  <TableCell>
-                    <Chip
-                      label={config.source_schema ? `${config.source_schema}.${config.source_table}` : config.source_table}
-                      size="small"
-                      variant="outlined"
-                    />
-                  </TableCell>
-                  <TableCell>{getDatasourceName(config.target_datasource_id)}</TableCell>
-                  <TableCell>{config.target_schema ? `${config.target_schema}.${config.target_table}` : config.target_table}</TableCell>
-                  <TableCell>
-                    <Chip
-                      label={config.sync_mode === "full" ? "全量" : "增量"}
-                      size="small"
-                      color={config.sync_mode === "full" ? "primary" : "info"}
-                    />
-                  </TableCell>
-                  <TableCell>
-                    <Chip
-                      label={
-                        config.status === "active" ? "启用" : config.status === "paused" ? "暂停" : "错误"
-                      }
-                      size="small"
-                      color={
-                        config.status === "active" ? "success" : config.status === "paused" ? "default" : "error"
-                      }
-                    />
-                  </TableCell>
-                  <TableCell>
-                    {config.last_sync_at
-                      ? new Date(config.last_sync_at).toLocaleString("zh-CN")
-                      : "-"}
-                  </TableCell>
-                  <TableCell align="right">
-                    <Stack direction="row" spacing={0}>
-                      <Tooltip title="查看日志">
-                        <IconButton size="small" onClick={() => handleViewLogs(config.id)}>
-                          <VisibilityIcon fontSize="small" />
-                        </IconButton>
-                      </Tooltip>
-                      <Tooltip title="执行同步">
-                        <IconButton size="small" color="success" onClick={() => handleTriggerSync(config.id)}>
-                          <PlayArrowIcon fontSize="small" />
-                        </IconButton>
-                      </Tooltip>
-                      <Tooltip title="编辑">
-                        <IconButton size="small" onClick={() => handleOpenEdit(config)}>
-                          <EditIcon fontSize="small" />
-                        </IconButton>
-                      </Tooltip>
-                      <Tooltip title="删除">
-                        <IconButton size="small" color="error" onClick={() => handleDelete(config.id)}>
-                          <DeleteIcon fontSize="small" />
-                        </IconButton>
-                      </Tooltip>
-                    </Stack>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </TableContainer>
-      )}
+  // --- 日志表格列 ---
+  const logColumns: ColumnsType<SyncLog> = [
+    {
+      title: "状态",
+      dataIndex: "status",
+      width: 80,
+      render: (status: string) => (
+        <Tag
+          color={
+            status === "success" ? "success" : status === "failed" ? "error" : "warning"
+          }
+        >
+          {status === "success" ? "成功" : status === "failed" ? "失败" : "执行中"}
+        </Tag>
+      ),
+    },
+    {
+      title: "模式",
+      dataIndex: "mode",
+      width: 80,
+      render: (mode: string) => (
+        <Tag>{modeLabel[mode] || mode}</Tag>
+      ),
+    },
+    { title: "读取", dataIndex: "rows_read", width: 60, align: "right" as const },
+    { title: "写入", dataIndex: "rows_written", width: 60, align: "right" as const },
+    { title: "跳过", dataIndex: "rows_skipped", width: 60, align: "right" as const },
+    { title: "耗时(ms)", dataIndex: "duration_ms", width: 90, align: "right" as const },
+    {
+      title: "开始时间",
+      dataIndex: "started_at",
+      width: 160,
+      render: (v: string) => new Date(v).toLocaleString("zh-CN"),
+    },
+    {
+      title: "错误",
+      dataIndex: "error_message",
+      ellipsis: true,
+      render: (v: string) => v || "-",
+    },
+  ];
+
+  // 预览采样数据列
+  const previewSampleColumns =
+    previewData && previewData.sample_rows.length > 0
+      ? Object.keys(previewData.sample_rows[0]).map((key) => ({
+        title: key,
+        dataIndex: key,
+        ellipsis: true,
+        render: (v: unknown) => (v === null || v === undefined ? "-" : String(v)),
+      }))
+      : [];
+
+  return (
+    <div style={{ padding: 24, maxWidth: 1400, margin: "0 auto" }}>
+      <Space
+        style={{ marginBottom: 16, width: "100%", justifyContent: "space-between" }}
+      >
+        <Title level={4}>数据同步</Title>
+        <Space>
+          {selectedIds.length > 0 && (
+            <Text type="secondary">已选择 {selectedIds.length} 项</Text>
+          )}
+          <Button
+            icon={<ThunderboltOutlined />}
+            disabled={selectedIds.length === 0}
+            onClick={() => {
+              setBatchResult(null);
+              setBatchOpen(true);
+            }}
+          >
+            批量触发
+          </Button>
+          <Button
+            type="primary"
+            icon={<PlusOutlined />}
+            onClick={handleOpenCreate}
+          >
+            新建同步配置
+          </Button>
+        </Space>
+      </Space>
+
+      <Table
+        columns={columns}
+        dataSource={configs}
+        rowKey="id"
+        size="small"
+        loading={loading}
+        pagination={false}
+        rowSelection={{
+          selectedRowKeys: selectedIds,
+          onChange: (keys) => setSelectedIds(keys as number[]),
+        }}
+        locale={{ emptyText: "暂无同步配置，点击右上角按钮创建第一个配置" }}
+      />
 
       {/* 创建/编辑对话框 */}
-      <Dialog open={dialogOpen} onClose={handleCloseDialog} maxWidth="lg" fullWidth>
-        <DialogTitle>{editingId ? "编辑同步配置" : "新建同步配置"}</DialogTitle>
-        <DialogContent>
-          {editingConfig && (
-            <Grid container spacing={2} sx={{ mt: 1 }}>
-              <Grid item xs={12} sm={6}>
-                <TextField
-                  label="配置名称"
-                  value={editingConfig.name}
-                  onChange={(e) => setEditingConfig({ ...editingConfig, name: e.target.value })}
-                  fullWidth
-                  required
-                  size="small"
-                />
-              </Grid>
-              <Grid item xs={12} sm={6}>
-                <TextField
-                  label="描述"
-                  value={editingConfig.description || ""}
-                  onChange={(e) => setEditingConfig({ ...editingConfig, description: e.target.value })}
-                  fullWidth
-                  size="small"
-                />
-              </Grid>
+      <Modal
+        open={dialogOpen}
+        title={editingId ? "编辑同步配置" : "新建同步配置"}
+        onCancel={handleCloseDialog}
+        onOk={handleSave}
+        confirmLoading={saving}
+        okText="保存"
+        cancelText="取消"
+        width={900}
+      >
+        {editingConfig && (
+          <Form layout="vertical" size="small">
+            <Row gutter={16}>
+              <Col span={12}>
+                <Form.Item label="配置名称" required>
+                  <Input
+                    value={editingConfig.name}
+                    onChange={(e) =>
+                      setEditingConfig({ ...editingConfig, name: e.target.value })
+                    }
+                  />
+                </Form.Item>
+              </Col>
+              <Col span={12}>
+                <Form.Item label="描述">
+                  <Input
+                    value={editingConfig.description || ""}
+                    onChange={(e) =>
+                      setEditingConfig({
+                        ...editingConfig,
+                        description: e.target.value,
+                      })
+                    }
+                  />
+                </Form.Item>
+              </Col>
+            </Row>
 
-              {/* 源表区域 */}
-              <Grid item xs={12}>
-                <Typography variant="subtitle2" sx={{ mt: 1, mb: 1 }}>源表（rdbase 平台库）</Typography>
-              </Grid>
-              <Grid item xs={12} sm={4}>
-                <TextField
-                  label="源 Schema"
-                  value={editingConfig.source_schema || ""}
-                  onChange={(e) => setEditingConfig({ ...editingConfig, source_schema: e.target.value })}
-                  fullWidth
-                  size="small"
-                  placeholder="留空使用默认 schema"
-                />
-              </Grid>
-              <Grid item xs={12} sm={4}>
-                <TextField
-                  label="源表名"
-                  value={editingConfig.source_table}
-                  onChange={(e) => setEditingConfig({ ...editingConfig, source_table: e.target.value })}
-                  fullWidth
-                  required
-                  size="small"
-                />
-              </Grid>
-              <Grid item xs={12} sm={4}>
-                <FormControl fullWidth size="small">
-                  <InputLabel>源库 Alias</InputLabel>
+            <Text strong>源表（rdbase 平台库）</Text>
+            <Row gutter={16} style={{ marginTop: 8 }}>
+              <Col span={8}>
+                <Form.Item label="源 Schema">
+                  <Input
+                    value={editingConfig.source_schema || ""}
+                    onChange={(e) =>
+                      setEditingConfig({
+                        ...editingConfig,
+                        source_schema: e.target.value,
+                      })
+                    }
+                    placeholder="留空使用默认"
+                  />
+                </Form.Item>
+              </Col>
+              <Col span={8}>
+                <Form.Item label="源表名" required>
+                  <Input
+                    value={editingConfig.source_table}
+                    onChange={(e) =>
+                      setEditingConfig({
+                        ...editingConfig,
+                        source_table: e.target.value,
+                      })
+                    }
+                  />
+                </Form.Item>
+              </Col>
+              <Col span={8}>
+                <Form.Item label="源库 Alias">
                   <Select
                     value={editingConfig.source_db_alias}
-                    onChange={(e) => setEditingConfig({ ...editingConfig, source_db_alias: e.target.value })}
-                    label="源库 Alias"
-                  >
-                    <MenuItem value="default">default</MenuItem>
-                    <MenuItem value="readonly">readonly</MenuItem>
-                  </Select>
-                </FormControl>
-              </Grid>
+                    onChange={(v) =>
+                      setEditingConfig({ ...editingConfig, source_db_alias: v })
+                    }
+                    options={[
+                      { value: "default", label: "default" },
+                      { value: "readonly", label: "readonly" },
+                    ]}
+                  />
+                </Form.Item>
+              </Col>
+            </Row>
 
-              {/* 目标区域 */}
-              <Grid item xs={12}>
-                <Typography variant="subtitle2" sx={{ mt: 1, mb: 1 }}>目标表（外部数据源）</Typography>
-              </Grid>
-              <Grid item xs={12} sm={4}>
-                <FormControl fullWidth size="small" required>
-                  <InputLabel>目标数据源</InputLabel>
+            <Text strong>目标表（外部数据源）</Text>
+            <Row gutter={16} style={{ marginTop: 8 }}>
+              <Col span={8}>
+                <Form.Item label="目标数据源" required>
                   <Select
-                    value={editingConfig.target_datasource_id || ""}
-                    onChange={(e) => setEditingConfig({ ...editingConfig, target_datasource_id: Number(e.target.value) })}
-                    label="目标数据源"
-                  >
-                    {datasources.map((ds) => (
-                      <MenuItem key={ds.id} value={ds.id}>
-                        {ds.name} ({ds.engine})
-                      </MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-              </Grid>
-              <Grid item xs={12} sm={4}>
-                <TextField
-                  label="目标 Schema"
-                  value={editingConfig.target_schema || ""}
-                  onChange={(e) => setEditingConfig({ ...editingConfig, target_schema: e.target.value })}
-                  fullWidth
-                  size="small"
-                  placeholder="留空使用默认 schema"
-                />
-              </Grid>
-              <Grid item xs={12} sm={4}>
-                <TextField
-                  label="目标表名"
-                  value={editingConfig.target_table}
-                  onChange={(e) => setEditingConfig({ ...editingConfig, target_table: e.target.value })}
-                  fullWidth
-                  required
-                  size="small"
-                />
-              </Grid>
+                    value={editingConfig.target_datasource_id || undefined}
+                    onChange={(v) =>
+                      setEditingConfig({
+                        ...editingConfig,
+                        target_datasource_id: v,
+                      })
+                    }
+                    options={datasources.map((ds) => ({
+                      value: ds.id,
+                      label: `${ds.name} (${ds.engine})`,
+                    }))}
+                    placeholder="选择数据源"
+                  />
+                </Form.Item>
+              </Col>
+              <Col span={8}>
+                <Form.Item label="目标 Schema">
+                  <Input
+                    value={editingConfig.target_schema || ""}
+                    onChange={(e) =>
+                      setEditingConfig({
+                        ...editingConfig,
+                        target_schema: e.target.value,
+                      })
+                    }
+                    placeholder="留空使用默认"
+                  />
+                </Form.Item>
+              </Col>
+              <Col span={8}>
+                <Form.Item label="目标表名" required>
+                  <Input
+                    value={editingConfig.target_table}
+                    onChange={(e) =>
+                      setEditingConfig({
+                        ...editingConfig,
+                        target_table: e.target.value,
+                      })
+                    }
+                  />
+                </Form.Item>
+              </Col>
+            </Row>
 
-              {/* 同步参数 */}
-              <Grid item xs={12}>
-                <Typography variant="subtitle2" sx={{ mt: 1, mb: 1 }}>同步参数</Typography>
-              </Grid>
-              <Grid item xs={12} sm={3}>
-                <FormControl fullWidth size="small">
-                  <InputLabel>同步模式</InputLabel>
+            <Text strong>同步参数</Text>
+            <Row gutter={16} style={{ marginTop: 8 }}>
+              <Col span={6}>
+                <Form.Item label="同步模式">
                   <Select
                     value={editingConfig.sync_mode}
-                    onChange={(e) => setEditingConfig({ ...editingConfig, sync_mode: e.target.value })}
-                    label="同步模式"
-                  >
-                    <MenuItem value="incremental">增量</MenuItem>
-                    <MenuItem value="full">全量</MenuItem>
-                  </Select>
-                </FormControl>
-              </Grid>
-              <Grid item xs={12} sm={3}>
-                <FormControl fullWidth size="small">
-                  <InputLabel>状态</InputLabel>
+                    onChange={(v) =>
+                      setEditingConfig({ ...editingConfig, sync_mode: v })
+                    }
+                    options={[
+                      { value: "incremental", label: "增量" },
+                      { value: "full", label: "全量" },
+                    ]}
+                  />
+                </Form.Item>
+              </Col>
+              <Col span={6}>
+                <Form.Item label="状态">
                   <Select
                     value={editingConfig.status}
-                    onChange={(e) => setEditingConfig({ ...editingConfig, status: e.target.value })}
-                    label="状态"
-                  >
-                    <MenuItem value="active">启用</MenuItem>
-                    <MenuItem value="paused">暂停</MenuItem>
-                  </Select>
-                </FormControl>
-              </Grid>
-              <Grid item xs={12} sm={3}>
-                <TextField
-                  label="时间戳字段"
-                  value={editingConfig.timestamp_field}
-                  onChange={(e) => setEditingConfig({ ...editingConfig, timestamp_field: e.target.value })}
-                  fullWidth
-                  size="small"
-                  helperText="增量同步以此字段筛选变更行"
-                />
-              </Grid>
-              <Grid item xs={12} sm={3}>
-                <TextField
-                  label="批大小"
-                  type="number"
-                  value={editingConfig.batch_size}
-                  onChange={(e) => setEditingConfig({ ...editingConfig, batch_size: Number(e.target.value) })}
-                  fullWidth
-                  size="small"
-                />
-              </Grid>
+                    onChange={(v) =>
+                      setEditingConfig({ ...editingConfig, status: v })
+                    }
+                    options={[
+                      { value: "active", label: "启用" },
+                      { value: "paused", label: "暂停" },
+                    ]}
+                  />
+                </Form.Item>
+              </Col>
+              <Col span={6}>
+                <Form.Item label="时间戳字段">
+                  <Input
+                    value={editingConfig.timestamp_field}
+                    onChange={(e) =>
+                      setEditingConfig({
+                        ...editingConfig,
+                        timestamp_field: e.target.value,
+                      })
+                    }
+                  />
+                </Form.Item>
+              </Col>
+              <Col span={6}>
+                <Form.Item label="批大小">
+                  <InputNumber
+                    value={editingConfig.batch_size}
+                    onChange={(v) =>
+                      setEditingConfig({
+                        ...editingConfig,
+                        batch_size: v ?? 500,
+                      })
+                    }
+                    min={1}
+                    style={{ width: "100%" }}
+                  />
+                </Form.Item>
+              </Col>
+            </Row>
 
-              {/* 字段映射 */}
-              <Grid item xs={12}>
-                <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mt: 2, mb: 1 }}>
-                  <Typography variant="subtitle2">字段映射</Typography>
-                  <Button size="small" startIcon={<AddIcon />} onClick={addMapping}>
-                    添加映射
-                  </Button>
-                </Stack>
-              </Grid>
-              <Grid item xs={12}>
-                <TableContainer component={Paper} variant="outlined">
-                  <Table size="small">
-                    <TableHead>
-                      <TableRow>
-                        <TableCell>源字段</TableCell>
-                        <TableCell>映射类型</TableCell>
-                        <TableCell>常量值</TableCell>
-                        <TableCell>目标字段</TableCell>
-                        <TableCell>主键</TableCell>
-                        <TableCell align="right">操作</TableCell>
-                      </TableRow>
-                    </TableHead>
-                    <TableBody>
-                      {editingConfig.field_mappings.map((m, idx) => (
-                        <TableRow key={idx}>
-                          <TableCell>
-                            <TextField
-                              value={m.source_field}
-                              onChange={(e) => updateMapping(idx, { source_field: e.target.value })}
-                              size="small"
-                              disabled={m.mapping_type === "constant"}
-                              placeholder="源字段名"
-                              sx={{ width: 140 }}
-                            />
-                          </TableCell>
-                          <TableCell>
-                            <FormControl size="small" sx={{ minWidth: 100 }}>
-                              <Select
-                                value={m.mapping_type}
-                                onChange={(e) => updateMapping(idx, { mapping_type: e.target.value as "direct" | "constant" })}
-                              >
-                                <MenuItem value="direct">直接映射</MenuItem>
-                                <MenuItem value="constant">常量</MenuItem>
-                              </Select>
-                            </FormControl>
-                          </TableCell>
-                          <TableCell>
-                            <TextField
-                              value={m.fixed_value}
-                              onChange={(e) => updateMapping(idx, { fixed_value: e.target.value })}
-                              size="small"
-                              disabled={m.mapping_type !== "constant"}
-                              placeholder="常量值"
-                              sx={{ width: 120 }}
-                            />
-                          </TableCell>
-                          <TableCell>
-                            <TextField
-                              value={m.target_field}
-                              onChange={(e) => updateMapping(idx, { target_field: e.target.value })}
-                              size="small"
-                              placeholder="目标字段名"
-                              sx={{ width: 140 }}
-                            />
-                          </TableCell>
-                          <TableCell>
-                            <FormControl size="small">
-                              <Select
-                                value={m.is_pk ? "true" : "false"}
-                                onChange={(e) => updateMapping(idx, { is_pk: e.target.value === "true" })}
-                                sx={{ minWidth: 70 }}
-                              >
-                                <MenuItem value="true">是</MenuItem>
-                                <MenuItem value="false">否</MenuItem>
-                              </Select>
-                            </FormControl>
-                          </TableCell>
-                          <TableCell align="right">
-                            <IconButton size="small" color="error" onClick={() => removeMapping(idx)}>
-                              <DeleteIcon fontSize="small" />
-                            </IconButton>
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </TableContainer>
-              </Grid>
-            </Grid>
-          )}
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={handleCloseDialog}>取消</Button>
-          <Button variant="contained" onClick={handleSave}>
-            保存
-          </Button>
-        </DialogActions>
-      </Dialog>
+            <Row gutter={16} style={{ marginTop: 8 }}>
+              <Col span={8}>
+                <Form.Item label="启用定时调度">
+                  <Switch
+                    checked={editingConfig.scheduler_enabled}
+                    onChange={(v) =>
+                      setEditingConfig({
+                        ...editingConfig,
+                        scheduler_enabled: v,
+                      })
+                    }
+                  />
+                </Form.Item>
+              </Col>
+              <Col span={8}>
+                <Form.Item label="Cron 表达式">
+                  <Input
+                    value={editingConfig.cron_expression}
+                    onChange={(e) =>
+                      setEditingConfig({
+                        ...editingConfig,
+                        cron_expression: e.target.value,
+                      })
+                    }
+                    placeholder="*/5 * * * *"
+                    disabled={!editingConfig.scheduler_enabled}
+                  />
+                </Form.Item>
+              </Col>
+              <Col span={8}>
+                <Form.Item label="最大重试次数">
+                  <InputNumber
+                    value={editingConfig.max_retries}
+                    onChange={(v) =>
+                      setEditingConfig({
+                        ...editingConfig,
+                        max_retries: v ?? 3,
+                      })
+                    }
+                    min={0}
+                    max={10}
+                    style={{ width: "100%" }}
+                  />
+                </Form.Item>
+              </Col>
+            </Row>
+
+            <Space
+              style={{
+                width: "100%",
+                justifyContent: "space-between",
+                marginTop: 16,
+                marginBottom: 8,
+              }}
+            >
+              <Text strong>字段映射</Text>
+              <Button size="small" icon={<PlusOutlined />} onClick={addMapping}>
+                添加映射
+              </Button>
+            </Space>
+            <Table
+              size="small"
+              rowKey={(_, idx) => String(idx)}
+              dataSource={editingConfig.field_mappings.map((m, idx) => ({
+                ...m,
+                key: idx,
+              }))}
+              pagination={false}
+              columns={[
+                {
+                  title: "源字段",
+                  render: (_, record, idx) => (
+                    <Input
+                      value={record.source_field}
+                      onChange={(e) =>
+                        updateMapping(idx, { source_field: e.target.value })
+                      }
+                      disabled={record.mapping_type === "constant"}
+                      placeholder="源字段名"
+                      size="small"
+                    />
+                  ),
+                },
+                {
+                  title: "映射类型",
+                  width: 120,
+                  render: (_, record, idx) => (
+                    <Select
+                      size="small"
+                      value={record.mapping_type}
+                      onChange={(v) =>
+                        updateMapping(idx, { mapping_type: v })
+                      }
+                      style={{ width: "100%" }}
+                      options={[
+                        { value: "direct", label: "直接映射" },
+                        { value: "constant", label: "常量" },
+                      ]}
+                    />
+                  ),
+                },
+                {
+                  title: "常量值",
+                  width: 120,
+                  render: (_, record, idx) => (
+                    <Input
+                      value={record.fixed_value}
+                      onChange={(e) =>
+                        updateMapping(idx, { fixed_value: e.target.value })
+                      }
+                      disabled={record.mapping_type !== "constant"}
+                      placeholder="常量值"
+                      size="small"
+                    />
+                  ),
+                },
+                {
+                  title: "目标字段",
+                  render: (_, record, idx) => (
+                    <Input
+                      value={record.target_field}
+                      onChange={(e) =>
+                        updateMapping(idx, { target_field: e.target.value })
+                      }
+                      placeholder="目标字段名"
+                      size="small"
+                    />
+                  ),
+                },
+                {
+                  title: "主键",
+                  width: 60,
+                  render: (_, record, idx) => (
+                    <Checkbox
+                      checked={record.is_pk}
+                      onChange={(e) =>
+                        updateMapping(idx, { is_pk: e.target.checked })
+                      }
+                    />
+                  ),
+                },
+                {
+                  title: "",
+                  width: 40,
+                  render: (_, __, idx) => (
+                    <Button
+                      type="link"
+                      size="small"
+                      danger
+                      icon={<DeleteOutlined />}
+                      onClick={() => removeMapping(idx)}
+                    />
+                  ),
+                },
+              ]}
+            />
+          </Form>
+        )}
+      </Modal>
 
       {/* 日志对话框 */}
-      <Dialog open={logsOpen} onClose={() => setLogsOpen(false)} maxWidth="md" fullWidth>
-        <DialogTitle>
-          同步日志
-          {viewingLogsConfigId && (
-            <Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>
-              （仅显示此配置）
-            </Typography>
-          )}
-        </DialogTitle>
-        <DialogContent>
-          <Stack direction="row" justifyContent="flex-end" sx={{ mb: 1 }}>
-            <Button
-              size="small"
-              startIcon={<RefresherIcon />}
-              onClick={() => loadLogs(viewingLogsConfigId ?? undefined)}
-            >
-              刷新
-            </Button>
-          </Stack>
-          <TableContainer component={Paper} variant="outlined">
-            <Table size="small">
-              <TableHead>
-                <TableRow>
-                  <TableCell>状态</TableCell>
-                  <TableCell>模式</TableCell>
-                  <TableCell align="right">读取</TableCell>
-                  <TableCell align="right">写入</TableCell>
-                  <TableCell align="right">跳过</TableCell>
-                  <TableCell align="right">耗时(ms)</TableCell>
-                  <TableCell>开始时间</TableCell>
-                  <TableCell>错误</TableCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {logs.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={8} align="center" sx={{ py: 3, color: "text.secondary" }}>
-                      暂无日志记录
-                    </TableCell>
-                  </TableRow>
-                ) : (
-                  logs.map((log) => (
-                    <TableRow key={log.id}>
-                      <TableCell>
-                        <Chip
-                          label={log.status === "success" ? "成功" : log.status === "failed" ? "失败" : "执行中"}
-                          size="small"
-                          color={log.status === "success" ? "success" : log.status === "failed" ? "error" : "warning"}
-                        />
-                      </TableCell>
-                      <TableCell>
-                        <Chip label={log.mode === "full" ? "全量" : "增量"} size="small" variant="outlined" />
-                      </TableCell>
-                      <TableCell align="right">{log.rows_read}</TableCell>
-                      <TableCell align="right">{log.rows_written}</TableCell>
-                      <TableCell align="right">{log.rows_skipped}</TableCell>
-                      <TableCell align="right">{log.duration_ms}</TableCell>
-                      <TableCell>{new Date(log.started_at).toLocaleString("zh-CN")}</TableCell>
-                      <TableCell sx={{ maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {log.error_message || "-"}
-                      </TableCell>
-                    </TableRow>
-                  ))
-                )}
-              </TableBody>
-            </Table>
-          </TableContainer>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setLogsOpen(false)}>关闭</Button>
-        </DialogActions>
-      </Dialog>
-
-      {/* Toast */}
-      <Snackbar
-        open={!!toast}
-        autoHideDuration={4000}
-        onClose={() => setToast(null)}
-        anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+      <Modal
+        open={logsOpen}
+        title={
+          <span>
+            同步日志
+            {viewingLogsConfigId && (
+              <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
+                （仅显示此配置）
+              </Text>
+            )}
+          </span>
+        }
+        onCancel={() => setLogsOpen(false)}
+        footer={null}
+        width={800}
       >
-        {toast && (
-          <Alert severity={toast.severity} onClose={() => setToast(null)} variant="filled">
-            {toast.message}
-          </Alert>
+        <Space style={{ marginBottom: 8, width: "100%", justifyContent: "flex-end" }}>
+          <Button
+            size="small"
+            icon={<ReloadOutlined />}
+            onClick={() => loadLogs(viewingLogsConfigId ?? undefined)}
+          >
+            刷新
+          </Button>
+        </Space>
+        <Table
+          columns={logColumns}
+          dataSource={logs}
+          rowKey="id"
+          size="small"
+          pagination={{ pageSize: 20 }}
+          locale={{ emptyText: "暂无日志记录" }}
+        />
+      </Modal>
+
+      {/* 调度设置对话框 */}
+      <Modal
+        open={scheduleOpen}
+        title="调度设置"
+        onCancel={() => setScheduleOpen(false)}
+        onOk={handleSaveSchedule}
+        okText="保存"
+        cancelText="取消"
+      >
+        {scheduleConfig && (
+          <Form layout="vertical">
+            <Form.Item label="配置名称">
+              <Text strong>{scheduleConfig.name}</Text>
+            </Form.Item>
+            <Form.Item label="启用定时调度">
+              <Switch
+                checked={scheduleForm.scheduler_enabled}
+                onChange={(v) =>
+                  setScheduleForm({ ...scheduleForm, scheduler_enabled: v })
+                }
+              />
+            </Form.Item>
+            <Form.Item label="Cron 表达式">
+              <Input
+                value={scheduleForm.cron_expression}
+                onChange={(e) =>
+                  setScheduleForm({
+                    ...scheduleForm,
+                    cron_expression: e.target.value,
+                  })
+                }
+                placeholder="*/5 * * * *（每5分钟）"
+                disabled={!scheduleForm.scheduler_enabled}
+              />
+            </Form.Item>
+            <Form.Item label="最大重试次数">
+              <InputNumber
+                value={scheduleForm.max_retries}
+                onChange={(v) =>
+                  setScheduleForm({
+                    ...scheduleForm,
+                    max_retries: v ?? 3,
+                  })
+                }
+                min={0}
+                max={10}
+                style={{ width: "100%" }}
+              />
+            </Form.Item>
+          </Form>
         )}
-      </Snackbar>
-    </Box>
+      </Modal>
+
+      {/* 预览对话框 */}
+      <Modal
+        open={previewOpen}
+        title="同步预览"
+        onCancel={() => setPreviewOpen(false)}
+        footer={null}
+        width={800}
+      >
+        {previewLoading ? (
+          <div style={{ textAlign: "center", padding: 40 }}>
+            <Spin tip="加载中..." />
+          </div>
+        ) : previewData ? (
+          <div>
+            <Space style={{ marginBottom: 16 }}>
+              <Tag
+                color={previewData.can_sync ? "success" : "error"}
+              >
+                {previewData.can_sync ? "可同步" : "不可同步"}
+              </Tag>
+              <Tag>{modeLabel[previewData.mode] || previewData.mode}</Tag>
+              <Text>总行数：{previewData.total_rows}</Text>
+            </Space>
+
+            {previewData.error_message && (
+              <Alert
+                type="error"
+                message={previewData.error_message}
+                style={{ marginBottom: 16 }}
+              />
+            )}
+
+            <div style={{ marginBottom: 16 }}>
+              <Text strong>目标字段：</Text>
+              <Space wrap style={{ marginTop: 4 }}>
+                {previewData.target_fields.map((f) => (
+                  <Tag key={f} color="blue">
+                    {f}
+                  </Tag>
+                ))}
+              </Space>
+            </div>
+
+            <div style={{ marginBottom: 16 }}>
+              <Text strong>主键字段：</Text>
+              <Space wrap style={{ marginTop: 4 }}>
+                {previewData.pk_fields.length > 0 ? (
+                  previewData.pk_fields.map((f) => (
+                    <Tag key={f} color="orange">
+                      {f}
+                    </Tag>
+                  ))
+                ) : (
+                  <Text type="secondary">无</Text>
+                )}
+              </Space>
+            </div>
+
+            <Text strong>采样数据（最多 5 行）：</Text>
+            <Table
+              size="small"
+              columns={previewSampleColumns}
+              dataSource={previewData.sample_rows.map((row, idx) => ({
+                ...row,
+                key: idx,
+              }))}
+              pagination={false}
+              scroll={{ x: true }}
+              style={{ marginTop: 8 }}
+              locale={{ emptyText: "无采样数据" }}
+            />
+          </div>
+        ) : null}
+      </Modal>
+
+      {/* 批量触发对话框 */}
+      <Modal
+        open={batchOpen}
+        title="批量触发同步"
+        onCancel={() => setBatchOpen(false)}
+        footer={
+          batchResult ? (
+            <Button type="primary" onClick={() => setBatchOpen(false)}>
+              关闭
+            </Button>
+          ) : (
+            <Space>
+              <Button onClick={() => setBatchOpen(false)}>取消</Button>
+              <Button
+                type="primary"
+                loading={batchLoading}
+                onClick={handleBatchTrigger}
+              >
+                确认执行
+              </Button>
+            </Space>
+          )
+        }
+        width={700}
+      >
+        {batchResult ? (
+          <div>
+            <Row gutter={16} style={{ marginBottom: 16 }}>
+              <Col span={6}>
+                <Statistic title="总计" value={batchResult.total} />
+              </Col>
+              <Col span={6}>
+                <Statistic
+                  title="成功"
+                  value={batchResult.succeeded}
+                  valueStyle={{ color: "#52c41a" }}
+                />
+              </Col>
+              <Col span={6}>
+                <Statistic
+                  title="失败"
+                  value={batchResult.failed}
+                  valueStyle={{ color: "#ff4d4f" }}
+                />
+              </Col>
+              <Col span={6}>
+                <Statistic
+                  title="跳过"
+                  value={batchResult.skipped}
+                  valueStyle={{ color: "#faad14" }}
+                />
+              </Col>
+            </Row>
+            {batchResult.results.length > 0 && (
+              <Table
+                size="small"
+                rowKey="log_id"
+                dataSource={batchResult.results}
+                pagination={false}
+                columns={[
+                  {
+                    title: "状态",
+                    dataIndex: "status",
+                    width: 80,
+                    render: (s: string) => (
+                      <Tag color={s === "success" ? "success" : "error"}>
+                        {s === "success" ? "成功" : "失败"}
+                      </Tag>
+                    ),
+                  },
+                  {
+                    title: "模式",
+                    dataIndex: "mode",
+                    width: 80,
+                    render: (m: string) => (
+                      <Tag>{modeLabel[m] || m}</Tag>
+                    ),
+                  },
+                  {
+                    title: "读取",
+                    dataIndex: "rows_read",
+                    width: 60,
+                    align: "right" as const,
+                  },
+                  {
+                    title: "写入",
+                    dataIndex: "rows_written",
+                    width: 60,
+                    align: "right" as const,
+                  },
+                  {
+                    title: "跳过",
+                    dataIndex: "rows_skipped",
+                    width: 60,
+                    align: "right" as const,
+                  },
+                  {
+                    title: "错误",
+                    dataIndex: "error_message",
+                    ellipsis: true,
+                    render: (v: string) => v || "-",
+                  },
+                ]}
+              />
+            )}
+          </div>
+        ) : (
+          <div>
+            <Alert
+              type="info"
+              message={`将批量触发 ${selectedIds.length} 个同步配置`}
+              style={{ marginBottom: 16 }}
+            />
+            <Form layout="vertical">
+              <Form.Item label="强制全量同步">
+                <Switch
+                  checked={batchForceFull}
+                  onChange={setBatchForceFull}
+                />
+              </Form.Item>
+              <Form.Item label="出错时停止">
+                <Switch
+                  checked={batchStopOnError}
+                  onChange={setBatchStopOnError}
+                />
+              </Form.Item>
+            </Form>
+          </div>
+        )}
+      </Modal>
+    </div>
   );
 }

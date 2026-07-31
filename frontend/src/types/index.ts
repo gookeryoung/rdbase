@@ -558,6 +558,12 @@ export interface SyncConfig {
   status: SyncConfigStatus;
   timestamp_field: string;
   batch_size: number;
+  scheduler_enabled: boolean;
+  cron_expression: string;
+  last_run_at: string | null;
+  next_run_at: string | null;
+  retry_count: number;
+  max_retries: number;
   created_by_id: number | null;
   created_at: string;
   updated_at: string;
@@ -585,6 +591,9 @@ export interface SyncConfigCreate {
   status?: SyncConfigStatus;
   timestamp_field?: string;
   batch_size?: number;
+  scheduler_enabled?: boolean;
+  cron_expression?: string;
+  max_retries?: number;
   field_mappings: SyncFieldMapping[];
 }
 
@@ -597,7 +606,47 @@ export interface SyncConfigUpdate {
   status?: SyncConfigStatus;
   timestamp_field?: string;
   batch_size?: number;
+  scheduler_enabled?: boolean;
+  cron_expression?: string;
+  max_retries?: number;
   field_mappings?: SyncFieldMapping[];
+}
+
+// 调度配置更新请求
+export interface SyncScheduleUpdate {
+  scheduler_enabled: boolean;
+  cron_expression?: string;
+  max_retries?: number;
+}
+
+// 同步预览结果
+export interface SyncPreview {
+  config_id: number;
+  config_name: string;
+  mode: SyncMode;
+  total_rows: number;
+  sample_rows: Record<string, unknown>[];
+  target_fields: string[];
+  pk_fields: string[];
+  can_sync: boolean;
+  error_message: string;
+}
+
+// 批量同步请求
+export interface SyncBatchRequest {
+  config_ids: number[];
+  force_full?: boolean;
+  stop_on_error?: boolean;
+  confirm: boolean;
+}
+
+// 批量同步结果
+export interface SyncBatchResult {
+  total: number;
+  succeeded: number;
+  failed: number;
+  skipped: number;
+  results: SyncResult[];
 }
 
 // 同步执行结果
