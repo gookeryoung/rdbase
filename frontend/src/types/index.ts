@@ -479,3 +479,172 @@ export interface AuditLogQuery {
   page?: number;
   page_size?: number;
 }
+
+// 系统设置值类型
+export type ValueType = "str" | "int" | "bool" | "json";
+
+// 系统设置项
+export interface SystemSetting {
+  id: number;
+  key: string;
+  value: string;
+  value_type: ValueType;
+  description: string;
+  updated_at: string;
+}
+
+// 系统设置列表
+export interface SystemSettingList {
+  items: SystemSetting[];
+  total: number;
+}
+
+// 系统设置更新请求
+export interface SystemSettingUpdate {
+  value: string;
+  description?: string;
+}
+
+// 加密密钥轮换请求
+export interface RotateKeyRequest {
+  confirm: boolean;
+  new_key?: string;
+}
+
+// 加密密钥轮换响应
+export interface RotateKeyResponse {
+  success: boolean;
+  message: string;
+  rotated_count: number;
+}
+
+// ----------------- 数据同步（P6） -----------------
+
+// 同步模式
+export type SyncMode = "full" | "incremental";
+
+// 同步配置状态
+export type SyncConfigStatus = "active" | "paused" | "error";
+
+// 同步日志状态
+export type SyncLogStatus = "running" | "success" | "failed";
+
+// 字段映射类型
+export type FieldMappingType = "direct" | "constant";
+
+// 字段映射
+export interface SyncFieldMapping {
+  id?: number;
+  config_id?: number;
+  source_field: string;
+  target_field: string;
+  mapping_type: FieldMappingType;
+  fixed_value: string;
+  is_pk: boolean;
+}
+
+// 同步配置
+export interface SyncConfig {
+  id: number;
+  name: string;
+  description: string;
+  source_table: string;
+  source_schema: string;
+  source_db_alias: string;
+  target_datasource_id: number;
+  target_table: string;
+  target_schema: string;
+  sync_mode: SyncMode;
+  status: SyncConfigStatus;
+  timestamp_field: string;
+  batch_size: number;
+  created_by_id: number | null;
+  created_at: string;
+  updated_at: string;
+  last_sync_at: string | null;
+  field_mappings: SyncFieldMapping[];
+}
+
+// 同步配置列表
+export interface SyncConfigList {
+  items: SyncConfig[];
+  total: number;
+}
+
+// 创建同步配置请求
+export interface SyncConfigCreate {
+  name: string;
+  description?: string;
+  source_table: string;
+  source_schema?: string;
+  source_db_alias?: string;
+  target_datasource_id: number;
+  target_table: string;
+  target_schema?: string;
+  sync_mode?: SyncMode;
+  status?: SyncConfigStatus;
+  timestamp_field?: string;
+  batch_size?: number;
+  field_mappings: SyncFieldMapping[];
+}
+
+// 更新同步配置请求
+export interface SyncConfigUpdate {
+  description?: string;
+  target_table?: string;
+  target_schema?: string;
+  sync_mode?: SyncMode;
+  status?: SyncConfigStatus;
+  timestamp_field?: string;
+  batch_size?: number;
+  field_mappings?: SyncFieldMapping[];
+}
+
+// 同步执行结果
+export interface SyncResult {
+  log_id: number;
+  status: SyncLogStatus;
+  mode: SyncMode;
+  rows_read: number;
+  rows_written: number;
+  rows_skipped: number;
+  error_message: string;
+  duration_ms: number;
+}
+
+// 同步日志
+export interface SyncLog {
+  id: number;
+  config_id: number;
+  status: SyncLogStatus;
+  mode: SyncMode;
+  rows_read: number;
+  rows_written: number;
+  rows_skipped: number;
+  error_message: string;
+  started_at: string;
+  finished_at: string | null;
+  duration_ms: number;
+}
+
+// 同步日志列表
+export interface SyncLogList {
+  items: SyncLog[];
+  total: number;
+}
+
+// 源表列信息
+export interface SourceColumnInfo {
+  name: string;
+  type: string;
+  notnull: boolean;
+  pk: boolean;
+}
+
+// 目标表列信息
+export interface TargetColumnInfo {
+  name: string;
+  type: string;
+  nullable: boolean;
+  pk: boolean;
+}

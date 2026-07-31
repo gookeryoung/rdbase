@@ -34,6 +34,8 @@ INSTALLED_APPS = [
     "apps.designer",
     "apps.manager",
     "apps.audit",
+    "apps.settings",
+    "apps.sync",
 ]
 
 # 自定义用户模型（须在首次 migrate 前设置）
@@ -87,6 +89,9 @@ AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
     {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
+    # 自定义可配置验证器（从 SystemSetting 读取策略）
+    {"NAME": "apps.settings.validators.ConfigurablePasswordValidator"},
+    {"NAME": "apps.settings.validators.PasswordHistoryValidator"},
 ]
 
 # 国际化

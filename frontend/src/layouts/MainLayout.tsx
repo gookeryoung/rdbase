@@ -10,6 +10,8 @@ import {
   UserOutlined,
   TeamOutlined,
   FileSearchOutlined,
+  SettingOutlined,
+  SyncOutlined,
 } from "@ant-design/icons";
 import { Outlet, useNavigate, useLocation } from "react-router-dom";
 import { useAuthStore } from "@/store/auth";
@@ -50,6 +52,18 @@ const menuItems: MenuItem[] = [
     key: "/audit",
     icon: <FileSearchOutlined />,
     label: "审计日志",
+    roles: [Role.ADMIN],
+  },
+  {
+    key: "/settings",
+    icon: <SettingOutlined />,
+    label: "系统设置",
+    roles: [Role.ADMIN],
+  },
+  {
+    key: "/sync",
+    icon: <SyncOutlined />,
+    label: "数据同步",
     roles: [Role.ADMIN],
   },
   { key: "/profile", icon: <UserOutlined />, label: "个人中心" },

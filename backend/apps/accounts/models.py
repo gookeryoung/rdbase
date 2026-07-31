@@ -36,3 +36,19 @@ class User(AbstractUser):
     def is_admin(self) -> bool:
         """是否管理员（拥有全部权限）."""
         return self.role == Role.ADMIN
+
+
+class PasswordHistory(models.Model):
+    """密码历史记录（用于防止密码重复使用）."""
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="password_histories")
+    password_hash = models.CharField(max_length=128, verbose_name="密码哈希（SHA-256）")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
+
+    class Meta:
+        verbose_name = "密码历史"
+        verbose_name_plural = "密码历史"
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:  # type: ignore[missing-override-decorator]
+        return f"{self.user_id}: {self.password_hash[:16]}..."  # type: ignore[bad-return]

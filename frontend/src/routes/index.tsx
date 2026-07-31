@@ -8,6 +8,8 @@ import Designer from "@/pages/Designer";
 import Manager from "@/pages/Manager";
 import SqlConsole from "@/pages/SqlConsole";
 import AuditLogs from "@/pages/AuditLogs";
+import Settings from "@/pages/Settings";
+import Sync from "@/pages/Sync";
 import MainLayout from "@/layouts/MainLayout";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import RoleRoute from "@/components/RoleRoute";
@@ -46,6 +48,16 @@ export const routes: RouteObject[] = [
             path: "audit",
             element: <RoleRoute allowedRoles={[Role.ADMIN]} />,
             children: [{ index: true, element: <AuditLogs /> }],
+          },
+          {
+            path: "settings",
+            element: <RoleRoute allowedRoles={[Role.ADMIN]} />,
+            children: [{ index: true, element: <Settings /> }],
+          },
+          {
+            path: "sync",
+            element: <RoleRoute allowedRoles={[Role.ADMIN]} />,
+            children: [{ index: true, element: <Sync /> }],
           },
           { path: "profile", element: <Profile /> },
         ],
