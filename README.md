@@ -35,12 +35,14 @@ rdbase/
 │   │   ├── urls.py           # /health/ + /api/v1/ + /admin/
 │   │   ├── asgi.py / wsgi.py
 │   │   └── __init__.py       # __version__
-│   ├── apps/                 # 业务应用（P1+ 按阶段创建）
+│   ├── apps/                 # 业务应用
 │   │   ├── accounts/         # 用户与权限
 │   │   ├── datasources/      # 数据源管理
 │   │   ├── designer/         # 数据库设计
 │   │   ├── manager/          # 数据库管理
-│   │   └── audit/            # 审计日志
+│   │   ├── audit/            # 审计日志
+│   │   ├── settings/         # 系统设置
+│   │   └── sync/             # 数据同步（rdbase → 外部推送）
 │   └── api/v1/               # django-ninja NinjaAPI 实例与 Router 聚合
 ├── frontend/                 # React 前端
 │   ├── package.json
@@ -49,28 +51,31 @@ rdbase/
 │       ├── api/              # axios 封装
 │       ├── components/       # 通用组件（ProtectedRoute 等）
 │       ├── layouts/          # 主布局
-│       ├── pages/            # 登录、Dashboard 等
+│       ├── pages/            # 登录、Dashboard、数据源、设计器、管理器、同步等
 │       ├── routes/           # 路由配置
 │       ├── store/            # Zustand
 │       └── types/            # TS 类型
-├── tests/                    # pytest 测试
-├── docs/                     # Sphinx 文档
+├── docker/                   # Docker 构建文件
+│   ├── Dockerfile.backend    # 后端镜像（Python 3.13 + uv + gunicorn）
+│   ├── Dockerfile.frontend   # 前端镜像（Node 20 构建 + nginx 托管）
+│   └── nginx.conf            # nginx 配置（静态托管 + API 反代）
+├── docker-compose.yml        # 全栈一键部署编排
+├── tests/                    # pytest 测试（含端到端集成测试）
 ├── pyproject.toml            # uv 项目依赖 + 工具链
 ├── ruff.toml / pyrefly.toml  # lint / 类型检查
 ├── pytest.ini / .coveragerc  # 测试与覆盖率
-├── tox.ini                   # 多版本测试
-├── Dockerfile / Makefile
+├── Makefile
 └── .github/workflows/ci.yml  # GitHub Actions
 ```
 
 ## 开发阶段
 
 - **P0 架构搭建**：可运行的空壳 + CI 通过（已完成）
-- **P1 用户与权限**：可登录、RBAC 生效
-- **P2 数据源管理**：可连接外部数据库
-- **P3 数据库设计**：可视化建表与 ER 图
-- **P4 数据库管理**：数据 CRUD + SQL 控制台
-- **P5 系统管理与部署**：可生产部署
+- **P1 用户与权限**：可登录、RBAC 生效（已完成）
+- **P2 数据源管理**：可连接外部数据库（已完成）
+- **P3 数据库设计**：可视化建表与 ER 图（已完成）
+- **P4 数据库管理**：数据 CRUD + SQL 控制台（已完成）
+- **P5 系统管理与部署**：可生产部署（已完成）
 
 完整需求见 `.trae/req/req-01-数据库管理平台.md`。
 
@@ -138,6 +143,37 @@ make test
 # 多版本测试（tox，py310-py313）
 make tox
 ```
+
+## Docker 部署
+
+一键启动全栈服务（PostgreSQL + 后端 API + 前端 nginx）：
+
+```bash
+# 1. 复制环境变量配置文件并修改
+cp .env.example .env
+# 编辑 .env，至少修改 DJANGO_SECRET_KEY 和 DB_PASSWORD
+
+# 2. 构建并启动
+docker-compose up -d --build
+
+# 3. 查看服务状态
+docker-compose ps
+
+# 4. 访问
+#   前端：http://localhost
+#   后端 API：http://localhost:8000/api/v1/docs
+#   健康检查：http://localhost:8000/health/
+```
+
+服务编排：
+
+| 服务 | 端口 | 说明 |
+|------|------|------|
+| postgres | 5432 | PostgreSQL 16，平台元数据存储 |
+| backend | 8000 | Django + gunicorn（4 worker，uvicorn worker-class） |
+| frontend | 80 | nginx 托管前端静态文件，反代 /api 到 backend |
+
+可配置环境变量见 `.env.example`。
 
 ## 许可证
 

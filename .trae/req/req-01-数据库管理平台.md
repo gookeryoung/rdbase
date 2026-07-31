@@ -149,7 +149,7 @@ rdbase/
 - [x] 26 系统设置：会话超时、密码策略、数据源加密轮换界面
 - [x] 27 Docker 化：后端/前端 Dockerfile、nginx 配置、docker-compose
 - [x] 28 生产配置与性能：gunicorn/uvicorn worker、DB 连接池、前端构建优化
-- [ ] 29 P5 测试与文档：端到端测试、部署文档、README 重写、API 文档汇总
+- [x] 29 P5 测试与文档：端到端测试、部署文档、README 重写、API 文档汇总
 
 ## 验收标准
 
