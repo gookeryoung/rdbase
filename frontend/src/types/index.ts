@@ -347,3 +347,58 @@ export interface ImportResult {
   failed_count: number;
   errors: string[];
 }
+
+// ----------------- 对象管理（P4-5） -----------------
+
+// 对象类型：视图 / 存储过程 / 函数 / 触发器
+export type ObjectType = "views" | "routines" | "triggers";
+
+// 存储过程/函数类型
+export type RoutineKind = "procedure" | "function";
+
+// 视图详情
+export interface ViewDetail {
+  name: string;
+  schema_name: string | null;
+  definition: string;
+}
+
+// 存储过程/函数摘要
+export interface RoutineBrief {
+  name: string;
+  schema_name: string | null;
+  type: RoutineKind;
+}
+
+// 存储过程/函数详情
+export interface RoutineDetail {
+  name: string;
+  schema_name: string | null;
+  type: RoutineKind;
+  definition: string;
+}
+
+// 触发器摘要
+export interface TriggerBrief {
+  name: string;
+  schema_name: string | null;
+  event: string;
+  table: string;
+  timing: string;
+}
+
+// 触发器详情
+export interface TriggerDetail {
+  name: string;
+  schema_name: string | null;
+  event: string;
+  table: string;
+  timing: string;
+  definition: string;
+}
+
+// 对象编辑请求
+export interface ObjectUpdate {
+  definition: string;
+  table?: string | null;
+}

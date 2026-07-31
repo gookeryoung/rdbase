@@ -3,6 +3,8 @@
 P4-1 数据浏览：行列表响应。
 P4-2 数据 CRUD：行新增/更新/查询响应。
 P4-3 SQL 控制台：SQL 执行与执行计划响应。
+P4-4 导入导出：导入结果响应。
+P4-5 对象管理：视图/存储过程/函数/触发器响应。
 """
 
 from __future__ import annotations
@@ -123,15 +125,121 @@ class ImportResultOut(Schema):
     errors: list[str]
 
 
+# ============================================================
+# P4-5 对象管理
+# ============================================================
+
+
+class NameOut(Schema):
+    """对象名响应（视图/存储过程/函数/触发器列表项）."""
+
+    name: str
+
+
+class ViewDetailOut(Schema):
+    """视图详情响应.
+
+    - ``name``: 视图名。
+    - ``schema_name``: Schema 名（SQLite 为 None）。
+    - ``definition``: 视图定义 SQL。
+    """
+
+    name: str
+    schema_name: str | None
+    definition: str
+
+
+class RoutineBriefOut(Schema):
+    """存储过程/函数列表项响应.
+
+    - ``name``: 对象名。
+    - ``schema_name``: Schema 名。
+    - ``type``: ``procedure`` 或 ``function``。
+    """
+
+    name: str
+    schema_name: str | None
+    type: str
+
+
+class RoutineDetailOut(Schema):
+    """存储过程/函数详情响应.
+
+    - ``name``: 对象名。
+    - ``schema_name``: Schema 名。
+    - ``type``: ``procedure`` 或 ``function``。
+    - ``definition``: 定义 SQL。
+    """
+
+    name: str
+    schema_name: str | None
+    type: str
+    definition: str
+
+
+class TriggerBriefOut(Schema):
+    """触发器列表项响应.
+
+    - ``name``: 触发器名。
+    - ``schema_name``: Schema 名。
+    - ``event``: 触发事件（INSERT/UPDATE/DELETE；SQLite 为空）。
+    - ``table``: 关联表名。
+    - ``timing``: 触发时机（BEFORE/AFTER/INSTEAD OF；SQLite 为空）。
+    """
+
+    name: str
+    schema_name: str | None
+    event: str
+    table: str
+    timing: str
+
+
+class TriggerDetailOut(Schema):
+    """触发器详情响应.
+
+    - ``name``: 触发器名。
+    - ``schema_name``: Schema 名。
+    - ``event``: 触发事件。
+    - ``table``: 关联表名（编辑/删除时需传入，PG ``DROP TRIGGER ON table`` 需要）。
+    - ``timing``: 触发时机。
+    - ``definition``: 定义 SQL。
+    """
+
+    name: str
+    schema_name: str | None
+    event: str
+    table: str
+    timing: str
+    definition: str
+
+
+class ObjectUpdateIn(Schema):
+    """对象编辑请求.
+
+    - ``definition``: 完整的 CREATE 语句（CREATE VIEW/CREATE PROCEDURE/CREATE FUNCTION/CREATE TRIGGER）。
+    - ``table``: 关联表名（仅触发器编辑/删除时需要，PG ``DROP TRIGGER ON table`` 必需）。
+    """
+
+    definition: str
+    table: str | None = None
+
+
 __all__ = [
     "ExplainIn",
     "ExplainOut",
     "ImportResultOut",
     "MessageOut",
+    "NameOut",
+    "ObjectUpdateIn",
+    "RoutineBriefOut",
+    "RoutineDetailOut",
     "RowCreateIn",
     "RowListOut",
     "RowOut",
     "RowUpdateIn",
     "SqlExecIn",
     "SqlResultOut",
+    "TriggerBriefOut",
+    "TriggerDetailOut",
+    "ViewDetailOut",
 ]

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Editor from "@monaco-editor/react";
 import {
   Layout,
   Table,
@@ -17,6 +18,7 @@ import {
   InputNumber,
   Popconfirm,
   Upload,
+  Tag,
   message,
 } from "antd";
 import type { ColumnsType, TableProps } from "antd/es/table";
@@ -31,6 +33,7 @@ import {
   DeleteOutlined,
   DownloadOutlined,
   UploadOutlined,
+  EyeOutlined,
 } from "@ant-design/icons";
 import { listDatasources } from "@/api/datasources";
 import { listSchemas, listTables, retrieveTable } from "@/api/designer";
@@ -41,6 +44,18 @@ import {
   importTable,
   listRows,
   updateRow,
+  deleteRoutine,
+  deleteTrigger,
+  deleteView,
+  listRoutines,
+  listTriggers,
+  listViews,
+  retrieveRoutine,
+  retrieveTrigger,
+  retrieveView,
+  updateRoutine,
+  updateTrigger,
+  updateView,
 } from "@/api/manager";
 import { useAuthStore } from "@/store/auth";
 import { isDesignerOrAdmin } from "@/utils/permission";
@@ -49,9 +64,16 @@ import type {
   EngineType,
   ExportFormat,
   NameItem,
+  ObjectUpdate,
+  RoutineBrief,
+  RoutineDetail,
+  RoutineKind,
   RowListResponse,
   RowQuery,
   TableBrief,
+  TriggerBrief,
+  TriggerDetail,
+  ViewDetail,
 } from "@/types";
 
 const { Sider, Content } = Layout;
@@ -87,6 +109,29 @@ interface ModalState {
   initialValues: Record<string, unknown>;
 }
 
+// 选中对象类型
+type SelectedObject = {
+  kind: "view" | "routine" | "trigger";
+  schemaName: string | null;
+  name: string;
+  // routine 子类型
+  routineType?: RoutineKind;
+  // trigger 关联表（删除时需要）
+  triggerTable?: string;
+};
+
+// 对象详情 Modal 状态
+interface ObjectModalState {
+  open: boolean;
+  mode: "view" | "edit";
+  obj: SelectedObject;
+  definition: string;
+  // 编辑模式临时持有
+  draft: string;
+  // 触发器编辑时关联表字段
+  table?: string;
+}
+
 // 数据库管理页：左侧数据源+表树，右侧数据表格
 const Manager = () => {
   const user = useAuthStore((state) => state.user);
@@ -103,6 +148,26 @@ const Manager = () => {
     name: string;
     schemaName: string | null;
   } | null>(null);
+
+  // 对象分组状态：按 schema 缓存
+  const [viewsBySchema, setViewsBySchema] = useState<Record<string, NameItem[]>>({});
+  const [routinesBySchema, setRoutinesBySchema] = useState<
+    Record<string, RoutineBrief[]>
+  >({});
+  const [triggersBySchema, setTriggersBySchema] = useState<
+    Record<string, TriggerBrief[]>
+  >({});
+  // 对象分组是否已加载（避免重复请求）
+  const [objectsLoadedSchema, setObjectsLoadedSchema] = useState<Set<string>>(
+    new Set()
+  );
+  // 选中对象
+  const [selectedObject, setSelectedObject] = useState<SelectedObject | null>(
+    null
+  );
+  // 对象详情 Modal
+  const [objectModal, setObjectModal] = useState<ObjectModalState | null>(null);
+  const [objectModalSubmitting, setObjectModalSubmitting] = useState(false);
 
   // 数据表格状态
   const [rows, setRows] = useState<Record<string, unknown>[]>([]);
@@ -166,10 +231,15 @@ const Manager = () => {
     if (selectedDsId != null) {
       void loadSchemas(selectedDsId);
       setSelectedTable(null);
+      setSelectedObject(null);
       setRows([]);
       setColumns([]);
       setPkColumns([]);
       setTotal(0);
+      setViewsBySchema({});
+      setRoutinesBySchema({});
+      setTriggersBySchema({});
+      setObjectsLoadedSchema(new Set());
     }
   }, [selectedDsId, loadSchemas]);
 
@@ -187,31 +257,153 @@ const Manager = () => {
     [selectedDsId]
   );
 
+  // 加载指定 schema 下的对象（视图/存储过程/触发器）
+  const loadObjects = useCallback(
+    async (schemaName: string) => {
+      if (selectedDsId == null) return;
+      try {
+        const [views, routines, triggers] = await Promise.all([
+          listViews(selectedDsId, schemaName).catch(() => [] as NameItem[]),
+          listRoutines(selectedDsId, schemaName).catch(
+            () => [] as RoutineBrief[]
+          ),
+          listTriggers(selectedDsId, schemaName).catch(
+            () => [] as TriggerBrief[]
+          ),
+        ]);
+        setViewsBySchema((prev) => ({ ...prev, [schemaName]: views }));
+        setRoutinesBySchema((prev) => ({ ...prev, [schemaName]: routines }));
+        setTriggersBySchema((prev) => ({ ...prev, [schemaName]: triggers }));
+        setObjectsLoadedSchema((prev) => {
+          const next = new Set(prev);
+          next.add(schemaName);
+          return next;
+        });
+      } catch (err) {
+        message.error(errMsg(err, "加载对象列表失败"));
+      }
+    },
+    [selectedDsId]
+  );
+
   // 构造表树节点
   const treeData: DataNode[] = useMemo(() => {
-    return schemas.map((s) => ({
-      key: `schema:${s.name}`,
-      title: (
-        <Space size={4}>
-          <Text strong>{s.name}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            ({(tablesBySchema[s.name] ?? []).length})
-          </Text>
-        </Space>
-      ),
-      selectable: false,
-      children: (tablesBySchema[s.name] ?? []).map((t) => ({
-        key: `table:${s.name}:${t.name}`,
-        title: <Text>{t.name}</Text>,
-        isLeaf: true,
-      })),
-    }));
-  }, [schemas, tablesBySchema]);
+    return schemas.map((s) => {
+      const views = viewsBySchema[s.name] ?? [];
+      const routines = routinesBySchema[s.name] ?? [];
+      const triggers = triggersBySchema[s.name] ?? [];
+      const tableCount = (tablesBySchema[s.name] ?? []).length;
+      return {
+        key: `schema:${s.name}`,
+        title: (
+          <Space size={4}>
+            <Text strong>{s.name}</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              ({tableCount})
+            </Text>
+          </Space>
+        ),
+        selectable: false,
+        children: [
+          // 表分组
+          {
+            key: `tables:${s.name}`,
+            title: (
+              <Space size={4}>
+                <Text type="secondary">表</Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  ({tableCount})
+                </Text>
+              </Space>
+            ),
+            selectable: false,
+            children: (tablesBySchema[s.name] ?? []).map((t) => ({
+              key: `table:${s.name}:${t.name}`,
+              title: <Text>{t.name}</Text>,
+              isLeaf: true,
+            })),
+          },
+          // 视图分组
+          {
+            key: `views:${s.name}`,
+            title: (
+              <Space size={4}>
+                <Text type="secondary">视图</Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  ({views.length})
+                </Text>
+              </Space>
+            ),
+            selectable: false,
+            children: views.map((v) => ({
+              key: `view:${s.name}:${v.name}`,
+              title: <Text>{v.name}</Text>,
+              isLeaf: true,
+            })),
+          },
+          // 存储过程/函数分组
+          {
+            key: `routines:${s.name}`,
+            title: (
+              <Space size={4}>
+                <Text type="secondary">过程/函数</Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  ({routines.length})
+                </Text>
+              </Space>
+            ),
+            selectable: false,
+            children: routines.map((r) => ({
+              key: `routine:${s.name}:${r.type}:${r.name}`,
+              title: (
+                <Space size={4}>
+                  <Text>{r.name}</Text>
+                  <Tag
+                    color={r.type === "procedure" ? "blue" : "green"}
+                    style={{ fontSize: 11, margin: 0 }}
+                  >
+                    {r.type === "procedure" ? "P" : "F"}
+                  </Tag>
+                </Space>
+              ),
+              isLeaf: true,
+            })),
+          },
+          // 触发器分组
+          {
+            key: `triggers:${s.name}`,
+            title: (
+              <Space size={4}>
+                <Text type="secondary">触发器</Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  ({triggers.length})
+                </Text>
+              </Space>
+            ),
+            selectable: false,
+            children: triggers.map((t) => ({
+              key: `trigger:${s.name}:${t.name}`,
+              title: (
+                <Space size={4}>
+                  <Text>{t.name}</Text>
+                  {t.table && (
+                    <Text type="secondary" style={{ fontSize: 11 }}>
+                      @{t.table}
+                    </Text>
+                  )}
+                </Space>
+              ),
+              isLeaf: true,
+            })),
+          },
+        ],
+      };
+    });
+  }, [schemas, tablesBySchema, viewsBySchema, routinesBySchema, triggersBySchema]);
 
-  // 树展开事件：懒加载表
+  // 树展开事件：懒加载表与对象
   const handleTreeExpand = (expandedKeys: React.Key[]) => {
     if (selectedDsId == null) return;
-    // 对新展开的 schema 触发表加载
     expandedKeys.forEach((key) => {
       const k = String(key);
       if (k.startsWith("schema:")) {
@@ -219,37 +411,185 @@ const Manager = () => {
         if (!tablesBySchema[schemaName]) {
           void loadTables(schemaName);
         }
+        if (!objectsLoadedSchema.has(schemaName)) {
+          void loadObjects(schemaName);
+        }
       }
     });
   };
 
-  // 选中表
+  // 选中表/对象
   const handleTreeSelect = (keys: React.Key[]) => {
     if (keys.length === 0) {
       setSelectedTable(null);
+      setSelectedObject(null);
       return;
     }
     const k = String(keys[0]);
-    if (!k.startsWith("table:")) {
-      setSelectedTable(null);
+    // 表节点：table:<schema>:<name>
+    if (k.startsWith("table:")) {
+      const parts = k.split(":");
+      if (parts.length < 3) return;
+      const schemaName = parts[1];
+      const tableName = parts.slice(2).join(":");
+      setSelectedObject(null);
+      setSelectedTable({ name: tableName, schemaName });
+      setPage(1);
+      setOrderBy(null);
+      setOrderDir("asc");
+      setVisibleCols(null);
+      setFilterInputs({});
+      if (selectedDsId != null) {
+        retrieveTable(selectedDsId, tableName, schemaName)
+          .then((detail) => setPkColumns(detail.primary_key))
+          .catch(() => setPkColumns([]));
+      }
       return;
     }
-    const parts = k.split(":");
-    if (parts.length < 3) return;
-    const schemaName = parts[1];
-    const tableName = parts.slice(2).join(":");
-    setSelectedTable({ name: tableName, schemaName });
-    // 重置查询状态
-    setPage(1);
-    setOrderBy(null);
-    setOrderDir("asc");
-    setVisibleCols(null);
-    setFilterInputs({});
-    // 异步加载主键列名
-    if (selectedDsId != null) {
-      retrieveTable(selectedDsId, tableName, schemaName)
-        .then((detail) => setPkColumns(detail.primary_key))
-        .catch(() => setPkColumns([]));
+    // 视图节点：view:<schema>:<name>
+    if (k.startsWith("view:")) {
+      const parts = k.split(":");
+      if (parts.length < 3) return;
+      setSelectedTable(null);
+      setSelectedObject({
+        kind: "view",
+        schemaName: parts[1],
+        name: parts.slice(2).join(":"),
+      });
+      return;
+    }
+    // 例程节点：routine:<schema>:<type>:<name>
+    if (k.startsWith("routine:")) {
+      const parts = k.split(":");
+      if (parts.length < 4) return;
+      setSelectedTable(null);
+      setSelectedObject({
+        kind: "routine",
+        schemaName: parts[1],
+        routineType: parts[2] as RoutineKind,
+        name: parts.slice(3).join(":"),
+      });
+      return;
+    }
+    // 触发器节点：trigger:<schema>:<name>
+    if (k.startsWith("trigger:")) {
+      const parts = k.split(":");
+      if (parts.length < 3) return;
+      const schemaName = parts[1];
+      const name = parts.slice(2).join(":");
+      // 关联表从缓存中查
+      const triggerBrief = (triggersBySchema[schemaName] ?? []).find(
+        (t) => t.name === name
+      );
+      setSelectedTable(null);
+      setSelectedObject({
+        kind: "trigger",
+        schemaName,
+        name,
+        triggerTable: triggerBrief?.table,
+      });
+      return;
+    }
+    setSelectedTable(null);
+    setSelectedObject(null);
+  };
+
+  // 打开对象详情/编辑 Modal：拉取定义
+  const openObjectModal = async (mode: "view" | "edit") => {
+    if (selectedDsId == null || !selectedObject) return;
+    const { kind, schemaName, name, routineType, triggerTable } = selectedObject;
+    try {
+      let definition = "";
+      if (kind === "view") {
+        const detail: ViewDetail = await retrieveView(
+          selectedDsId,
+          name,
+          schemaName
+        );
+        definition = detail.definition;
+      } else if (kind === "routine") {
+        const detail: RoutineDetail = await retrieveRoutine(
+          selectedDsId,
+          name,
+          routineType ?? "function",
+          schemaName
+        );
+        definition = detail.definition;
+      } else {
+        const detail: TriggerDetail = await retrieveTrigger(
+          selectedDsId,
+          name,
+          schemaName
+        );
+        definition = detail.definition;
+      }
+      setObjectModal({
+        open: true,
+        mode,
+        obj: selectedObject,
+        definition,
+        draft: definition,
+        table: kind === "trigger" ? triggerTable ?? undefined : undefined,
+      });
+    } catch (err) {
+      message.error(errMsg(err, "加载对象定义失败"));
+    }
+  };
+
+  // 提交对象编辑
+  const handleObjectModalSubmit = async () => {
+    if (selectedDsId == null || !objectModal) return;
+    const { obj, draft, table } = objectModal;
+    const body: ObjectUpdate = { definition: draft };
+    if (obj.kind === "trigger" && table) body.table = table;
+    setObjectModalSubmitting(true);
+    try {
+      if (obj.kind === "view") {
+        await updateView(selectedDsId, obj.name, body, obj.schemaName);
+      } else if (obj.kind === "routine") {
+        await updateRoutine(
+          selectedDsId,
+          obj.name,
+          body,
+          obj.routineType ?? "function",
+          obj.schemaName
+        );
+      } else {
+        await updateTrigger(selectedDsId, obj.name, body, obj.schemaName);
+      }
+      message.success("保存成功");
+      setObjectModal(null);
+      // 刷新对象列表（定义可能变化）
+      if (obj.schemaName) void loadObjects(obj.schemaName);
+    } catch (err) {
+      message.error(errMsg(err, "保存失败"));
+    } finally {
+      setObjectModalSubmitting(false);
+    }
+  };
+
+  // 删除对象
+  const handleDeleteObject = async () => {
+    if (selectedDsId == null || !selectedObject) return;
+    const { kind, schemaName, name, routineType, triggerTable } = selectedObject;
+    try {
+      if (kind === "view") {
+        await deleteView(selectedDsId, name, schemaName);
+      } else if (kind === "routine") {
+        await deleteRoutine(
+          selectedDsId,
+          name,
+          routineType ?? "function",
+          schemaName
+        );
+      } else {
+        await deleteTrigger(selectedDsId, name, schemaName, triggerTable);
+      }
+      message.success("已删除");
+      setSelectedObject(null);
+      if (schemaName) void loadObjects(schemaName);
+    } catch (err) {
+      message.error(errMsg(err, "删除失败"));
     }
   };
 
@@ -663,12 +1003,7 @@ const Manager = () => {
         )}
       </Sider>
       <Content style={{ background: "#fff", borderRadius: 8, padding: 16, overflow: "auto" }}>
-        {!selectedTable ? (
-          <Empty
-            description="请选择左侧表查看数据"
-            style={{ marginTop: 120 }}
-          />
-        ) : (
+        {selectedTable ? (
           <>
             <div
               style={{
@@ -748,8 +1083,184 @@ const Manager = () => {
               }}
             />
           </>
+        ) : selectedObject ? (
+          <>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                marginBottom: 12,
+              }}
+            >
+              <Space>
+                <Tag
+                  color={
+                    selectedObject.kind === "view"
+                      ? "cyan"
+                      : selectedObject.kind === "routine"
+                        ? "geekblue"
+                        : "orange"
+                  }
+                >
+                  {selectedObject.kind === "view"
+                    ? "视图"
+                    : selectedObject.kind === "routine"
+                      ? selectedObject.routineType === "procedure"
+                        ? "存储过程"
+                        : "函数"
+                      : "触发器"}
+                </Tag>
+                <Text strong style={{ fontSize: 16 }}>
+                  {selectedObject.name}
+                </Text>
+                {selectedObject.schemaName && (
+                  <Text type="secondary">
+                    ({selectedObject.schemaName})
+                  </Text>
+                )}
+                {selectedObject.kind === "trigger" &&
+                  selectedObject.triggerTable && (
+                    <Text type="secondary">
+                      @{selectedObject.triggerTable}
+                    </Text>
+                  )}
+              </Space>
+              <Space>
+                <Button
+                  icon={<EyeOutlined />}
+                  onClick={() => void openObjectModal("view")}
+                >
+                  查看定义
+                </Button>
+                {canEdit && (
+                  <Button
+                    type="primary"
+                    icon={<EditOutlined />}
+                    onClick={() => void openObjectModal("edit")}
+                  >
+                    编辑
+                  </Button>
+                )}
+                {canEdit && (
+                  <Popconfirm
+                    title={`确认删除该${selectedObject.kind === "view"
+                        ? "视图"
+                        : selectedObject.kind === "routine"
+                          ? "例程"
+                          : "触发器"
+                      }？`}
+                    okText="删除"
+                    okButtonProps={{ danger: true }}
+                    cancelText="取消"
+                    onConfirm={() => void handleDeleteObject()}
+                  >
+                    <Button danger icon={<DeleteOutlined />}>
+                      删除
+                    </Button>
+                  </Popconfirm>
+                )}
+              </Space>
+            </div>
+            <Empty
+              description={
+                <span>
+                  点击「查看定义」浏览 SQL，{canEdit ? "或「编辑」修改定义" : ""}
+                </span>
+              }
+              style={{ marginTop: 80 }}
+            />
+          </>
+        ) : (
+          <Empty
+            description="请选择左侧表或对象查看数据"
+            style={{ marginTop: 120 }}
+          />
         )}
       </Content>
+      <Modal
+        title={
+          objectModal
+            ? `${objectModal.mode === "view" ? "查看" : "编辑"}：${objectModal.obj.kind === "view"
+              ? "视图"
+              : objectModal.obj.kind === "routine"
+                ? objectModal.obj.routineType === "procedure"
+                  ? "存储过程"
+                  : "函数"
+                : "触发器"
+            } ${objectModal.obj.name}`
+            : ""
+        }
+        open={objectModal?.open ?? false}
+        onOk={
+          objectModal?.mode === "edit"
+            ? () => void handleObjectModalSubmit()
+            : () => setObjectModal(null)
+        }
+        onCancel={() => setObjectModal(null)}
+        okText={objectModal?.mode === "edit" ? "保存" : "关闭"}
+        cancelText="取消"
+        confirmLoading={objectModalSubmitting}
+        destroyOnClose
+        width={780}
+        okButtonProps={
+          objectModal?.mode === "view" ? { style: { display: "none" } } : undefined
+        }
+      >
+        {objectModal && (
+          <Space direction="vertical" size={8} style={{ width: "100%" }}>
+            <Space size={8}>
+              <Text type="secondary">名称：</Text>
+              <Text strong>{objectModal.obj.name}</Text>
+              {objectModal.obj.schemaName && (
+                <Text type="secondary">({objectModal.obj.schemaName})</Text>
+              )}
+              {objectModal.obj.kind === "trigger" &&
+                objectModal.table && (
+                  <Text type="secondary">@{objectModal.table}</Text>
+                )}
+            </Space>
+            <div
+              style={{
+                border: "1px solid #f0f0f0",
+                borderRadius: 4,
+                overflow: "hidden",
+              }}
+            >
+              <Editor
+                height="420px"
+                defaultLanguage="sql"
+                value={
+                  objectModal.mode === "edit"
+                    ? objectModal.draft
+                    : objectModal.definition
+                }
+                onChange={(val) =>
+                  objectModal.mode === "edit" &&
+                  setObjectModal(
+                    (prev) => (prev ? { ...prev, draft: val ?? "" } : prev)
+                  )
+                }
+                theme="vs"
+                options={{
+                  readOnly: objectModal.mode === "view",
+                  minimap: { enabled: false },
+                  fontSize: 13,
+                  scrollBeyondLastLine: false,
+                  automaticLayout: true,
+                  tabSize: 2,
+                  wordWrap: "on",
+                }}
+              />
+            </div>
+            {objectModal.mode === "edit" && (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                保存将执行 DROP IF EXISTS + CREATE 事务，请确保定义语句完整且正确。
+              </Text>
+            )}
+          </Space>
+        )}
+      </Modal>
       <Modal
         title={modalState.mode === "create" ? "新增行" : "编辑行"}
         open={modalState.open}

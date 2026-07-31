@@ -16,6 +16,20 @@ P4-3 SQL 查询控制台：执行任意 SQL 与获取执行计划。
 P4-4 导入导出：CSV/Excel/SQL 脚本导入导出（流式处理大文件）。
 - POST ``/{ds_id}/tables/{table_name}/export``：所有登录用户可读
 - POST ``/{ds_id}/tables/{table_name}/import``：designer+（写操作）
+
+P4-5 对象管理：视图/存储过程/函数/触发器查看与编辑。
+- GET ``/{ds_id}/views``：列出视图（所有登录用户）
+- GET ``/{ds_id}/views/{name}``：获取视图定义（所有登录用户）
+- PUT ``/{ds_id}/views/{name}``：编辑视图（designer+）
+- DELETE ``/{ds_id}/views/{name}``：删除视图（designer+）
+- GET ``/{ds_id}/routines``：列出存储过程/函数
+- GET ``/{ds_id}/routines/{name}``：获取定义（type 参数区分 procedure/function）
+- PUT ``/{ds_id}/routines/{name}``：编辑（designer+）
+- DELETE ``/{ds_id}/routines/{name}``：删除（designer+）
+- GET ``/{ds_id}/triggers``：列出触发器
+- GET ``/{ds_id}/triggers/{name}``：获取定义
+- PUT ``/{ds_id}/triggers/{name}``：编辑（designer+）
+- DELETE ``/{ds_id}/triggers/{name}``：删除（designer+）
 """
 
 from __future__ import annotations
@@ -36,6 +50,21 @@ from apps.accounts.permissions import require_designer_or_admin
 from apps.datasources.engine import get_engine
 from apps.datasources.models import DataSource
 
+from .objects import (
+    ObjectError,
+    alter_routine,
+    alter_trigger,
+    alter_view,
+    drop_routine,
+    drop_trigger,
+    drop_view,
+    get_routine_definition,
+    get_trigger_definition,
+    get_view_definition,
+    list_routines,
+    list_triggers,
+    list_views,
+)
 from .query import (
     QueryError,
     delete_row,
@@ -59,12 +88,19 @@ from .schemas import (
     ExplainOut,
     ImportResultOut,
     MessageOut,
+    NameOut,
+    ObjectUpdateIn,
+    RoutineBriefOut,
+    RoutineDetailOut,
     RowCreateIn,
     RowListOut,
     RowOut,
     RowUpdateIn,
     SqlExecIn,
     SqlResultOut,
+    TriggerBriefOut,
+    TriggerDetailOut,
+    ViewDetailOut,
 )
 
 router = Router(tags=["manager"], auth=JWTAuth())
@@ -583,6 +619,351 @@ def _get_file_ext(name: str | None) -> str:
     if dot < 0:
         return ""
     return name[dot:].lower()
+
+
+# ============================================================
+# P4-5 对象管理
+# ============================================================
+
+
+def _resolve_obj_schema(ds: DataSource, schema_name: str | None) -> str | None:
+    """SQLite 强制 None；其他方言空字符串转 None."""
+    if cast(str, ds.engine) == "sqlite":
+        return None
+    return schema_name or None
+
+
+# ----- 视图 -----
+
+
+@router.get("/{ds_id}/views", response={200: list[NameOut]})
+def list_views_view(
+    request: HttpRequest,
+    ds_id: int,
+    schema_name: str | None = None,
+) -> HttpResponse:
+    """列出视图（所有登录用户）.
+
+    Query 参数：
+        schema_name: Schema 名（SQLite 忽略；MySQL 用当前数据库；PG 默认 public）。
+    """
+    del request  # 仅认证用
+    ds = _get_ds_or_404(ds_id)
+    effective_schema = _resolve_obj_schema(ds, schema_name)
+    try:
+        engine = get_engine(ds)
+        names = list_views(engine, schema=effective_schema)
+    except ObjectError as exc:
+        raise HttpError(400, str(exc)) from None
+    except SQLAlchemyError as exc:
+        raise HttpError(400, f"读取视图列表失败: {exc}") from None
+    body = [NameOut(name=n).model_dump() for n in names]
+    return JsonResponse(body, safe=False)
+
+
+@router.get("/{ds_id}/views/{name}", response={200: ViewDetailOut})
+def retrieve_view_view(
+    request: HttpRequest,
+    ds_id: int,
+    name: str,
+    schema_name: str | None = None,
+) -> HttpResponse:
+    """获取视图定义（所有登录用户）."""
+    del request
+    ds = _get_ds_or_404(ds_id)
+    effective_schema = _resolve_obj_schema(ds, schema_name)
+    try:
+        engine = get_engine(ds)
+        definition = get_view_definition(engine, name, schema=effective_schema)
+    except ObjectError as exc:
+        raise HttpError(404 if "不存在" in str(exc) else 400, str(exc)) from None
+    except SQLAlchemyError as exc:
+        raise HttpError(400, f"读取视图定义失败: {exc}") from None
+    body = ViewDetailOut(name=name, schema_name=effective_schema, definition=definition).model_dump()
+    return JsonResponse(body)
+
+
+@router.put("/{ds_id}/views/{name}", response={200: ViewDetailOut})
+def update_view_view(
+    request: HttpRequest,
+    ds_id: int,
+    name: str,
+    payload: ObjectUpdateIn,
+    schema_name: str | None = None,
+) -> HttpResponse:
+    """编辑视图（designer+，DROP IF EXISTS + CREATE 事务）."""
+    require_designer_or_admin(request)
+    ds = _get_ds_or_404(ds_id)
+    effective_schema = _resolve_obj_schema(ds, schema_name)
+    try:
+        engine = get_engine(ds)
+        alter_view(engine, name, effective_schema, payload.definition)
+        definition = get_view_definition(engine, name, schema=effective_schema)
+    except ObjectError as exc:
+        raise HttpError(400, str(exc)) from None
+    except SQLAlchemyError as exc:
+        raise HttpError(400, f"编辑视图失败: {exc}") from None
+    body = ViewDetailOut(name=name, schema_name=effective_schema, definition=definition).model_dump()
+    return JsonResponse(body)
+
+
+@router.delete("/{ds_id}/views/{name}", response={200: MessageOut})
+def delete_view_view(
+    request: HttpRequest,
+    ds_id: int,
+    name: str,
+    schema_name: str | None = None,
+) -> HttpResponse:
+    """删除视图（designer+）."""
+    require_designer_or_admin(request)
+    ds = _get_ds_or_404(ds_id)
+    effective_schema = _resolve_obj_schema(ds, schema_name)
+    try:
+        engine = get_engine(ds)
+        drop_view(engine, name, effective_schema)
+    except SQLAlchemyError as exc:
+        raise HttpError(400, f"删除视图失败: {exc}") from None
+    return JsonResponse({"detail": "已删除"})
+
+
+# ----- 存储过程/函数 -----
+
+
+@router.get("/{ds_id}/routines", response={200: list[RoutineBriefOut]})
+def list_routines_view(
+    request: HttpRequest,
+    ds_id: int,
+    schema_name: str | None = None,
+) -> HttpResponse:
+    """列出存储过程与函数（所有登录用户）.
+
+    SQLite 不支持，返回空列表。
+    """
+    del request
+    ds = _get_ds_or_404(ds_id)
+    effective_schema = _resolve_obj_schema(ds, schema_name)
+    try:
+        engine = get_engine(ds)
+        routines = list_routines(engine, schema=effective_schema)
+    except ObjectError as exc:
+        raise HttpError(400, str(exc)) from None
+    except SQLAlchemyError as exc:
+        raise HttpError(400, f"读取存储过程列表失败: {exc}") from None
+    body = [RoutineBriefOut(name=r.name, schema_name=effective_schema, type=r.type).model_dump() for r in routines]
+    return JsonResponse(body, safe=False)
+
+
+@router.get("/{ds_id}/routines/{name}", response={200: RoutineDetailOut})
+def retrieve_routine_view(
+    request: HttpRequest,
+    ds_id: int,
+    name: str,
+    schema_name: str | None = None,
+    type: str = "function",
+) -> HttpResponse:
+    """获取存储过程/函数定义（所有登录用户）.
+
+    Query 参数：
+        type: ``procedure`` 或 ``function``，默认 ``function``。
+    """
+    del request
+    ds = _get_ds_or_404(ds_id)
+    effective_schema = _resolve_obj_schema(ds, schema_name)
+    try:
+        engine = get_engine(ds)
+        definition = get_routine_definition(engine, name, effective_schema, type)
+    except ObjectError as exc:
+        raise HttpError(404 if "不存在" in str(exc) else 400, str(exc)) from None
+    except SQLAlchemyError as exc:
+        raise HttpError(400, f"读取定义失败: {exc}") from None
+    body = RoutineDetailOut(name=name, schema_name=effective_schema, type=type, definition=definition).model_dump()
+    return JsonResponse(body)
+
+
+@router.put("/{ds_id}/routines/{name}", response={200: RoutineDetailOut})
+def update_routine_view(  # noqa: PLR0913, PLR0917
+    request: HttpRequest,
+    ds_id: int,
+    name: str,
+    payload: ObjectUpdateIn,
+    schema_name: str | None = None,
+    type: str = "function",
+) -> HttpResponse:
+    """编辑存储过程/函数（designer+，DROP IF EXISTS + CREATE 事务）.
+
+    Query 参数：
+        type: ``procedure`` 或 ``function``，默认 ``function``。
+    """
+    require_designer_or_admin(request)
+    ds = _get_ds_or_404(ds_id)
+    effective_schema = _resolve_obj_schema(ds, schema_name)
+    try:
+        engine = get_engine(ds)
+        alter_routine(engine, name, effective_schema, payload.definition, type)
+        definition = get_routine_definition(engine, name, effective_schema, type)
+    except ObjectError as exc:
+        raise HttpError(400, str(exc)) from None
+    except SQLAlchemyError as exc:
+        raise HttpError(400, f"编辑失败: {exc}") from None
+    body = RoutineDetailOut(name=name, schema_name=effective_schema, type=type, definition=definition).model_dump()
+    return JsonResponse(body)
+
+
+@router.delete("/{ds_id}/routines/{name}", response={200: MessageOut})
+def delete_routine_view(
+    request: HttpRequest,
+    ds_id: int,
+    name: str,
+    schema_name: str | None = None,
+    type: str = "function",
+) -> HttpResponse:
+    """删除存储过程/函数（designer+）.
+
+    Query 参数：
+        type: ``procedure`` 或 ``function``，默认 ``function``。
+    """
+    require_designer_or_admin(request)
+    ds = _get_ds_or_404(ds_id)
+    effective_schema = _resolve_obj_schema(ds, schema_name)
+    try:
+        engine = get_engine(ds)
+        drop_routine(engine, name, effective_schema, type)
+    except ObjectError as exc:
+        raise HttpError(400, str(exc)) from None
+    except SQLAlchemyError as exc:
+        raise HttpError(400, f"删除失败: {exc}") from None
+    return JsonResponse({"detail": "已删除"})
+
+
+# ----- 触发器 -----
+
+
+@router.get("/{ds_id}/triggers", response={200: list[TriggerBriefOut]})
+def list_triggers_view(
+    request: HttpRequest,
+    ds_id: int,
+    schema_name: str | None = None,
+) -> HttpResponse:
+    """列出触发器（所有登录用户）."""
+    del request
+    ds = _get_ds_or_404(ds_id)
+    effective_schema = _resolve_obj_schema(ds, schema_name)
+    try:
+        engine = get_engine(ds)
+        triggers = list_triggers(engine, schema=effective_schema)
+    except ObjectError as exc:
+        raise HttpError(400, str(exc)) from None
+    except SQLAlchemyError as exc:
+        raise HttpError(400, f"读取触发器列表失败: {exc}") from None
+    body = [
+        TriggerBriefOut(
+            name=t.name,
+            schema_name=effective_schema,
+            event=t.event,
+            table=t.table,
+            timing=t.timing,
+        ).model_dump()
+        for t in triggers
+    ]
+    return JsonResponse(body, safe=False)
+
+
+@router.get("/{ds_id}/triggers/{name}", response={200: TriggerDetailOut})
+def retrieve_trigger_view(
+    request: HttpRequest,
+    ds_id: int,
+    name: str,
+    schema_name: str | None = None,
+) -> HttpResponse:
+    """获取触发器定义（所有登录用户）."""
+    del request
+    ds = _get_ds_or_404(ds_id)
+    effective_schema = _resolve_obj_schema(ds, schema_name)
+    try:
+        engine = get_engine(ds)
+        triggers = list_triggers(engine, schema=effective_schema)
+        target = next((t for t in triggers if t.name == name), None)
+        if target is None:
+            raise HttpError(404, f"触发器 {name} 不存在")
+        definition = get_trigger_definition(engine, name, schema=effective_schema)
+    except ObjectError as exc:
+        raise HttpError(404 if "不存在" in str(exc) else 400, str(exc)) from None
+    except SQLAlchemyError as exc:
+        raise HttpError(400, f"读取触发器定义失败: {exc}") from None
+    body = TriggerDetailOut(
+        name=name,
+        schema_name=effective_schema,
+        event=target.event,
+        table=target.table,
+        timing=target.timing,
+        definition=definition,
+    ).model_dump()
+    return JsonResponse(body)
+
+
+@router.put("/{ds_id}/triggers/{name}", response={200: TriggerDetailOut})
+def update_trigger_view(
+    request: HttpRequest,
+    ds_id: int,
+    name: str,
+    payload: ObjectUpdateIn,
+    schema_name: str | None = None,
+) -> HttpResponse:
+    """编辑触发器（designer+，DROP IF EXISTS + CREATE 事务）.
+
+    Body: ``{"definition": "CREATE TRIGGER ...", "table": "tbl"}``。
+    PG 删除触发器需要关联表名，``table`` 字段必填；MySQL/SQLite 可不填。
+    """
+    require_designer_or_admin(request)
+    ds = _get_ds_or_404(ds_id)
+    effective_schema = _resolve_obj_schema(ds, schema_name)
+    try:
+        engine = get_engine(ds)
+        alter_trigger(engine, name, effective_schema, payload.definition, payload.table)
+        triggers = list_triggers(engine, schema=effective_schema)
+        target = next((t for t in triggers if t.name == name), None)
+        if target is None:
+            raise HttpError(404, f"触发器 {name} 不存在")
+        definition = get_trigger_definition(engine, name, schema=effective_schema)
+    except ObjectError as exc:
+        raise HttpError(400, str(exc)) from None
+    except SQLAlchemyError as exc:
+        raise HttpError(400, f"编辑触发器失败: {exc}") from None
+    body = TriggerDetailOut(
+        name=name,
+        schema_name=effective_schema,
+        event=target.event,
+        table=target.table,
+        timing=target.timing,
+        definition=definition,
+    ).model_dump()
+    return JsonResponse(body)
+
+
+@router.delete("/{ds_id}/triggers/{name}", response={200: MessageOut})
+def delete_trigger_view(
+    request: HttpRequest,
+    ds_id: int,
+    name: str,
+    schema_name: str | None = None,
+    table: str | None = None,
+) -> HttpResponse:
+    """删除触发器（designer+）.
+
+    Query 参数：
+        table: 关联表名（PG 必填；MySQL/SQLite 可不填）。
+    """
+    require_designer_or_admin(request)
+    ds = _get_ds_or_404(ds_id)
+    effective_schema = _resolve_obj_schema(ds, schema_name)
+    try:
+        engine = get_engine(ds)
+        drop_trigger(engine, name, effective_schema, table)
+    except ObjectError as exc:
+        raise HttpError(400, str(exc)) from None
+    except SQLAlchemyError as exc:
+        raise HttpError(400, f"删除触发器失败: {exc}") from None
+    return JsonResponse({"detail": "已删除"})
 
 
 __all__ = ["router"]

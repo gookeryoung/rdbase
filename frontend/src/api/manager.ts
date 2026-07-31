@@ -5,6 +5,11 @@ import type {
   ExportFormat,
   ImportResult,
   MessageOut,
+  NameItem,
+  ObjectUpdate,
+  RoutineBrief,
+  RoutineDetail,
+  RoutineKind,
   RowCreate,
   RowListResponse,
   RowOut,
@@ -12,6 +17,9 @@ import type {
   RowUpdate,
   SqlExecRequest,
   SqlResult,
+  TriggerBrief,
+  TriggerDetail,
+  ViewDetail,
 } from "@/types";
 
 // 主键序列化为 JSON 字符串并 URL 编码（用于 query 参数）
@@ -165,5 +173,170 @@ export const importTable = (
       params: query,
       headers: { "Content-Type": "multipart/form-data" },
     })
+    .then((res) => res.data);
+};
+
+// ----------------- 对象管理（P4-5） -----------------
+
+// 通用 query 参数构造
+const buildSchemaQuery = (schemaName?: string | null): Record<string, string> => {
+  const q: Record<string, string> = {};
+  if (schemaName) q.schema_name = schemaName;
+  return q;
+};
+
+// 列出视图（所有登录用户）
+export const listViews = (
+  dsId: number,
+  schemaName?: string | null
+): Promise<NameItem[]> =>
+  client
+    .get<NameItem[]>(`/manager/${dsId}/views`, { params: buildSchemaQuery(schemaName) })
+    .then((res) => res.data);
+
+// 获取视图定义（所有登录用户）
+export const retrieveView = (
+  dsId: number,
+  name: string,
+  schemaName?: string | null
+): Promise<ViewDetail> =>
+  client
+    .get<ViewDetail>(`/manager/${dsId}/views/${encodeURIComponent(name)}`, {
+      params: buildSchemaQuery(schemaName),
+    })
+    .then((res) => res.data);
+
+// 编辑视图（designer+，DROP IF EXISTS + CREATE 事务）
+export const updateView = (
+  dsId: number,
+  name: string,
+  body: ObjectUpdate,
+  schemaName?: string | null
+): Promise<ViewDetail> =>
+  client
+    .put<ViewDetail>(
+      `/manager/${dsId}/views/${encodeURIComponent(name)}`,
+      body,
+      { params: buildSchemaQuery(schemaName) }
+    )
+    .then((res) => res.data);
+
+// 删除视图（designer+）
+export const deleteView = (
+  dsId: number,
+  name: string,
+  schemaName?: string | null
+): Promise<MessageOut> =>
+  client
+    .delete<MessageOut>(`/manager/${dsId}/views/${encodeURIComponent(name)}`, {
+      params: buildSchemaQuery(schemaName),
+    })
+    .then((res) => res.data);
+
+// 列出存储过程与函数（所有登录用户；SQLite 返回空列表）
+export const listRoutines = (
+  dsId: number,
+  schemaName?: string | null
+): Promise<RoutineBrief[]> =>
+  client
+    .get<RoutineBrief[]>(`/manager/${dsId}/routines`, {
+      params: buildSchemaQuery(schemaName),
+    })
+    .then((res) => res.data);
+
+// 获取存储过程/函数定义（所有登录用户）
+// type: procedure 或 function，默认 function
+export const retrieveRoutine = (
+  dsId: number,
+  name: string,
+  type: RoutineKind = "function",
+  schemaName?: string | null
+): Promise<RoutineDetail> => {
+  const q = { ...buildSchemaQuery(schemaName), type };
+  return client
+    .get<RoutineDetail>(`/manager/${dsId}/routines/${encodeURIComponent(name)}`, { params: q })
+    .then((res) => res.data);
+};
+
+// 编辑存储过程/函数（designer+）
+export const updateRoutine = (
+  dsId: number,
+  name: string,
+  body: ObjectUpdate,
+  type: RoutineKind = "function",
+  schemaName?: string | null
+): Promise<RoutineDetail> => {
+  const q = { ...buildSchemaQuery(schemaName), type };
+  return client
+    .put<RoutineDetail>(
+      `/manager/${dsId}/routines/${encodeURIComponent(name)}`,
+      body,
+      { params: q }
+    )
+    .then((res) => res.data);
+};
+
+// 删除存储过程/函数（designer+）
+export const deleteRoutine = (
+  dsId: number,
+  name: string,
+  type: RoutineKind = "function",
+  schemaName?: string | null
+): Promise<MessageOut> => {
+  const q = { ...buildSchemaQuery(schemaName), type };
+  return client
+    .delete<MessageOut>(`/manager/${dsId}/routines/${encodeURIComponent(name)}`, { params: q })
+    .then((res) => res.data);
+};
+
+// 列出触发器（所有登录用户）
+export const listTriggers = (
+  dsId: number,
+  schemaName?: string | null
+): Promise<TriggerBrief[]> =>
+  client
+    .get<TriggerBrief[]>(`/manager/${dsId}/triggers`, {
+      params: buildSchemaQuery(schemaName),
+    })
+    .then((res) => res.data);
+
+// 获取触发器定义（所有登录用户）
+export const retrieveTrigger = (
+  dsId: number,
+  name: string,
+  schemaName?: string | null
+): Promise<TriggerDetail> =>
+  client
+    .get<TriggerDetail>(`/manager/${dsId}/triggers/${encodeURIComponent(name)}`, {
+      params: buildSchemaQuery(schemaName),
+    })
+    .then((res) => res.data);
+
+// 编辑触发器（designer+，PG 需 table 字段）
+export const updateTrigger = (
+  dsId: number,
+  name: string,
+  body: ObjectUpdate,
+  schemaName?: string | null
+): Promise<TriggerDetail> =>
+  client
+    .put<TriggerDetail>(
+      `/manager/${dsId}/triggers/${encodeURIComponent(name)}`,
+      body,
+      { params: buildSchemaQuery(schemaName) }
+    )
+    .then((res) => res.data);
+
+// 删除触发器（designer+，PG 需 table 字段）
+export const deleteTrigger = (
+  dsId: number,
+  name: string,
+  schemaName?: string | null,
+  table?: string | null
+): Promise<MessageOut> => {
+  const q = buildSchemaQuery(schemaName);
+  if (table) q.table = table;
+  return client
+    .delete<MessageOut>(`/manager/${dsId}/triggers/${encodeURIComponent(name)}`, { params: q })
     .then((res) => res.data);
 };
