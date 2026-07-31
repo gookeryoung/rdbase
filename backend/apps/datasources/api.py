@@ -16,6 +16,8 @@ from ninja.errors import HttpError
 from apps.accounts.auth import JWTAuth
 from apps.accounts.models import User
 from apps.accounts.permissions import require_admin
+from apps.audit.audit import log_audit
+from apps.audit.models import AuditAction
 
 from .engine import dispose_engine, verify_connection
 from .models import DataSource, EngineType
@@ -93,6 +95,13 @@ def create_datasource(request: HttpRequest, payload: DataSourceCreateIn) -> Http
     if payload.password:
         ds.set_password(payload.password)
     ds.save()
+    log_audit(
+        request,
+        action=AuditAction.DATASOURCE_CREATE,
+        resource_type="datasource",
+        resource_id=str(ds.pk),
+        extra={"name": ds.name, "engine": ds.engine},
+    )
     body = DataSourceOut(**_ds_dict(ds)).model_dump()
     return JsonResponse(body, status=201)
 
@@ -142,6 +151,13 @@ def update_datasource(request: HttpRequest, ds_id: int, payload: DataSourceUpdat
     # 更新后旧引擎缓存应失效
     dispose_engine(ds.pk)
     ds.save()
+    log_audit(
+        request,
+        action=AuditAction.DATASOURCE_UPDATE,
+        resource_type="datasource",
+        resource_id=str(ds.pk),
+        extra={"name": ds.name, "engine": ds.engine},
+    )
     body = DataSourceOut(**_ds_dict(ds)).model_dump()
     return JsonResponse(body)
 
@@ -151,8 +167,17 @@ def delete_datasource(request: HttpRequest, ds_id: int) -> HttpResponse:
     """删除数据源（仅管理员）."""
     require_admin(request)
     ds = _get_ds_or_404(ds_id)
+    ds_name = ds.name
+    ds_engine = ds.engine
     dispose_engine(ds.pk)
     ds.delete()
+    log_audit(
+        request,
+        action=AuditAction.DATASOURCE_DELETE,
+        resource_type="datasource",
+        resource_id=str(ds_id),
+        extra={"name": ds_name, "engine": ds_engine},
+    )
     return JsonResponse({"detail": "已删除"})
 
 

@@ -9,6 +9,7 @@ import {
   LogoutOutlined,
   UserOutlined,
   TeamOutlined,
+  FileSearchOutlined,
 } from "@ant-design/icons";
 import { Outlet, useNavigate, useLocation } from "react-router-dom";
 import { useAuthStore } from "@/store/auth";
@@ -43,6 +44,12 @@ const menuItems: MenuItem[] = [
     key: "/users",
     icon: <TeamOutlined />,
     label: "用户管理",
+    roles: [Role.ADMIN],
+  },
+  {
+    key: "/audit",
+    icon: <FileSearchOutlined />,
+    label: "审计日志",
     roles: [Role.ADMIN],
   },
   { key: "/profile", icon: <UserOutlined />, label: "个人中心" },

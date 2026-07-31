@@ -22,6 +22,8 @@ from sqlalchemy.exc import NoSuchTableError, SQLAlchemyError
 from apps.accounts.auth import JWTAuth
 from apps.accounts.models import User
 from apps.accounts.permissions import require_designer_or_admin
+from apps.audit.audit import log_audit
+from apps.audit.models import AuditAction, AuditStatus
 from apps.datasources.engine import get_engine
 from apps.datasources.models import DataSource, EngineType
 
@@ -298,6 +300,14 @@ def create_draft_view(request: HttpRequest, payload: DraftCreateIn) -> HttpRespo
     )
     draft.save()
     _create_version(draft, user)
+    log_audit(
+        request,
+        action=AuditAction.DRAFT_CREATE,
+        resource_type="draft",
+        resource_id=str(draft.pk),
+        datasource_id=payload.datasource_id,
+        extra={"name": payload.name, "table_name": payload.table_name},
+    )
     body = DraftOut(**_draft_dict(draft)).model_dump()
     return JsonResponse(body, status=201)
 
@@ -343,6 +353,14 @@ def update_draft_view(request: HttpRequest, draft_id: int, payload: DraftUpdateI
 
     draft.save()
     _create_version(draft, user)
+    log_audit(
+        request,
+        action=AuditAction.DRAFT_UPDATE,
+        resource_type="draft",
+        resource_id=str(draft.pk),
+        datasource_id=draft.datasource_id,  # type: ignore[missing-attribute]
+        extra={"name": draft.name, "table_name": draft.table_name},
+    )
     body = DraftOut(**_draft_dict(draft)).model_dump()
     return JsonResponse(body)
 
@@ -352,7 +370,18 @@ def delete_draft_view(request: HttpRequest, draft_id: int) -> HttpResponse:
     """删除草稿及其所有版本（designer+）."""
     require_designer_or_admin(request)
     draft = _get_draft_or_404(draft_id)
+    draft_id_val = draft.pk
+    ds_id = draft.datasource_id  # type: ignore[missing-attribute]
+    draft_name = draft.name
     draft.delete()
+    log_audit(
+        request,
+        action=AuditAction.DRAFT_DELETE,
+        resource_type="draft",
+        resource_id=str(draft_id_val),
+        datasource_id=ds_id,
+        extra={"name": draft_name},
+    )
     return JsonResponse({"detail": "已删除"})
 
 
@@ -393,6 +422,14 @@ def rollback_to_version_view(
     draft.spec = version.spec  # type: ignore[bad-assignment]
     draft.save()
     _create_version(draft, user)
+    log_audit(
+        request,
+        action=AuditAction.DRAFT_ROLLBACK,
+        resource_type="draft",
+        resource_id=str(draft.pk),
+        datasource_id=draft.datasource_id,  # type: ignore[missing-attribute]
+        extra={"version_no": version_no},
+    )
     body = DraftOut(**_draft_dict(draft)).model_dump()
     return JsonResponse(body)
 
@@ -442,10 +479,32 @@ def apply_draft_view(
             for stmt in result.statements:
                 conn.execute(text(stmt))
     except SQLAlchemyError as exc:
+        log_audit(
+            request,
+            action=AuditAction.DDL_APPLY,
+            status=AuditStatus.FAILURE,
+            resource_type="draft",
+            resource_id=str(draft.pk),
+            datasource_id=ds.pk,
+            datasource_name=ds.name,
+            sql="\n".join(result.statements),
+            error_message=f"DDL 执行失败: {exc}",
+        )
         raise HttpError(400, f"DDL 执行失败: {exc}") from None
     # 执行成功后更新草稿状态
     draft.status = DraftStatus.APPLIED  # type: ignore[bad-assignment]
     draft.save()
+    log_audit(
+        request,
+        action=AuditAction.DDL_APPLY,
+        resource_type="draft",
+        resource_id=str(draft.pk),
+        datasource_id=ds.pk,
+        datasource_name=ds.name,
+        sql="\n".join(result.statements),
+        row_count=len(result.statements),
+        extra={"statements": list(result.statements)},
+    )
     body = DDLExecuteOut(
         executed=len(result.statements),
         statements=list(result.statements),

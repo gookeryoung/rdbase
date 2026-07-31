@@ -33,7 +33,7 @@ INSTALLED_APPS = [
     "apps.datasources",
     "apps.designer",
     "apps.manager",
-    # "apps.audit",
+    "apps.audit",
 ]
 
 # 自定义用户模型（须在首次 migrate 前设置）
@@ -49,6 +49,8 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    # 审计日志中间件：拦截写操作并记录通用审计信息（业务上下文由 view 内 log_audit 补充）
+    "apps.audit.middleware.AuditMiddleware",
 ]
 
 ROOT_URLCONF = "rdbase.urls"

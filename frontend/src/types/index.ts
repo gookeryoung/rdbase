@@ -402,3 +402,80 @@ export interface ObjectUpdate {
   definition: string;
   table?: string | null;
 }
+
+// ----------------- 审计日志（P5） -----------------
+
+// 审计操作类型（与后端 AuditAction.TextChoices 对齐）
+export type AuditAction =
+  | "write"
+  | "login"
+  | "logout"
+  | "datasource.create"
+  | "datasource.update"
+  | "datasource.delete"
+  | "draft.create"
+  | "draft.update"
+  | "draft.delete"
+  | "draft.rollback"
+  | "ddl.apply"
+  | "dml.insert"
+  | "dml.update"
+  | "dml.delete"
+  | "dml.import"
+  | "sql.execute"
+  | "obj.alter"
+  | "obj.drop";
+
+// 审计记录来源
+export type AuditSource = "middleware" | "business";
+
+// 审计操作结果
+export type AuditStatus = "success" | "failure";
+
+// 审计日志条目
+export interface AuditLog {
+  id: number;
+  user_id: number | null;
+  username: string;
+  action: AuditAction;
+  source: AuditSource;
+  status: AuditStatus;
+  method: string;
+  path: string;
+  resource_type: string;
+  resource_id: string;
+  datasource_id: number | null;
+  datasource_name: string;
+  sql: string;
+  row_count: number | null;
+  elapsed_ms: number | null;
+  ip: string | null;
+  user_agent: string;
+  error_message: string;
+  extra: Record<string, unknown>;
+  created_at: string;
+}
+
+// 审计日志分页响应
+export interface AuditLogList {
+  items: AuditLog[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+// 审计日志列表查询参数
+export interface AuditLogQuery {
+  user_id?: number;
+  username?: string;
+  action?: AuditAction;
+  source?: AuditSource;
+  status?: AuditStatus;
+  resource_type?: string;
+  datasource_id?: number;
+  path?: string;
+  start?: string;
+  end?: string;
+  page?: number;
+  page_size?: number;
+}

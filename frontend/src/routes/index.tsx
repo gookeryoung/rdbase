@@ -7,6 +7,7 @@ import Datasources from "@/pages/Datasources";
 import Designer from "@/pages/Designer";
 import Manager from "@/pages/Manager";
 import SqlConsole from "@/pages/SqlConsole";
+import AuditLogs from "@/pages/AuditLogs";
 import MainLayout from "@/layouts/MainLayout";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import RoleRoute from "@/components/RoleRoute";
@@ -40,6 +41,11 @@ export const routes: RouteObject[] = [
             path: "users",
             element: <RoleRoute allowedRoles={[Role.ADMIN]} />,
             children: [{ index: true, element: <Users /> }],
+          },
+          {
+            path: "audit",
+            element: <RoleRoute allowedRoles={[Role.ADMIN]} />,
+            children: [{ index: true, element: <AuditLogs /> }],
           },
           { path: "profile", element: <Profile /> },
         ],

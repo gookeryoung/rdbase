@@ -47,6 +47,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from apps.accounts.auth import JWTAuth
 from apps.accounts.models import Role
 from apps.accounts.permissions import require_designer_or_admin
+from apps.audit.audit import log_audit
+from apps.audit.models import AuditAction, AuditStatus
 from apps.datasources.engine import get_engine
 from apps.datasources.models import DataSource
 
@@ -269,9 +271,43 @@ def create_row_view(
         engine = get_engine(ds)
         row = insert_row(engine, table_name, effective_schema, payload.values)
     except QueryError as exc:
+        log_audit(
+            request,
+            action=AuditAction.DML_INSERT,
+            status=AuditStatus.FAILURE,
+            resource_type="row",
+            datasource_id=ds.pk,
+            datasource_name=ds.name,
+            sql=f"INSERT INTO {table_name}",
+            error_message=str(exc),
+            extra={"table_name": table_name, "schema": effective_schema},
+        )
         raise HttpError(400, str(exc)) from None
     except SQLAlchemyError as exc:
+        log_audit(
+            request,
+            action=AuditAction.DML_INSERT,
+            status=AuditStatus.FAILURE,
+            resource_type="row",
+            datasource_id=ds.pk,
+            datasource_name=ds.name,
+            sql=f"INSERT INTO {table_name}",
+            error_message=f"新增失败: {exc}",
+            extra={"table_name": table_name, "schema": effective_schema},
+        )
         raise HttpError(400, f"新增失败: {exc}") from None
+    row_id = next(iter(row.values()), "") if row else ""
+    log_audit(
+        request,
+        action=AuditAction.DML_INSERT,
+        resource_type="row",
+        resource_id=str(row_id),
+        datasource_id=ds.pk,
+        datasource_name=ds.name,
+        sql=f"INSERT INTO {table_name}",
+        row_count=1,
+        extra={"table_name": table_name, "schema": effective_schema},
+    )
     body = RowOut(row=row).model_dump()
     return JsonResponse(body, status=201)
 
@@ -335,11 +371,46 @@ def update_row_view(  # noqa: PLR0913, PLR0917
     except QueryError as exc:
         # 行不存在或已被修改 → 404 区分（消息含「不存在」字样），其他 QueryError → 400
         msg = str(exc)
+        log_audit(
+            request,
+            action=AuditAction.DML_UPDATE,
+            status=AuditStatus.FAILURE,
+            resource_type="row",
+            resource_id=str(parsed_pk),
+            datasource_id=ds.pk,
+            datasource_name=ds.name,
+            sql=f"UPDATE {table_name}",
+            error_message=msg,
+            extra={"table_name": table_name, "schema": effective_schema, "pk": parsed_pk},
+        )
         if "不存在" in msg:
             raise HttpError(404, msg) from None
         raise HttpError(400, msg) from None
     except SQLAlchemyError as exc:
+        log_audit(
+            request,
+            action=AuditAction.DML_UPDATE,
+            status=AuditStatus.FAILURE,
+            resource_type="row",
+            resource_id=str(parsed_pk),
+            datasource_id=ds.pk,
+            datasource_name=ds.name,
+            sql=f"UPDATE {table_name}",
+            error_message=f"更新失败: {exc}",
+            extra={"table_name": table_name, "schema": effective_schema, "pk": parsed_pk},
+        )
         raise HttpError(400, f"更新失败: {exc}") from None
+    log_audit(
+        request,
+        action=AuditAction.DML_UPDATE,
+        resource_type="row",
+        resource_id=str(parsed_pk),
+        datasource_id=ds.pk,
+        datasource_name=ds.name,
+        sql=f"UPDATE {table_name}",
+        row_count=1,
+        extra={"table_name": table_name, "schema": effective_schema, "pk": parsed_pk},
+    )
     body = RowOut(row=row).model_dump()
     return JsonResponse(body)
 
@@ -368,11 +439,46 @@ def delete_row_view(
         delete_row(engine, table_name, effective_schema, parsed_pk)
     except QueryError as exc:
         msg = str(exc)
+        log_audit(
+            request,
+            action=AuditAction.DML_DELETE,
+            status=AuditStatus.FAILURE,
+            resource_type="row",
+            resource_id=str(parsed_pk),
+            datasource_id=ds.pk,
+            datasource_name=ds.name,
+            sql=f"DELETE FROM {table_name}",
+            error_message=msg,
+            extra={"table_name": table_name, "schema": effective_schema, "pk": parsed_pk},
+        )
         if "不存在" in msg:
             raise HttpError(404, msg) from None
         raise HttpError(400, msg) from None
     except SQLAlchemyError as exc:
+        log_audit(
+            request,
+            action=AuditAction.DML_DELETE,
+            status=AuditStatus.FAILURE,
+            resource_type="row",
+            resource_id=str(parsed_pk),
+            datasource_id=ds.pk,
+            datasource_name=ds.name,
+            sql=f"DELETE FROM {table_name}",
+            error_message=f"删除失败: {exc}",
+            extra={"table_name": table_name, "schema": effective_schema, "pk": parsed_pk},
+        )
         raise HttpError(400, f"删除失败: {exc}") from None
+    log_audit(
+        request,
+        action=AuditAction.DML_DELETE,
+        resource_type="row",
+        resource_id=str(parsed_pk),
+        datasource_id=ds.pk,
+        datasource_name=ds.name,
+        sql=f"DELETE FROM {table_name}",
+        row_count=1,
+        extra={"table_name": table_name, "schema": effective_schema, "pk": parsed_pk},
+    )
     return JsonResponse({"detail": "已删除"})
 
 
@@ -412,11 +518,43 @@ def execute_sql_view(
         result = execute_sql(engine, payload.sql, read_only=read_only)
     except QueryError as exc:
         # viewer 越权写操作 → 403；其他 QueryError → 400
+        log_audit(
+            request,
+            action=AuditAction.SQL_EXECUTE,
+            status=AuditStatus.FAILURE,
+            resource_type="sql",
+            datasource_id=ds.pk,
+            datasource_name=ds.name,
+            sql=payload.sql,
+            error_message=str(exc),
+        )
         if "仅允许执行只读" in str(exc):
             raise HttpError(403, str(exc)) from None
         raise HttpError(400, str(exc)) from None
     except SQLAlchemyError as exc:
+        log_audit(
+            request,
+            action=AuditAction.SQL_EXECUTE,
+            status=AuditStatus.FAILURE,
+            resource_type="sql",
+            datasource_id=ds.pk,
+            datasource_name=ds.name,
+            sql=payload.sql,
+            error_message=f"SQL 执行失败: {exc}",
+        )
         raise HttpError(400, f"SQL 执行失败: {exc}") from None
+    # 写操作记录审计日志；只读 SELECT 不记录（避免噪音）
+    if not result["read_only"]:
+        log_audit(
+            request,
+            action=AuditAction.SQL_EXECUTE,
+            resource_type="sql",
+            datasource_id=ds.pk,
+            datasource_name=ds.name,
+            sql=payload.sql,
+            row_count=result["rowcount"] if result["rowcount"] >= 0 else None,
+            elapsed_ms=int(result["elapsed_ms"]),
+        )
     body = SqlResultOut(
         columns=result["columns"],
         rows=result["rows"],
@@ -600,9 +738,41 @@ def import_table_view(
         columns, rows_iter = parser(file)
         result = import_rows(engine, table_name, effective_schema, columns, rows_iter)
     except QueryError as exc:
+        log_audit(
+            request,
+            action=AuditAction.DML_IMPORT,
+            status=AuditStatus.FAILURE,
+            resource_type="row",
+            datasource_id=ds.pk,
+            datasource_name=ds.name,
+            sql=f"IMPORT INTO {table_name}",
+            error_message=str(exc),
+            extra={"table_name": table_name, "schema": effective_schema, "file": file.name},
+        )
         raise HttpError(400, str(exc)) from None
     except SQLAlchemyError as exc:
+        log_audit(
+            request,
+            action=AuditAction.DML_IMPORT,
+            status=AuditStatus.FAILURE,
+            resource_type="row",
+            datasource_id=ds.pk,
+            datasource_name=ds.name,
+            sql=f"IMPORT INTO {table_name}",
+            error_message=f"导入失败: {exc}",
+            extra={"table_name": table_name, "schema": effective_schema, "file": file.name},
+        )
         raise HttpError(400, f"导入失败: {exc}") from None
+    log_audit(
+        request,
+        action=AuditAction.DML_IMPORT,
+        resource_type="row",
+        datasource_id=ds.pk,
+        datasource_name=ds.name,
+        sql=f"IMPORT INTO {table_name}",
+        row_count=result["success_count"],
+        extra={"table_name": table_name, "schema": effective_schema, "file": file.name},
+    )
     body = ImportResultOut(
         success_count=result["success_count"],
         failed_count=result["failed_count"],
@@ -703,6 +873,16 @@ def update_view_view(
         raise HttpError(400, str(exc)) from None
     except SQLAlchemyError as exc:
         raise HttpError(400, f"编辑视图失败: {exc}") from None
+    log_audit(
+        request,
+        action=AuditAction.OBJ_ALTER,
+        resource_type="view",
+        resource_id=name,
+        datasource_id=ds.pk,
+        datasource_name=ds.name,
+        sql=payload.definition,
+        extra={"schema": effective_schema},
+    )
     body = ViewDetailOut(name=name, schema_name=effective_schema, definition=definition).model_dump()
     return JsonResponse(body)
 
@@ -723,6 +903,16 @@ def delete_view_view(
         drop_view(engine, name, effective_schema)
     except SQLAlchemyError as exc:
         raise HttpError(400, f"删除视图失败: {exc}") from None
+    log_audit(
+        request,
+        action=AuditAction.OBJ_DROP,
+        resource_type="view",
+        resource_id=name,
+        datasource_id=ds.pk,
+        datasource_name=ds.name,
+        sql=f"DROP VIEW {name}",
+        extra={"schema": effective_schema},
+    )
     return JsonResponse({"detail": "已删除"})
 
 
@@ -805,6 +995,16 @@ def update_routine_view(  # noqa: PLR0913, PLR0917
         raise HttpError(400, str(exc)) from None
     except SQLAlchemyError as exc:
         raise HttpError(400, f"编辑失败: {exc}") from None
+    log_audit(
+        request,
+        action=AuditAction.OBJ_ALTER,
+        resource_type="routine",
+        resource_id=name,
+        datasource_id=ds.pk,
+        datasource_name=ds.name,
+        sql=payload.definition,
+        extra={"schema": effective_schema, "routine_type": type},
+    )
     body = RoutineDetailOut(name=name, schema_name=effective_schema, type=type, definition=definition).model_dump()
     return JsonResponse(body)
 
@@ -832,6 +1032,16 @@ def delete_routine_view(
         raise HttpError(400, str(exc)) from None
     except SQLAlchemyError as exc:
         raise HttpError(400, f"删除失败: {exc}") from None
+    log_audit(
+        request,
+        action=AuditAction.OBJ_DROP,
+        resource_type="routine",
+        resource_id=name,
+        datasource_id=ds.pk,
+        datasource_name=ds.name,
+        sql=f"DROP {type} {name}",
+        extra={"schema": effective_schema, "routine_type": type},
+    )
     return JsonResponse({"detail": "已删除"})
 
 
@@ -929,6 +1139,16 @@ def update_trigger_view(
         raise HttpError(400, str(exc)) from None
     except SQLAlchemyError as exc:
         raise HttpError(400, f"编辑触发器失败: {exc}") from None
+    log_audit(
+        request,
+        action=AuditAction.OBJ_ALTER,
+        resource_type="trigger",
+        resource_id=name,
+        datasource_id=ds.pk,
+        datasource_name=ds.name,
+        sql=payload.definition,
+        extra={"schema": effective_schema, "table": payload.table},
+    )
     body = TriggerDetailOut(
         name=name,
         schema_name=effective_schema,
@@ -963,6 +1183,16 @@ def delete_trigger_view(
         raise HttpError(400, str(exc)) from None
     except SQLAlchemyError as exc:
         raise HttpError(400, f"删除触发器失败: {exc}") from None
+    log_audit(
+        request,
+        action=AuditAction.OBJ_DROP,
+        resource_type="trigger",
+        resource_id=name,
+        datasource_id=ds.pk,
+        datasource_name=ds.name,
+        sql=f"DROP TRIGGER {name}",
+        extra={"schema": effective_schema, "table": table},
+    )
     return JsonResponse({"detail": "已删除"})
 
 
