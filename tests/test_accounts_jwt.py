@@ -37,7 +37,7 @@ def test_create_refresh_token_has_no_role() -> None:
 
 def test_decode_token_invalid_signature_raises() -> None:
     """用错误密钥签名的 token 解码应抛 PyJWTError."""
-    token = jwt.encode({"user_id": 1}, "wrong-secret", algorithm=ALGORITHM)
+    token = jwt.encode({"user_id": 1}, "wrong-secret-at-least-32-bytes-long", algorithm=ALGORITHM)
     with pytest.raises(jwt.PyJWTError):
         decode_token(token)
 

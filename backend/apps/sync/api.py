@@ -347,7 +347,7 @@ def list_logs(
 def get_source_columns(
     request: HttpRequest,
     table: str = "",
-    schema: str = "",  # noqa: ARG001
+    schema_name: str = "",  # noqa: ARG001
 ) -> HttpResponse:
     """获取源表（rdbase 平台库）的列信息."""
     require_admin(request)
@@ -382,7 +382,7 @@ def get_target_columns(
     request: HttpRequest,
     datasource_id: int = 0,
     table: str = "",
-    schema: str = "",
+    schema_name: str = "",
 ) -> HttpResponse:
     """获取目标数据源表的列信息."""
     require_admin(request)
@@ -399,7 +399,7 @@ def get_target_columns(
         from sqlalchemy import inspect
 
         insp = inspect(engine)
-        effective_schema = schema or None
+        effective_schema = schema_name or None
         columns_info = insp.get_columns(table, schema=effective_schema)
         pk_info = insp.get_pk_constraint(table, schema=effective_schema)
         pk_cols = set(pk_info.get("constrained_columns", []))
