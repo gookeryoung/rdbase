@@ -138,7 +138,7 @@ class SyncConfig(models.Model):
     @property
     def is_schedulable(self) -> bool:
         """是否可调度（启用且有 cron 表达式）."""
-        return self.is_active and self.scheduler_enabled and bool(self.cron_expression)
+        return bool(self.is_active and self.scheduler_enabled and self.cron_expression)
 
 
 class SyncFieldMapping(models.Model):
