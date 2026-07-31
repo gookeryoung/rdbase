@@ -25,3 +25,6 @@ DATABASES = {
 
 # CORS 仅允许配置的前端域名
 CORS_ALLOWED_ORIGINS = [o for o in os.environ.get("CORS_ALLOWED_ORIGINS", "").split(",") if o]
+
+# CSRF 信任来源（Django 4.0+ 需显式配置，否则 POST 会被拒绝）
+CSRF_TRUSTED_ORIGINS = [o for o in os.environ.get("CSRF_TRUSTED_ORIGINS", "").split(",") if o]

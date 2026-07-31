@@ -29,6 +29,7 @@ coverage.xml
 # 环境变量与凭证（勿提交）
 .env
 .env.*
+!.env.example
 
 # Sphinx 文档构建输出
 docs/_build/
