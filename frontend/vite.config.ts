@@ -25,4 +25,19 @@ export default defineConfig({
       },
     },
   },
+  build: {
+    // 代码分割：将第三方库拆分为独立 chunk，优化首屏加载
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          "react-vendor": ["react", "react-dom", "react-router-dom"],
+          "antd-vendor": ["antd", "@ant-design/icons"],
+          "monaco-vendor": ["@monaco-editor/react"],
+          "reactflow-vendor": ["reactflow"],
+        },
+      },
+    },
+    // chunk 大小警告阈值（KB）
+    chunkSizeWarningLimit: 1000,
+  },
 });

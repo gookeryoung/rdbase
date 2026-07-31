@@ -51,12 +51,14 @@ RUN python manage.py collectstatic --noinput
 # 暴露端口
 EXPOSE 8000
 
-# 启动命令：gunicorn + uvicorn worker
+# 启动命令：gunicorn + uvicorn worker（worker 数量由环境变量控制）
 CMD ["gunicorn", \
      "--bind", "0.0.0.0:8000", \
      "--workers", "4", \
      "--worker-class", "uvicorn.workers.UvicornWorker", \
      "--timeout", "120", \
+     "--graceful-timeout", "30", \
+     "--preload", \
      "--access-logfile", "-", \
      "--error-logfile", "-", \
      "rdbase.asgi:application"]
