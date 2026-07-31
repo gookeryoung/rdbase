@@ -5,12 +5,17 @@
 
 from __future__ import annotations
 
+import io
+from datetime import date, datetime
 from typing import Any, cast
 
 import pytest
 from apps.manager.query import (
     QueryError,
     _build_where_clause,
+    _format_csv_value,
+    _format_excel_value,
+    _format_sql_value,
     _format_table_ref,
     _is_read_only,
     _quote_ident,
@@ -20,11 +25,18 @@ from apps.manager.query import (
     delete_row,
     execute_sql,
     explain_sql,
+    export_excel,
     get_column_names,
     get_pk_columns,
     get_row,
+    import_rows,
     insert_row,
+    iter_table_rows,
+    parse_csv_upload,
+    parse_excel_upload,
     query_table_rows,
+    rows_to_csv,
+    rows_to_sql,
     update_row,
 )
 from sqlalchemy import create_engine, text
@@ -1575,5 +1587,437 @@ def test_explain_sql_syntax_error_raises_sqlalchemy_error() -> None:
 
         with pytest.raises(SQLAlchemyError):
             explain_sql(engine, "SELECT FROM WHERE")
+    finally:
+        engine.dispose()
+
+
+# ============================================================
+# P4-4 导入导出 - _format_csv_value / _format_sql_value / _format_excel_value
+# ============================================================
+
+
+def test_format_csv_value_none() -> None:
+    """None 应转为空字符串."""
+    assert _format_csv_value(None) == ""
+
+
+def test_format_csv_value_bool() -> None:
+    """bool 应转为 '1'/'0'."""
+    assert _format_csv_value(True) == "1"
+    assert _format_csv_value(False) == "0"
+
+
+def test_format_csv_value_numbers() -> None:
+    """int/float 应转为字符串."""
+    assert _format_csv_value(42) == "42"
+    assert _format_csv_value(3.14) == "3.14"
+
+
+def test_format_csv_value_datetime() -> None:
+    """datetime/date/time 应转为 ISO 格式字符串."""
+    dt = datetime(2026, 7, 31, 12, 30, 45)
+    assert _format_csv_value(dt) == "2026-07-31T12:30:45"
+    d = date(2026, 7, 31)
+    assert _format_csv_value(d) == "2026-07-31"
+
+
+def test_format_csv_value_bytes() -> None:
+    """bytes 应 UTF-8 解码（失败用 replace）."""
+    assert _format_csv_value(b"hello") == "hello"
+    assert _format_csv_value(b"\xff\xfe") == "\ufffd\ufffd"
+
+
+def test_format_csv_value_dict_list() -> None:
+    """dict/list 应转为 JSON 字符串."""
+    assert _format_csv_value({"a": 1}) == '{"a": 1}'
+    assert _format_csv_value([1, 2, 3]) == "[1, 2, 3]"
+
+
+def test_format_csv_value_str() -> None:
+    """普通字符串应原样返回."""
+    assert _format_csv_value("hello") == "hello"
+
+
+def test_format_sql_value_none() -> None:
+    """None 应转为 NULL."""
+    assert _format_sql_value(None, "sqlite") == "NULL"
+
+
+def test_format_sql_value_bool() -> None:
+    """bool 应转为 1/0."""
+    assert _format_sql_value(True, "sqlite") == "1"
+    assert _format_sql_value(False, "sqlite") == "0"
+
+
+def test_format_sql_value_numbers() -> None:
+    """int/float 应转为数字字面量."""
+    assert _format_sql_value(42, "sqlite") == "42"
+    assert _format_sql_value(3.14, "sqlite") == "3.14"
+
+
+def test_format_sql_value_datetime() -> None:
+    """datetime 应转为 'ISO' 字符串."""
+    dt = datetime(2026, 7, 31, 12, 30, 45)
+    assert _format_sql_value(dt, "sqlite") == "'2026-07-31T12:30:45'"
+
+
+def test_format_sql_value_bytes_sqlite() -> None:
+    """SQLite bytes 应转为 X'hex'."""
+    assert _format_sql_value(b"\xab\xcd", "sqlite") == "X'abcd'"
+
+
+def test_format_sql_value_bytes_other_dialect() -> None:
+    """非 SQLite bytes 应转为 'utf-8 解码' 字符串."""
+    assert _format_sql_value(b"hello", "postgresql") == "'hello'"
+
+
+def test_format_sql_value_str_escape() -> None:
+    """字符串单引号应翻倍转义."""
+    assert _format_sql_value("hello", "sqlite") == "'hello'"
+    assert _format_sql_value("it's", "sqlite") == "'it''s'"
+
+
+def test_format_excel_value_basic() -> None:
+    """Excel 值应保留原始类型（str/int/float/bool/datetime/None）."""
+    assert _format_excel_value(None) is None
+    assert _format_excel_value(True) is True
+    assert _format_excel_value(42) == 42
+    assert _format_excel_value(3.14) == 3.14
+    assert _format_excel_value("hello") == "hello"
+    dt = datetime(2026, 7, 31)
+    assert _format_excel_value(dt) == dt
+
+
+def test_format_excel_value_bytes_dict() -> None:
+    """bytes/dict 应转为可序列化值."""
+    assert _format_excel_value(b"hello") == "hello"
+    assert _format_excel_value({"a": 1}) == '{"a": 1}'
+
+
+# ============================================================
+# P4-4 导入导出 - iter_table_rows
+# ============================================================
+
+
+def test_iter_table_rows_streams_all_rows() -> None:
+    """应流式生成所有行."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        rows = list(iter_table_rows(engine, "users", schema=None))
+        assert len(rows) == 5
+        assert rows[0]["name"] == "Alice"
+    finally:
+        engine.dispose()
+
+
+def test_iter_table_rows_batch_size() -> None:
+    """小 batch_size 也应正确分批."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        rows = list(iter_table_rows(engine, "users", schema=None, batch_size=2))
+        assert len(rows) == 5
+    finally:
+        engine.dispose()
+
+
+def test_iter_table_rows_unknown_table_raises() -> None:
+    """不存在的表应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        with pytest.raises(QueryError):
+            list(iter_table_rows(engine, "nonexistent", schema=None))
+    finally:
+        engine.dispose()
+
+
+# ============================================================
+# P4-4 导入导出 - rows_to_csv
+# ============================================================
+
+
+def test_rows_to_csv_header_and_rows() -> None:
+    """应首行输出 BOM+表头，后续每行一条记录."""
+    rows = iter([{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}])
+    chunks = list(rows_to_csv(rows, ["id", "name"]))
+    # 首块含 BOM + 表头
+    assert chunks[0].startswith("\ufeff")
+    assert "id,name" in chunks[0]
+    # 后续为数据行
+    assert any("1,Alice" in c for c in chunks)
+    assert any("2,Bob" in c for c in chunks)
+
+
+def test_rows_to_csv_none_to_empty() -> None:
+    """None 值应转为空字符串."""
+    rows = iter([{"id": 1, "name": None}])
+    chunks = list(rows_to_csv(rows, ["id", "name"]))
+    assert any("1," in c and "Alice" not in c for c in chunks[1:])
+
+
+# ============================================================
+# P4-4 导入导出 - rows_to_sql
+# ============================================================
+
+
+def test_rows_to_sql_insert_statements() -> None:
+    """应生成 INSERT 语句."""
+    rows = iter([{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}])
+    chunks = list(rows_to_sql(rows, ["id", "name"], "users", None, "sqlite"))
+    assert all(c.startswith('INSERT INTO "users" ("id", "name") VALUES ') for c in chunks)
+    assert chunks[0].endswith(");\n")
+    assert "1, 'Alice'" in chunks[0]
+    assert "2, 'Bob'" in chunks[1]
+
+
+def test_rows_to_sql_none_to_null() -> None:
+    """None 应转为 NULL."""
+    rows = iter([{"id": 1, "name": None}])
+    chunks = list(rows_to_sql(rows, ["id", "name"], "users", None, "sqlite"))
+    assert "1, NULL" in chunks[0]
+
+
+def test_rows_to_sql_escape_quote() -> None:
+    """单引号应翻倍转义."""
+    rows = iter([{"id": 1, "name": "it's"}])
+    chunks = list(rows_to_sql(rows, ["id", "name"], "users", None, "sqlite"))
+    assert "'it''s'" in chunks[0]
+
+
+# ============================================================
+# P4-4 导入导出 - export_excel
+# ============================================================
+
+
+def test_export_excel_returns_xlsx_bytes() -> None:
+    """应返回可被 openpyxl 解析的 xlsx bytes."""
+    from openpyxl import load_workbook
+
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        data = export_excel(engine, "users", schema=None)
+        assert isinstance(data, bytes)
+        assert data[:2] == b"PK"  # xlsx 是 zip 格式，签名以 PK 开头
+        # 用 openpyxl 读取验证
+        wb = load_workbook(io.BytesIO(data))
+        ws = wb.active
+        assert ws is not None
+        rows = list(ws.iter_rows(values_only=True))
+        # 表头 + 5 行
+        assert rows[0] == ("id", "name", "email", "age")
+        assert len(rows) == 6
+        assert rows[1][1] == "Alice"
+        wb.close()
+    finally:
+        engine.dispose()
+
+
+def test_export_excel_unknown_table_raises() -> None:
+    """不存在的表应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        with pytest.raises(QueryError):
+            export_excel(engine, "nonexistent", schema=None)
+    finally:
+        engine.dispose()
+
+
+# ============================================================
+# P4-4 导入导出 - parse_csv_upload
+# ============================================================
+
+
+def test_parse_csv_upload_basic() -> None:
+    """应返回表头与行 dict 迭代器."""
+    content = b"id,name,age\n1,Alice,30\n2,Bob,25\n"
+    file_obj = io.BytesIO(content)
+    headers, rows_iter = parse_csv_upload(file_obj)
+    assert headers == ["id", "name", "age"]
+    rows = list(rows_iter)
+    assert rows == [
+        {"id": "1", "name": "Alice", "age": "30"},
+        {"id": "2", "name": "Bob", "age": "25"},
+    ]
+
+
+def test_parse_csv_upload_with_bom() -> None:
+    """应正确处理 UTF-8 BOM."""
+    content = b"\xef\xbb\xbfid,name\n1,Alice\n"
+    file_obj = io.BytesIO(content)
+    headers, _ = parse_csv_upload(file_obj)
+    assert headers == ["id", "name"]
+
+
+def test_parse_csv_upload_empty_raises() -> None:
+    """空文件应抛 QueryError."""
+    file_obj = io.BytesIO(b"")
+    with pytest.raises(QueryError, match="CSV 文件为空"):
+        parse_csv_upload(file_obj)
+
+
+def test_parse_csv_upload_chinese() -> None:
+    """应正确解析中文."""
+    content = "id,name\n1,张三\n2,李四\n".encode()
+    file_obj = io.BytesIO(content)
+    _headers, rows_iter = parse_csv_upload(file_obj)
+    rows = list(rows_iter)
+    assert rows[0]["name"] == "张三"
+    assert rows[1]["name"] == "李四"
+
+
+# ============================================================
+# P4-4 导入导出 - parse_excel_upload
+# ============================================================
+
+
+def _make_xlsx_bytes(headers: list[str], data_rows: list[list[Any]]) -> bytes:
+    """构造 xlsx bytes 用于测试."""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    assert ws is not None
+    ws.append(headers)
+    for row in data_rows:
+        ws.append(row)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_parse_excel_upload_basic() -> None:
+    """应返回表头与行 dict 迭代器."""
+    data = _make_xlsx_bytes(["id", "name"], [[1, "Alice"], [2, "Bob"]])
+    file_obj = io.BytesIO(data)
+    headers, rows_iter = parse_excel_upload(file_obj)
+    assert headers == ["id", "name"]
+    rows = list(rows_iter)
+    assert rows[0] == {"id": 1, "name": "Alice"}
+    assert rows[1] == {"id": 2, "name": "Bob"}
+
+
+def test_parse_excel_upload_empty_raises() -> None:
+    """空工作表应抛 QueryError."""
+    # 仅创建空工作表（无任何行）
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    # 删除默认 sheet 后新建一个真正空的 sheet
+    default_ws = wb.active
+    assert default_ws is not None
+    wb.remove(default_ws)
+    wb.create_sheet()
+    buf = io.BytesIO()
+    wb.save(buf)
+    file_obj = io.BytesIO(buf.getvalue())
+    with pytest.raises(QueryError, match="Excel 文件为空"):
+        parse_excel_upload(file_obj)
+
+
+# ============================================================
+# P4-4 导入导出 - import_rows
+# ============================================================
+
+
+def test_import_rows_success() -> None:
+    """应批量插入所有行."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        rows = iter(
+            [
+                {"id": 10, "name": "X", "email": "x@e.com", "age": 20},
+                {"id": 11, "name": "Y", "email": "y@e.com", "age": 21},
+            ]
+        )
+        result = import_rows(engine, "users", None, ["id", "name", "email", "age"], rows)
+        assert result["success_count"] == 2
+        assert result["failed_count"] == 0
+        assert result["errors"] == []
+        # 验证数据已写入
+        _rows_db, total = query_table_rows(engine, "users", schema=None)
+        assert total == 7
+    finally:
+        engine.dispose()
+
+
+def test_import_rows_empty_columns_raises() -> None:
+    """空列名列表应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        with pytest.raises(QueryError, match="列名列表不能为空"):
+            import_rows(engine, "users", None, [], iter([]))
+    finally:
+        engine.dispose()
+
+
+def test_import_rows_invalid_column_raises() -> None:
+    """非法列名应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        with pytest.raises(QueryError, match="非法列名"):
+            import_rows(engine, "users", None, ["nonexistent"], iter([{"nonexistent": 1}]))
+    finally:
+        engine.dispose()
+
+
+def test_import_rows_constraint_violation_rolls_back() -> None:
+    """约束冲突应抛 SQLAlchemyError 且事务回滚（无部分插入）."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        # 第二行 name 为 NOT NULL，传 None 触发约束冲突
+        rows = iter(
+            [
+                {"id": 10, "name": "X", "email": "x@e.com", "age": 20},
+                {"id": 11, "name": None, "email": "y@e.com", "age": 21},
+            ]
+        )
+        from sqlalchemy.exc import SQLAlchemyError
+
+        with pytest.raises(SQLAlchemyError):
+            import_rows(
+                engine,
+                "users",
+                None,
+                ["id", "name", "email", "age"],
+                rows,
+            )
+        # 事务回滚：第一行也不应存在
+        rows_db, total = query_table_rows(engine, "users", schema=None)
+        assert total == 5
+        assert all(r["id"] != 10 for r in rows_db)
+    finally:
+        engine.dispose()
+
+
+def test_import_rows_unknown_table_raises() -> None:
+    """不存在的表应抛 QueryError（get_column_names 反射失败）."""
+    engine = _make_memory_engine()
+    try:
+        with pytest.raises(QueryError):
+            import_rows(engine, "nonexistent", None, ["id"], iter([{"id": 1}]))
+    finally:
+        engine.dispose()
+
+
+def test_import_rows_missing_column_fills_null() -> None:
+    """缺失列应填 NULL（数据库默认值生效或 NOT NULL 冲突抛错）."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        # 仅提供 id 与 name，email/age 缺失（age 有默认值，email 可空）
+        rows = iter([{"id": 10, "name": "X"}])
+        result = import_rows(engine, "users", None, ["id", "name"], rows)
+        assert result["success_count"] == 1
+        # 验证 email 为 None，age 为默认值 0
+        row = get_row(engine, "users", schema=None, pk={"id": 10})
+        assert row is not None
+        assert row["email"] is None
+        assert row["age"] == 0
     finally:
         engine.dispose()

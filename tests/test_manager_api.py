@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -1314,4 +1315,253 @@ def test_explain_sql_sqlalchemy_error_returns_400(
         body={"sql": "SELECT 1"},
         headers=_auth(user),
     )
+    assert response.status_code == 400
+
+
+# ============================================================
+# P4-4 导入导出 - /export 接口
+# ============================================================
+
+
+@pytest.mark.django_db
+def test_export_csv_returns_200(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """viewer 导出 CSV 应返回 200 + 流式响应含表头与数据."""
+    user = make_user(role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    url = f"/api/v1/manager/{ds.pk}/tables/users/export?format=csv"
+    response = cast(HttpResponse, client.post(url, **_auth(user)))
+    assert response.status_code == 200
+    assert "text/csv" in response["Content-Type"]
+    # StreamingHttpResponse 的 content 是迭代器，需迭代读取
+    content = b"".join(response.streaming_content) if hasattr(response, "streaming_content") else response.content
+    text = content.decode("utf-8")
+    assert "\ufeff" in text  # BOM
+    assert "id,name,email,age" in text
+    assert "Alice" in text
+
+
+@pytest.mark.django_db
+def test_export_sql_returns_200(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """viewer 导出 SQL 脚本应返回 200 + INSERT 语句."""
+    user = make_user(role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    url = f"/api/v1/manager/{ds.pk}/tables/users/export?format=sql"
+    response = cast(HttpResponse, client.post(url, **_auth(user)))
+    assert response.status_code == 200
+    assert "application/sql" in response["Content-Type"]
+    content = b"".join(response.streaming_content) if hasattr(response, "streaming_content") else response.content
+    text = content.decode("utf-8")
+    assert 'INSERT INTO "users"' in text
+    assert "Alice" in text
+    assert text.count("INSERT INTO") == 3  # 3 行数据
+
+
+@pytest.mark.django_db
+def test_export_xlsx_returns_200(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """viewer 导出 Excel 应返回 200 + xlsx 二进制."""
+    user = make_user(role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    url = f"/api/v1/manager/{ds.pk}/tables/users/export?format=xlsx"
+    response = cast(HttpResponse, client.post(url, **_auth(user)))
+    assert response.status_code == 200
+    assert "spreadsheetml" in response["Content-Type"]
+    # xlsx 是 zip 格式，以 PK 开头
+    assert response.content[:2] == b"PK"
+
+
+@pytest.mark.django_db
+def test_export_unsupported_format_returns_400(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """不支持的导出格式应返回 400."""
+    user = make_user()
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    url = f"/api/v1/manager/{ds.pk}/tables/users/export?format=json"
+    response = _post(client, url, headers=_auth(user))
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_export_without_token_returns_401() -> None:
+    """未认证访问应返回 401."""
+    client = Client()
+    response = _post(client, "/api/v1/manager/1/tables/users/export?format=csv")
+    assert response.status_code == 401
+
+
+@pytest.mark.django_db
+def test_export_unknown_datasource_returns_404(make_user: Callable[..., User]) -> None:
+    """不存在的数据源应返回 404."""
+    user = make_user()
+    client = Client()
+    url = "/api/v1/manager/99999/tables/users/export?format=csv"
+    response = _post(client, url, headers=_auth(user))
+    assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_export_unknown_table_returns_400(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """不存在的表应返回 400."""
+    user = make_user()
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    url = f"/api/v1/manager/{ds.pk}/tables/nonexistent/export?format=csv"
+    response = _post(client, url, headers=_auth(user))
+    assert response.status_code == 400
+
+
+# ============================================================
+# P4-4 导入导出 - /import 接口
+# ============================================================
+
+
+def _make_csv_upload(
+    name: str = "test.csv", content: bytes = b"id,name,email,age\n10,X,x@e.com,20\n11,Y,y@e.com,21\n"
+) -> Any:
+    """构造 CSV 上传文件."""
+    from django.core.files.uploadedfile import SimpleUploadedFile
+
+    return SimpleUploadedFile(name, content, content_type="text/csv")
+
+
+def _make_xlsx_upload(name: str = "test.xlsx") -> Any:
+    """构造 xlsx 上传文件."""
+    from django.core.files.uploadedfile import SimpleUploadedFile
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    assert ws is not None
+    ws.append(["id", "name", "email", "age"])
+    ws.append([10, "X", "x@e.com", 20])
+    ws.append([11, "Y", "y@e.com", 21])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return SimpleUploadedFile(
+        name, buf.getvalue(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+
+@pytest.mark.django_db
+def test_import_csv_returns_200(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """designer 导入 CSV 应返回 200 + success_count."""
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    url = f"/api/v1/manager/{ds.pk}/tables/users/import"
+    response = cast(HttpResponse, client.post(url, data={"file": _make_csv_upload()}, **_auth(user)))
+    assert response.status_code == 200
+    body = json.loads(response.content)
+    assert body["success_count"] == 2
+    assert body["failed_count"] == 0
+    assert body["errors"] == []
+
+
+@pytest.mark.django_db
+def test_import_xlsx_returns_200(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """designer 导入 Excel 应返回 200 + success_count."""
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    url = f"/api/v1/manager/{ds.pk}/tables/users/import"
+    response = cast(HttpResponse, client.post(url, data={"file": _make_xlsx_upload()}, **_auth(user)))
+    assert response.status_code == 200
+    body = json.loads(response.content)
+    assert body["success_count"] == 2
+    assert body["failed_count"] == 0
+
+
+@pytest.mark.django_db
+def test_import_viewer_returns_403(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """viewer 导入应返回 403."""
+    user = make_user(role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    url = f"/api/v1/manager/{ds.pk}/tables/users/import"
+    response = cast(HttpResponse, client.post(url, data={"file": _make_csv_upload()}, **_auth(user)))
+    assert response.status_code == 403
+
+
+@pytest.mark.django_db
+def test_import_without_token_returns_401() -> None:
+    """未认证访问应返回 401."""
+    client = Client()
+    response = cast(HttpResponse, client.post("/api/v1/manager/1/tables/users/import"))
+    assert response.status_code == 401
+
+
+@pytest.mark.django_db
+def test_import_unknown_datasource_returns_404(make_user: Callable[..., User]) -> None:
+    """不存在的数据源应返回 404."""
+    user = make_user(role=Role.DESIGNER)
+    client = Client()
+    url = "/api/v1/manager/99999/tables/users/import"
+    response = cast(HttpResponse, client.post(url, data={"file": _make_csv_upload()}, **_auth(user)))
+    assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_import_unsupported_file_type_returns_400(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """不支持的文件类型应返回 400."""
+    from django.core.files.uploadedfile import SimpleUploadedFile
+
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    url = f"/api/v1/manager/{ds.pk}/tables/users/import"
+    bad_file = SimpleUploadedFile("test.txt", b"hello", content_type="text/plain")
+    response = cast(HttpResponse, client.post(url, data={"file": bad_file}, **_auth(user)))
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_import_no_file_returns_400(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """未上传文件应返回 400."""
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    url = f"/api/v1/manager/{ds.pk}/tables/users/import"
+    response = cast(HttpResponse, client.post(url, **_auth(user)))
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_import_constraint_violation_returns_400(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """约束冲突应返回 400（事务回滚，无部分插入）."""
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    url = f"/api/v1/manager/{ds.pk}/tables/users/import"
+    # 第二行 id=1 与已有数据主键冲突
+    bad_csv = b"id,name,email,age\n10,X,x@e.com,20\n1,Dup,dup@e.com,21\n"
+    response = cast(HttpResponse, client.post(url, data={"file": _make_csv_upload(content=bad_csv)}, **_auth(user)))
+    assert response.status_code == 400
+    # 事务回滚：第一行也不应存在
+    rows_resp = _get(client, f"/api/v1/manager/{ds.pk}/tables/users/rows", _auth(user))
+    rows_body = json.loads(rows_resp.content)
+    assert rows_body["total"] == 3  # 原始 3 行，无新增
+
+
+@pytest.mark.django_db
+def test_import_invalid_column_returns_400(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """CSV 表头含非法列名应返回 400."""
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    url = f"/api/v1/manager/{ds.pk}/tables/users/import"
+    bad_csv = b"id,nonexistent\n10,X\n"
+    response = cast(HttpResponse, client.post(url, data={"file": _make_csv_upload(content=bad_csv)}, **_auth(user)))
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_import_unknown_table_returns_400(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """不存在的表应返回 400."""
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    url = f"/api/v1/manager/{ds.pk}/tables/nonexistent/import"
+    response = cast(HttpResponse, client.post(url, data={"file": _make_csv_upload()}, **_auth(user)))
     assert response.status_code == 400

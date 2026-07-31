@@ -9,6 +9,8 @@
 - ``insert_row``/``update_row``/``delete_row``/``get_row``: 单行 CRUD，主键反查定位
 - ``execute_sql``: 执行任意 SQL，自动区分 SELECT（返回结果集）与 DDL/DML（返回影响行数）
 - ``explain_sql``: 多方言执行计划（SQLite ``EXPLAIN QUERY PLAN``、MySQL/PG ``EXPLAIN`` 可选 ``ANALYZE``）
+- ``iter_table_rows``/``rows_to_csv``/``rows_to_sql``/``export_excel``: 流式导出（CSV/SQL/Excel）
+- ``parse_csv_upload``/``parse_excel_upload``/``import_rows``: 流式导入（CSV/Excel，事务批量插入）
 - 标识符引用：MySQL 反引号、PG/SQLite 双引号（独立实现，避免跨模块依赖）
 - 白名单：通过 SQLAlchemy inspect 获取列名集合，校验 ``columns``/``order_by``/``filters``/``values``/``pk``
 - SQLite schema 强制 None
@@ -18,7 +20,13 @@
 
 from __future__ import annotations
 
+import csv
+import io
+import json
 import time
+from collections.abc import Iterator
+from datetime import date, datetime
+from datetime import time as dtime
 from typing import Any, cast
 
 from sqlalchemy import inspect, text
@@ -757,16 +765,379 @@ def explain_sql(
     }
 
 
+# ============================================================
+# P4-4 导入导出
+# ============================================================
+
+
+def _format_csv_value(val: Any) -> str:
+    """格式化值为 CSV 单元格字符串.
+
+    - ``None`` → 空字符串
+    - ``bool`` → ``"1"``/``"0"``（避免 Python ``True``/``False`` 字面量）
+    - ``datetime``/``date``/``time`` → ISO 格式字符串
+    - ``bytes`` → UTF-8 解码（失败用 replace）
+    - ``dict``/``list`` → JSON 字符串
+    - 其他 → ``str(val)``
+    """
+    if val is None:
+        return ""
+    if isinstance(val, bool):
+        return "1" if val else "0"
+    if isinstance(val, (datetime, date, dtime)):
+        return val.isoformat()
+    if isinstance(val, bytes):
+        return val.decode("utf-8", errors="replace")
+    if isinstance(val, (dict, list)):
+        return json.dumps(val, ensure_ascii=False, default=str)
+    return str(val)
+
+
+def _format_sql_value(val: Any, dialect: str) -> str:
+    """格式化值为 SQL 字面量（用于生成 INSERT 脚本）.
+
+    - ``None`` → ``NULL``
+    - ``bool`` → ``1``/``0``（SQLite/PG/MySQL 整数布尔）
+    - ``int``/``float`` → 数字字面量
+    - ``datetime``/``date``/``time`` → ``'ISO 字符串'``
+    - ``bytes`` → SQLite ``X'hex'``，其他 ``'utf-8 解码'``
+    - 其他 → ``'转义后的字符串'``（单引号翻倍）
+    """
+    if val is None:
+        return "NULL"
+    if isinstance(val, bool):
+        return "1" if val else "0"
+    if isinstance(val, (int, float)):
+        return str(val)
+    if isinstance(val, (datetime, date, dtime)):
+        return f"'{val.isoformat()}'"
+    # bytes 与字符串统一转义处理：SQLite 用 X'hex'，其他方言解码为字符串
+    if isinstance(val, bytes) and dialect == EngineType.SQLITE:
+        return f"X'{val.hex()}'"
+    if isinstance(val, bytes):
+        val = val.decode("utf-8", errors="replace")
+    s = str(val).replace("'", "''")
+    return f"'{s}'"
+
+
+def _format_excel_value(val: Any) -> Any:
+    """格式化值为 Excel 单元格值（openpyxl 支持 str/int/float/datetime/bool/None）."""
+    if val is None:
+        return None
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float, str, datetime, date, dtime)):
+        return val
+    if isinstance(val, bytes):
+        return val.decode("utf-8", errors="replace")
+    if isinstance(val, (dict, list)):
+        return json.dumps(val, ensure_ascii=False, default=str)
+    return str(val)
+
+
+def iter_table_rows(
+    engine: Engine,
+    table_name: str,
+    schema: str | None = None,
+    batch_size: int = 1000,
+) -> Iterator[dict[str, Any]]:
+    """流式生成表行数据（生成器，避免大表 OOM）.
+
+    使用 ``fetchmany(batch_size)`` 分批读取，PG/MySQL 启用服务端游标
+    （``stream_results=True``）进一步降低内存占用。
+
+    Args:
+        engine: SQLAlchemy 引擎。
+        table_name: 表名。
+        schema: Schema 名（SQLite 强制 None）。
+        batch_size: 每批拉取行数，默认 1000。
+
+    Yields:
+        行数据 dict（键为列名）。
+
+    Raises:
+        QueryError: 表不存在或反射失败。
+    """
+    dialect = engine.dialect.name
+    effective_schema = _resolve_schema(engine, schema)
+    table_ref = _format_table_ref(table_name, effective_schema, dialect)
+    select_sql = f"SELECT * FROM {table_ref}"
+
+    # 先校验表存在（避免 SELECT 抛出底层异常时消息不友好）
+    get_column_names(engine, table_name, schema)
+
+    with engine.connect() as conn:
+        # PG/MySQL 启用服务端游标；SQLite 忽略此选项
+        exec_conn = conn.execution_options(stream_results=True) if dialect != EngineType.SQLITE else conn
+        result = exec_conn.execute(text(select_sql))
+        while True:
+            batch = result.fetchmany(batch_size)
+            if not batch:
+                break
+            for row in batch:
+                yield cast("dict[str, Any]", dict(row._mapping))
+
+
+def rows_to_csv(
+    rows_iter: Iterator[dict[str, Any]],
+    columns: list[str],
+) -> Iterator[str]:
+    """将行迭代器转为 CSV 文本块（生成器）.
+
+    首块输出 UTF-8 BOM + 表头行（BOM 便于 Excel 识别中文），后续每行一个文本块。
+    用 ``\\n`` 行尾，兼容主流工具。
+
+    Args:
+        rows_iter: 行 dict 迭代器。
+        columns: 列名顺序（决定表头与每行字段顺序）。
+
+    Yields:
+        CSV 文本块（字符串）。
+    """
+    buf = io.StringIO()
+    buf.write("\ufeff")  # UTF-8 BOM
+    writer = csv.writer(buf, lineterminator="\n")
+    writer.writerow(columns)
+    yield buf.getvalue()
+
+    for row in rows_iter:
+        buf = io.StringIO()
+        writer = csv.writer(buf, lineterminator="\n")
+        writer.writerow([_format_csv_value(row.get(c)) for c in columns])
+        yield buf.getvalue()
+
+
+def rows_to_sql(
+    rows_iter: Iterator[dict[str, Any]],
+    columns: list[str],
+    table_name: str,
+    schema: str | None,
+    dialect: str,
+) -> Iterator[str]:
+    """将行迭代器转为 INSERT SQL 语句（生成器）.
+
+    每行生成一条 ``INSERT INTO "tbl" ("c1","c2") VALUES (1,'a');`` 语句。
+
+    Args:
+        rows_iter: 行 dict 迭代器。
+        columns: 列名顺序。
+        table_name: 目标表名。
+        schema: Schema 名（SQLite 强制 None）。
+        dialect: 方言名。
+
+    Yields:
+        INSERT 语句字符串（含末尾分号与换行）。
+    """
+    table_ref = _format_table_ref(table_name, schema, dialect)
+    col_refs = ", ".join(_quote_ident(c, dialect) for c in columns)
+    prefix = f"INSERT INTO {table_ref} ({col_refs}) VALUES "
+
+    for row in rows_iter:
+        values = [_format_sql_value(row.get(c), dialect) for c in columns]
+        yield f"{prefix}({', '.join(values)});\n"
+
+
+def export_excel(
+    engine: Engine,
+    table_name: str,
+    schema: str | None = None,
+) -> bytes:
+    """导出表数据为 Excel xlsx 二进制（openpyxl write_only 流式写入）.
+
+    用 ``write_only=True`` 模式逐行写入，避免大表内存爆炸。
+
+    Args:
+        engine: SQLAlchemy 引擎。
+        table_name: 表名。
+        schema: Schema 名（SQLite 强制 None）。
+
+    Returns:
+        完整 xlsx 文件字节。
+
+    Raises:
+        QueryError: 表不存在或反射失败。
+    """
+    from openpyxl import Workbook
+
+    columns = get_column_names(engine, table_name, schema)
+    wb = Workbook(write_only=True)
+    # Excel sheet 名最长 31 字符，截断避免 openpyxl 抛错
+    ws = wb.create_sheet(title=table_name[:31])
+    ws.append(columns)
+
+    for row in iter_table_rows(engine, table_name, schema):
+        ws.append([_format_excel_value(row.get(c)) for c in columns])
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def parse_csv_upload(file_obj: Any) -> tuple[list[str], Iterator[dict[str, Any]]]:
+    """解析上传的 CSV 文件，返回 ``(列名列表, 行 dict 生成器)``.
+
+    首行作为表头。支持 UTF-8 与 UTF-8 BOM。
+
+    Args:
+        file_obj: Django ``UploadedFile`` 或类似文件对象（支持 ``read()``）。
+
+    Returns:
+        ``(headers, rows_iter)``：``headers`` 为列名列表，``rows_iter`` 为行 dict 生成器。
+
+    Raises:
+        QueryError: 文件为空。
+    """
+    raw = file_obj.read()
+    if isinstance(raw, bytes):
+        # 去除 UTF-8 BOM
+        if raw.startswith(b"\xef\xbb\xbf"):
+            raw = raw[3:]
+        text = raw.decode("utf-8", errors="replace")
+    else:
+        text = raw
+        if text.startswith("\ufeff"):
+            text = text[1:]
+
+    reader = csv.reader(io.StringIO(text))
+    try:
+        headers = next(reader)
+    except StopIteration as exc:
+        raise QueryError("CSV 文件为空") from exc
+
+    def _iter() -> Iterator[dict[str, Any]]:
+        for row in reader:
+            # 行长度可能与表头不一致（如末尾空字段），用 zip 容错
+            yield dict(zip(headers, row, strict=False))
+
+    return headers, _iter()
+
+
+def parse_excel_upload(file_obj: Any) -> tuple[list[str], Iterator[dict[str, Any]]]:
+    """解析上传的 Excel xlsx 文件，返回 ``(列名列表, 行 dict 生成器)``.
+
+    首行作为表头。用 ``read_only=True`` 流式读取，避免大文件 OOM。
+
+    Args:
+        file_obj: Django ``UploadedFile`` 或类似文件对象。
+
+    Returns:
+        ``(headers, rows_iter)``。
+
+    Raises:
+        QueryError: 文件为空。
+    """
+    from openpyxl import load_workbook
+
+    # Django UploadedFile 是类文件对象，openpyxl 可直接读取
+    wb = load_workbook(file_obj, read_only=True, data_only=True)
+    ws = wb.active
+    if ws is None:  # pragma: no cover - openpyxl 加载有效 xlsx 必有 active sheet
+        wb.close()
+        raise QueryError("Excel 文件无工作表")
+    rows_iter = ws.iter_rows(values_only=True)
+    try:
+        headers_row = next(rows_iter)
+    except StopIteration as exc:
+        wb.close()
+        raise QueryError("Excel 文件为空") from exc
+    headers = [str(h) if h is not None else "" for h in headers_row]
+
+    def _iter() -> Iterator[dict[str, Any]]:
+        try:
+            for row in rows_iter:
+                yield dict(zip(headers, row, strict=False))
+        finally:
+            wb.close()
+
+    return headers, _iter()
+
+
+def import_rows(  # noqa: PLR0913, PLR0917
+    engine: Engine,
+    table_name: str,
+    schema: str | None,
+    columns: list[str],
+    rows_iter: Iterator[dict[str, Any]],
+    batch_size: int = 1000,
+) -> dict[str, Any]:
+    """事务批量插入行，任一失败回滚.
+
+    所有行在单个 ``engine.begin()`` 事务内分批 ``executemany`` 插入。
+    任一行违反约束（如 NOT NULL、类型不匹配、唯一约束）将抛 ``SQLAlchemyError``，
+    事务自动回滚，已插入的批次一并撤销。
+
+    Args:
+        engine: SQLAlchemy 引擎。
+        table_name: 目标表名。
+        schema: Schema 名（SQLite 强制 None）。
+        columns: 列名列表（与 ``rows_iter`` 中 dict 的键匹配；缺失列填 ``None`` 即 NULL）。
+        rows_iter: 行 dict 迭代器。
+        batch_size: 批量大小（用 ``executemany`` 一次插入），默认 1000。
+
+    Returns:
+        dict 含以下字段：
+
+        - ``success_count``: 成功插入行数。
+        - ``failed_count``: 始终 0（失败时抛错回滚，无部分插入）。
+        - ``errors``: 空列表（同上）。
+
+    Raises:
+        QueryError: 列名列表为空、列名非法、表不存在。
+        SQLAlchemyError: 底层插入失败（约束冲突等，事务已回滚）。
+    """
+    if not columns:
+        raise QueryError("列名列表不能为空")
+
+    allowed = set(get_column_names(engine, table_name, schema))
+    for col in columns:
+        if col not in allowed:
+            raise QueryError(f"非法列名: {col}")
+
+    dialect = engine.dialect.name
+    effective_schema = _resolve_schema(engine, schema)
+    table_ref = _format_table_ref(table_name, effective_schema, dialect)
+    col_refs = ", ".join(_quote_ident(c, dialect) for c in columns)
+    placeholders = ", ".join(f":v{i}" for i in range(len(columns)))
+    insert_sql = f"INSERT INTO {table_ref} ({col_refs}) VALUES ({placeholders})"
+
+    success_count = 0
+    batch: list[dict[str, Any]] = []
+
+    with engine.begin() as conn:
+        for row in rows_iter:
+            batch.append({f"v{i}": row.get(c) for i, c in enumerate(columns)})
+            if len(batch) >= batch_size:
+                conn.execute(text(insert_sql), batch)
+                success_count += len(batch)
+                batch = []
+        if batch:
+            conn.execute(text(insert_sql), batch)
+            success_count += len(batch)
+
+    return {
+        "success_count": success_count,
+        "failed_count": 0,
+        "errors": [],
+    }
+
+
 __all__ = [
     "QueryError",
     "count_table_rows",
     "delete_row",
     "execute_sql",
     "explain_sql",
+    "export_excel",
     "get_column_names",
     "get_pk_columns",
     "get_row",
+    "import_rows",
     "insert_row",
+    "iter_table_rows",
+    "parse_csv_upload",
+    "parse_excel_upload",
     "query_table_rows",
+    "rows_to_csv",
+    "rows_to_sql",
     "update_row",
 ]

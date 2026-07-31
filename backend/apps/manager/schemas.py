@@ -110,9 +110,23 @@ class ExplainOut(Schema):
     dialect: str
 
 
+class ImportResultOut(Schema):
+    """导入结果响应.
+
+    - ``success_count``: 成功插入行数。
+    - ``failed_count``: 失败行数（严格事务模式下始终 0，失败时抛错回滚）。
+    - ``errors``: 错误信息列表（同上，空列表）。
+    """
+
+    success_count: int
+    failed_count: int
+    errors: list[str]
+
+
 __all__ = [
     "ExplainIn",
     "ExplainOut",
+    "ImportResultOut",
     "MessageOut",
     "RowCreateIn",
     "RowListOut",

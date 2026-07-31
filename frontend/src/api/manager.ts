@@ -2,6 +2,8 @@ import client from "./client";
 import type {
   ExplainRequest,
   ExplainResult,
+  ExportFormat,
+  ImportResult,
   MessageOut,
   RowCreate,
   RowListResponse,
@@ -126,3 +128,42 @@ export const explainSql = (
   client
     .post<ExplainResult>(`/manager/${dsId}/explain`, body)
     .then((res) => res.data);
+
+// ----------------- 导入导出（P4-4） -----------------
+
+// 导出表数据（所有登录用户可读）
+// 以 Blob 返回，前端可触发下载；format: csv/xlsx/sql
+export const exportTable = (
+  dsId: number,
+  tableName: string,
+  format: ExportFormat,
+  schemaName?: string | null
+): Promise<Blob> => {
+  const query: Record<string, string> = { format };
+  if (schemaName) query.schema_name = schemaName;
+  return client
+    .post<Blob>(`/manager/${dsId}/tables/${tableName}/export`, undefined, {
+      params: query,
+      responseType: "blob",
+    })
+    .then((res) => res.data);
+};
+
+// 导入 CSV/Excel 文件到指定表（designer+，事务批量插入）
+export const importTable = (
+  dsId: number,
+  tableName: string,
+  file: File,
+  schemaName?: string | null
+): Promise<ImportResult> => {
+  const form = new FormData();
+  form.append("file", file);
+  const query: Record<string, string> = {};
+  if (schemaName) query.schema_name = schemaName;
+  return client
+    .post<ImportResult>(`/manager/${dsId}/tables/${tableName}/import`, form, {
+      params: query,
+      headers: { "Content-Type": "multipart/form-data" },
+    })
+    .then((res) => res.data);
+};

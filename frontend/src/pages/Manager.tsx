@@ -16,6 +16,7 @@ import {
   Form,
   InputNumber,
   Popconfirm,
+  Upload,
   message,
 } from "antd";
 import type { ColumnsType, TableProps } from "antd/es/table";
@@ -28,15 +29,25 @@ import {
   PlusOutlined,
   EditOutlined,
   DeleteOutlined,
+  DownloadOutlined,
+  UploadOutlined,
 } from "@ant-design/icons";
 import { listDatasources } from "@/api/datasources";
 import { listSchemas, listTables, retrieveTable } from "@/api/designer";
-import { createRow, deleteRow, listRows, updateRow } from "@/api/manager";
+import {
+  createRow,
+  deleteRow,
+  exportTable,
+  importTable,
+  listRows,
+  updateRow,
+} from "@/api/manager";
 import { useAuthStore } from "@/store/auth";
 import { isDesignerOrAdmin } from "@/utils/permission";
 import type {
   DataSource,
   EngineType,
+  ExportFormat,
   NameItem,
   RowListResponse,
   RowQuery,
@@ -117,6 +128,11 @@ const Manager = () => {
   });
   const [modalSubmitting, setModalSubmitting] = useState(false);
   const [form] = Form.useForm<Record<string, unknown>>();
+
+  // 导入 Modal 状态
+  const [importOpen, setImportOpen] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importSubmitting, setImportSubmitting] = useState(false);
 
   // 加载数据源列表
   const loadDatasources = useCallback(async () => {
@@ -412,6 +428,74 @@ const Manager = () => {
     }
   };
 
+  // 导出表数据：触发浏览器下载
+  const handleExport = async (format: ExportFormat) => {
+    if (selectedDsId == null || !selectedTable) return;
+    try {
+      const blob = await exportTable(
+        selectedDsId,
+        selectedTable.name,
+        format,
+        selectedTable.schemaName
+      );
+      const ext = format === "xlsx" ? "xlsx" : format;
+      const filename = `${selectedTable.name}.${ext}`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      message.success(`已导出 ${filename}`);
+    } catch (err) {
+      message.error(errMsg(err, "导出失败"));
+    }
+  };
+
+  // 导出格式菜单
+  const exportMenu: MenuProps = {
+    items: [
+      { key: "csv", label: "CSV (.csv)" },
+      { key: "xlsx", label: "Excel (.xlsx)" },
+      { key: "sql", label: "SQL 脚本 (.sql)" },
+    ],
+    onClick: ({ key }: { key: string }) =>
+      void handleExport(key as ExportFormat),
+  };
+
+  // 打开导入 Modal
+  const handleOpenImport = () => {
+    setImportFile(null);
+    setImportOpen(true);
+  };
+
+  // 提交导入
+  const handleImportSubmit = async () => {
+    if (selectedDsId == null || !selectedTable) return;
+    if (!importFile) {
+      message.warning("请先选择文件");
+      return;
+    }
+    setImportSubmitting(true);
+    try {
+      const result = await importTable(
+        selectedDsId,
+        selectedTable.name,
+        importFile,
+        selectedTable.schemaName
+      );
+      message.success(`导入成功：新增 ${result.success_count} 行`);
+      setImportOpen(false);
+      await loadRows();
+    } catch (err) {
+      message.error(errMsg(err, "导入失败"));
+    } finally {
+      setImportSubmitting(false);
+    }
+  };
+
   // 构造表格列定义
   const tableColumns: ColumnsType<Record<string, unknown>> = useMemo(() => {
     const cols: ColumnsType<Record<string, unknown>> = columns.map((col) => ({
@@ -618,6 +702,17 @@ const Manager = () => {
                     新增行
                   </Button>
                 )}
+                {canEdit && (
+                  <Button
+                    icon={<UploadOutlined />}
+                    onClick={handleOpenImport}
+                  >
+                    导入
+                  </Button>
+                )}
+                <Dropdown menu={exportMenu} trigger={["click"]} placement="bottomRight">
+                  <Button icon={<DownloadOutlined />}>导出</Button>
+                </Dropdown>
                 <Tooltip title="列显隐">
                   <Dropdown
                     menu={columnVisibilityMenu}
@@ -679,6 +774,36 @@ const Manager = () => {
             <Text type="secondary">无可编辑列</Text>
           )}
         </Form>
+      </Modal>
+      <Modal
+        title={`导入数据到 ${selectedTable?.name ?? ""}`}
+        open={importOpen}
+        onOk={() => void handleImportSubmit()}
+        onCancel={() => setImportOpen(false)}
+        confirmLoading={importSubmitting}
+        destroyOnClose
+        width={500}
+      >
+        <Space direction="vertical" style={{ width: "100%" }}>
+          <Text type="secondary">
+            支持 CSV (.csv) 与 Excel (.xlsx) 文件，表头须与目标表列名一致。导入为事务操作，任一行失败将全部回滚。
+          </Text>
+          <Upload.Dragger
+            accept=".csv,.xlsx"
+            maxCount={1}
+            beforeUpload={(file) => {
+              setImportFile(file);
+              return false; // 阻止自动上传，由 Modal 提交触发
+            }}
+            onRemove={() => setImportFile(null)}
+            fileList={importFile ? [importFile as never] : []}
+          >
+            <p style={{ margin: 0 }}>
+              <UploadOutlined style={{ fontSize: 24 }} />
+            </p>
+            <Text type="secondary">点击或拖拽文件到此区域</Text>
+          </Upload.Dragger>
+        </Space>
       </Modal>
     </Layout>
   );

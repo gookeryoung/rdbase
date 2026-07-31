@@ -335,3 +335,15 @@ export interface ExplainResult {
   analyze: boolean;
   dialect: string;
 }
+
+// ----------------- 导入导出（P4-4） -----------------
+
+// 导出格式
+export type ExportFormat = "csv" | "xlsx" | "sql";
+
+// 导入结果
+export interface ImportResult {
+  success_count: number;
+  failed_count: number;
+  errors: string[];
+}
