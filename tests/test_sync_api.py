@@ -381,3 +381,54 @@ class TestSyncScheduleAPI:
             _auth(admin_user),
         )
         assert response.status_code == 404
+
+
+class TestSyncColumnsAPI:
+    """源表/目标表列信息 API 测试."""
+
+    def test_source_columns(self, client: Client, admin_user: User) -> None:
+        """获取源表列信息."""
+        response = client.get(
+            "/api/v1/sync/source-columns?table=accounts_user",
+            **_auth(admin_user),
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["table_name"] == "accounts_user"
+        assert len(data["columns"]) > 0
+
+    def test_source_columns_no_table(self, client: Client, admin_user: User) -> None:
+        """未指定表名应返回 400."""
+        response = client.get(
+            "/api/v1/sync/source-columns",
+            **_auth(admin_user),
+        )
+        assert response.status_code == 400
+
+    def test_target_columns(
+        self, client: Client, admin_user: User, sync_config_for_api: SyncConfig
+    ) -> None:
+        """获取目标表列信息（:memory: SQLite 无表，返回 500）."""
+        ds_id = sync_config_for_api.target_datasource_id
+        response = client.get(
+            f"/api/v1/sync/target-columns?datasource_id={ds_id}&table=ext_user",
+            **_auth(admin_user),
+        )
+        # :memory: SQLite 中不存在 ext_user 表，应返回 500
+        assert response.status_code == 500
+
+    def test_target_columns_missing_params(self, client: Client, admin_user: User) -> None:
+        """缺少参数应返回 400."""
+        response = client.get(
+            "/api/v1/sync/target-columns",
+            **_auth(admin_user),
+        )
+        assert response.status_code == 400
+
+    def test_target_columns_datasource_not_found(self, client: Client, admin_user: User) -> None:
+        """不存在的数据源应返回 404."""
+        response = client.get(
+            "/api/v1/sync/target-columns?datasource_id=99999&table=t",
+            **_auth(admin_user),
+        )
+        assert response.status_code == 404

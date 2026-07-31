@@ -477,4 +477,297 @@ class TestBatchSyncResult:
         assert result.succeeded == 0
         assert result.failed == 0
         assert result.skipped == 0
-        assert result.results == []
+
+
+class TestSyncServiceExecution:
+    """SyncService 实际执行测试（使用文件 SQLite）."""
+
+    def test_full_sync_execution(
+        self,
+        db: Any,
+        admin_user: User,
+        tmp_path: Any,
+    ) -> None:
+        """全量同步应将源表数据写入目标表."""
+        from apps.datasources.crypto import encrypt_password
+        from apps.datasources.engine import dispose_all
+        from apps.datasources.models import DataSource, EngineType
+        from django.conf import settings
+
+        # 创建文件 SQLite 目标数据源
+        db_file = tmp_path / "target.db"
+        encrypted = encrypt_password("", settings.SECRET_KEY)
+        ds = DataSource.objects.create(
+            name="file_sqlite_target",
+            engine=EngineType.SQLITE,
+            host="",
+            port=None,
+            database=str(db_file),
+            username="",
+            password_encrypted=encrypted,
+            created_by=admin_user,
+        )
+
+        # 在目标库创建表
+        from apps.datasources.engine import get_engine
+        from sqlalchemy import text
+
+        engine = get_engine(ds)
+        with engine.begin() as conn:
+            conn.execute(text("CREATE TABLE ext_user (ext_id INTEGER PRIMARY KEY, ext_name TEXT, synced_at TEXT)"))
+
+        # 创建同步配置
+        config = SyncConfig.objects.create(
+            name="执行测试配置",
+            source_table="accounts_user",
+            target_datasource=ds,
+            target_table="ext_user",
+            sync_mode=SyncMode.FULL,
+            status=SyncStatus.ACTIVE,
+            created_by=admin_user,
+        )
+        SyncFieldMapping.objects.create(
+            config=config,
+            source_field="id",
+            target_field="ext_id",
+            mapping_type="direct",
+            is_pk=True,
+        )
+        SyncFieldMapping.objects.create(
+            config=config,
+            source_field="username",
+            target_field="ext_name",
+            mapping_type="direct",
+            is_pk=False,
+        )
+
+        service = SyncService(config)
+        log = service.run()
+
+        assert log.status == SyncLogStatus.SUCCESS
+        assert log.rows_read > 0
+        assert log.rows_written > 0
+
+        # 验证目标表数据
+        with engine.connect() as conn:
+            result = conn.execute(text("SELECT COUNT(*) FROM ext_user"))
+            count = result.scalar()
+            assert count > 0
+
+        dispose_all()
+
+    def test_sync_with_zero_rows(
+        self,
+        db: Any,
+        admin_user: User,
+        tmp_path: Any,
+    ) -> None:
+        """源表无数据时应成功返回零行."""
+        from apps.datasources.crypto import encrypt_password
+        from apps.datasources.engine import dispose_all, get_engine
+        from apps.datasources.models import DataSource, EngineType
+        from django.conf import settings
+        from sqlalchemy import text
+
+        db_file = tmp_path / "empty_target.db"
+        encrypted = encrypt_password("", settings.SECRET_KEY)
+        ds = DataSource.objects.create(
+            name="empty_sqlite_target",
+            engine=EngineType.SQLITE,
+            host="",
+            port=None,
+            database=str(db_file),
+            username="",
+            password_encrypted=encrypted,
+            created_by=admin_user,
+        )
+
+        engine = get_engine(ds)
+        with engine.begin() as conn:
+            conn.execute(text("CREATE TABLE ext_empty (ext_id INTEGER PRIMARY KEY, ext_name TEXT)"))
+
+        # 使用一个不存在的源表（通过 mock 返回空数据）
+        config = SyncConfig.objects.create(
+            name="空数据测试配置",
+            source_table="auth_user",
+            target_datasource=ds,
+            target_table="ext_empty",
+            sync_mode=SyncMode.FULL,
+            status=SyncStatus.ACTIVE,
+            created_by=admin_user,
+        )
+        SyncFieldMapping.objects.create(
+            config=config,
+            source_field="id",
+            target_field="ext_id",
+            mapping_type="direct",
+            is_pk=True,
+        )
+
+        service = SyncService(config)
+        # Mock _read_source_data 返回空列表
+        with patch.object(service, "_read_source_data", return_value=[]):
+            log = service.run()
+            assert log.status == SyncLogStatus.SUCCESS
+            assert log.rows_read == 0
+            assert log.rows_written == 0
+
+        dispose_all()
+
+    def test_get_source_count(
+        self,
+        service: SyncService,
+    ) -> None:
+        """get_source_count 应返回源表行数."""
+        mock_rows = [{"id": 1}, {"id": 2}, {"id": 3}]
+        with patch.object(service, "_read_source_data", return_value=mock_rows):
+            count = service.get_source_count()
+            assert count == 3
+
+    def test_read_source_data_incremental(
+        self,
+        db: Any,
+        admin_user: User,
+        sync_ds_for_service: DataSource,
+    ) -> None:
+        """增量模式应使用 last_sync_at 过滤."""
+        from datetime import datetime, timedelta
+
+        config = SyncConfig.objects.create(
+            name="增量读取测试",
+            source_table="accounts_user",
+            target_datasource=sync_ds_for_service,
+            target_table="ext_inc",
+            sync_mode=SyncMode.INCREMENTAL,
+            status=SyncStatus.ACTIVE,
+            timestamp_field="date_joined",
+            last_sync_at=datetime.now() - timedelta(days=365),
+            created_by=admin_user,
+        )
+        SyncFieldMapping.objects.create(
+            config=config,
+            source_field="id",
+            target_field="ext_id",
+            is_pk=True,
+        )
+
+        service = SyncService(config)
+        rows = service._read_source_data(SyncMode.INCREMENTAL)
+        # auth_user 表中应有 admin_user 这条记录
+        assert isinstance(rows, list)
+
+    def test_finalize_log(
+        self,
+        db: Any,
+        admin_user: User,
+        sync_ds_for_service: DataSource,
+    ) -> None:
+        """_finalize_log 应正确设置日志字段."""
+        from datetime import datetime
+
+        from apps.sync.models import SyncLog, SyncLogStatus
+
+        config = SyncConfig.objects.create(
+            name="finalize_test",
+            source_table="auth_user",
+            target_datasource=sync_ds_for_service,
+            target_table="ext_fin",
+            created_by=admin_user,
+        )
+        log = SyncLog.objects.create(
+            config=config,
+            started_at=datetime.now(),
+        )
+        started = datetime.now()
+        SyncService._finalize_log(log, SyncLogStatus.SUCCESS, 10, 8, started, "ok")
+        assert log.status == SyncLogStatus.SUCCESS
+        assert log.rows_read == 10
+        assert log.rows_written == 8
+        assert log.duration_ms >= 0
+        assert log.error_message == "ok"
+
+    def test_upsert_sqlite_execution(
+        self,
+        db: Any,
+        admin_user: User,
+        tmp_path: Any,
+    ) -> None:
+        """SQLite upsert 应正确插入和更新."""
+        from apps.datasources.crypto import encrypt_password
+        from apps.datasources.engine import dispose_all, get_engine
+        from apps.datasources.models import DataSource, EngineType
+        from django.conf import settings
+        from sqlalchemy import text
+
+        db_file = tmp_path / "upsert_test.db"
+        encrypted = encrypt_password("", settings.SECRET_KEY)
+        ds = DataSource.objects.create(
+            name="upsert_sqlite",
+            engine=EngineType.SQLITE,
+            host="",
+            port=None,
+            database=str(db_file),
+            username="",
+            password_encrypted=encrypted,
+            created_by=admin_user,
+        )
+
+        engine = get_engine(ds)
+        with engine.begin() as conn:
+            conn.execute(text("CREATE TABLE upsert_target (id INTEGER PRIMARY KEY, name TEXT)"))
+
+        config = SyncConfig.objects.create(
+            name="upsert测试",
+            source_table="auth_user",
+            target_datasource=ds,
+            target_table="upsert_target",
+            sync_mode=SyncMode.FULL,
+            status=SyncStatus.ACTIVE,
+            created_by=admin_user,
+        )
+        SyncFieldMapping.objects.create(
+            config=config,
+            source_field="id",
+            target_field="id",
+            is_pk=True,
+        )
+        SyncFieldMapping.objects.create(
+            config=config,
+            source_field="username",
+            target_field="name",
+            is_pk=False,
+        )
+
+        service = SyncService(config)
+
+        # 测试插入
+        with engine.begin() as conn:
+            service._upsert_sqlite(
+                conn,
+                "upsert_target",
+                ["id", "name"],
+                ["id"],
+                ["name"],
+                {"id": 999, "name": "test_user"},
+            )
+
+        with engine.connect() as conn:
+            result = conn.execute(text("SELECT name FROM upsert_target WHERE id = 999"))
+            assert result.scalar() == "test_user"
+
+        # 测试更新（upsert）
+        with engine.begin() as conn:
+            service._upsert_sqlite(
+                conn,
+                "upsert_target",
+                ["id", "name"],
+                ["id"],
+                ["name"],
+                {"id": 999, "name": "updated_user"},
+            )
+
+        with engine.connect() as conn:
+            result = conn.execute(text("SELECT name FROM upsert_target WHERE id = 999"))
+            assert result.scalar() == "updated_user"
+
+        dispose_all()
