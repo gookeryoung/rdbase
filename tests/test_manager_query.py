@@ -2021,3 +2021,219 @@ def test_import_rows_missing_column_fills_null() -> None:
         assert row["age"] == 0
     finally:
         engine.dispose()
+
+
+# ============================================================
+# P4-4 补充：_format_excel_value fallback 分支（覆盖 query.py:835）
+# ============================================================
+
+
+def test_format_excel_value_fallback_to_str() -> None:
+    """非预期类型（如 set）应 fallback 到 str(val)."""
+    result = _format_excel_value({1, 2, 3})
+    assert isinstance(result, str)
+    assert "1" in result
+
+
+# ============================================================
+# P4-4 补充：parse_csv_upload 非 bytes 分支（覆盖 query.py:997-999）
+# ============================================================
+
+
+class _StringFileObj:
+    """模拟返回字符串（非 bytes）的文件对象."""
+
+    def __init__(self, content: str) -> None:
+        self._content = content
+
+    def read(self) -> str:
+        return self._content
+
+
+class _StringFileObjWithBom:
+    """模拟返回带 BOM 字符串的文件对象."""
+
+    def __init__(self, content: str) -> None:
+        self._content = content
+
+    def read(self) -> str:
+        return self._content
+
+
+def test_parse_csv_upload_string_input() -> None:
+    """字符串输入（非 bytes）应正常解析."""
+    content = "id,name,age\n1,Alice,30\n2,Bob,25\n"
+    file_obj = _StringFileObj(content)
+    headers, rows_iter = parse_csv_upload(file_obj)
+    assert headers == ["id", "name", "age"]
+    rows = list(rows_iter)
+    assert len(rows) == 2
+    assert rows[0]["name"] == "Alice"
+
+
+def test_parse_csv_upload_string_with_bom() -> None:
+    """字符串输入含 BOM 应正确去除."""
+    content = "\ufeffid,name\n1,Alice\n"
+    file_obj = _StringFileObjWithBom(content)
+    headers, _ = parse_csv_upload(file_obj)
+    assert headers == ["id", "name"]
+
+
+# ============================================================
+# P4-4 补充：import_rows 批量插入分支（覆盖 query.py:1110-1117）
+# ============================================================
+
+
+def test_import_rows_batch_insert_when_batch_full() -> None:
+    """batch_size 触发批量提交分支应正常工作."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        rows = iter(
+            [
+                {"id": 10, "name": "A", "email": "a@e.com", "age": 20},
+                {"id": 11, "name": "B", "email": "b@e.com", "age": 21},
+                {"id": 12, "name": "C", "email": "c@e.com", "age": 22},
+            ]
+        )
+        # batch_size=2 触发 "if len(batch) >= batch_size" 分支
+        result = import_rows(
+            engine,
+            "users",
+            None,
+            ["id", "name", "email", "age"],
+            rows,
+            batch_size=2,
+        )
+        assert result["success_count"] == 3
+        _rows_db, total = query_table_rows(engine, "users", schema=None)
+        assert total == 8  # 原 5 + 3
+    finally:
+        engine.dispose()
+
+
+def test_import_rows_empty_rows_iter() -> None:
+    """空行迭代器应返回 success_count=0."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        result = import_rows(engine, "users", None, ["id", "name"], iter([]))
+        assert result["success_count"] == 0
+        assert result["failed_count"] == 0
+        _rows_db, total = query_table_rows(engine, "users", schema=None)
+        assert total == 5  # 不变
+    finally:
+        engine.dispose()
+
+
+# ============================================================
+# P4-6 大数据量流式测试（标记为 slow，需显式运行）
+# ============================================================
+
+
+@pytest.mark.slow
+def test_iter_table_rows_1000_plus_rows() -> None:
+    """流式读取 1000+ 行应全部返回且内存效率可接受."""
+    engine = _make_memory_engine()
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "CREATE TABLE big ("
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                    "name VARCHAR(50) NOT NULL, "
+                    "value REAL DEFAULT 0"
+                    ")"
+                )
+            )
+            rows = [{"name": f"item_{i}", "value": i * 1.5} for i in range(1200)]
+            conn.execute(
+                text("INSERT INTO big (name, value) VALUES (:name, :value)"),
+                rows,
+            )
+        result = list(iter_table_rows(engine, "big", schema=None, batch_size=100))
+        assert len(result) == 1200
+        assert result[0]["name"] == "item_0"
+        assert result[-1]["name"] == "item_1199"
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.slow
+def test_import_rows_large_batch_performance() -> None:
+    """批量导入 500 行应在合理时间内完成."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        rows = [
+            {"id": 100 + i, "name": f"user_{i}", "email": f"user_{i}@example.com", "age": 20 + i % 50}
+            for i in range(500)
+        ]
+        result = import_rows(
+            engine,
+            "users",
+            None,
+            ["id", "name", "email", "age"],
+            iter(rows),
+            batch_size=100,
+        )
+        assert result["success_count"] == 500
+        _rows_db, total = query_table_rows(engine, "users", schema=None)
+        assert total == 505  # 原 5 + 500
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.slow
+def test_export_excel_1000_rows() -> None:
+    """导出 1000 行应为有效的 xlsx 文件."""
+    from openpyxl import load_workbook
+
+    engine = _make_memory_engine()
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("CREATE TABLE xport (id INTEGER PRIMARY KEY AUTOINCREMENT, name VARCHAR(50))"))
+            rows = [{"name": f"row_{i}"} for i in range(1000)]
+            conn.execute(
+                text("INSERT INTO xport (name) VALUES (:name)"),
+                rows,
+            )
+        data = export_excel(engine, "xport", schema=None)
+        assert isinstance(data, bytes)
+        assert data[:2] == b"PK"
+        wb = load_workbook(io.BytesIO(data))
+        ws = wb.active
+        assert ws is not None
+        all_rows = list(ws.iter_rows(values_only=True))
+        assert len(all_rows) == 1001  # 表头 + 1000 行
+        wb.close()
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.slow
+def test_rows_to_csv_large_stream() -> None:
+    """大数据量 CSV 流式生成器应逐块产出."""
+    rows = iter([{"id": i, "name": f"user_{i}"} for i in range(500)])
+    chunks = list(rows_to_csv(rows, ["id", "name"]))
+    assert len(chunks) == 501  # 1 表头块 + 500 数据块
+    # 首块含 BOM + 表头
+    assert chunks[0].startswith("\ufeff")
+    assert "id,name" in chunks[0]
+    # 末块含最后一行
+    assert "499,user_499" in chunks[-1]
+
+
+@pytest.mark.slow
+def test_rows_to_sql_large_stream() -> None:
+    """大数据量 SQL 流式生成器应逐行产出 INSERT."""
+    rows = iter([{"id": i, "name": f"user_{i}"} for i in range(500)])
+    chunks = list(rows_to_sql(rows, ["id", "name"], "users", None, "sqlite"))
+    assert len(chunks) == 500
+    # 每行应以分号结尾
+    assert all(c.endswith(";\n") for c in chunks)
+    # 首行和末行
+    assert "0," in chunks[0]
+    assert "user_0" in chunks[0]
+    assert "499," in chunks[-1]
+    assert "user_499" in chunks[-1]

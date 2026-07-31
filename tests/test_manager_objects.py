@@ -32,6 +32,7 @@ from apps.manager.objects import (
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
+from typing_extensions import override
 
 
 def _make_memory_engine() -> Engine:
@@ -607,3 +608,84 @@ def test_drop_trigger_pg_requires_table() -> None:
     engine = _MockEngine("postgresql")
     with pytest.raises(ObjectError, match="需要关联表名"):
         drop_trigger(cast(Engine, engine), "trg", "public", table=None)
+
+
+# ============================================================
+# PostgreSQL 视图分支补充（覆盖 objects.py:122, 148）
+# ============================================================
+
+
+class _MockPgConnWithParams(_MockConn):
+    """Mock 连接同时记录执行时的 SQL 与参数."""
+
+    def __init__(self, rows: list[tuple[Any, ...]] | None = None) -> None:
+        super().__init__(rows)
+        self.last_params: Any = None
+
+    @override
+    def execute(self, sql: Any, params: Any = None) -> _MockResult:
+        self.last_params = params
+        return super().execute(sql, params)
+
+
+class _MockPgEngine(_MockEngine):
+    """PostgreSQL Mock Engine，支持记录 connect 时的参数."""
+
+    def __init__(self, rows: list[tuple[Any, ...]] | None = None) -> None:
+        super().__init__("postgresql", rows)
+        self.last_conn: _MockPgConnWithParams | None = None
+
+    @override
+    def connect(self) -> _MockPgConnWithParams:
+        self.last_conn = _MockPgConnWithParams(self._rows)
+        return self.last_conn
+
+
+def test_list_views_pg_passes_schema_param() -> None:
+    """PostgreSQL list_views 应将 schema 参数传递给 SQL."""
+    engine = _MockPgEngine(rows=[("my_view",), ("other_view",)])
+    result = list_views(cast(Engine, engine), schema="custom_schema")
+    assert len(result) == 2
+    assert result[0] == "my_view"
+    assert engine.last_conn is not None
+    assert engine.last_conn.last_params == {"schema": "custom_schema"}
+
+
+def test_list_views_pg_defaults_to_public() -> None:
+    """PostgreSQL list_views schema=None 时应默认使用 'public'."""
+    engine = _MockPgEngine(rows=[])
+    list_views(cast(Engine, engine), schema=None)
+    assert engine.last_conn is not None
+    assert engine.last_conn.last_params == {"schema": "public"}
+
+
+def test_list_views_pg_schema_empty_string_defaults_to_public() -> None:
+    """PostgreSQL list_views schema='' 时应默认使用 'public'."""
+    engine = _MockPgEngine(rows=[])
+    list_views(cast(Engine, engine), schema="")
+    assert engine.last_conn is not None
+    assert engine.last_conn.last_params == {"schema": "public"}
+
+
+def test_get_view_definition_pg_passes_schema_param() -> None:
+    """PostgreSQL get_view_definition 应将 schema 参数传递给 SQL."""
+    engine = _MockPgEngine(rows=[("SELECT 1",)])
+    result = get_view_definition(cast(Engine, engine), "my_view", schema="custom_schema")
+    assert result == "SELECT 1"
+    assert engine.last_conn is not None
+    assert engine.last_conn.last_params == {"name": "my_view", "schema": "custom_schema"}
+
+
+def test_get_view_definition_pg_defaults_to_public() -> None:
+    """PostgreSQL get_view_definition schema=None 时应默认使用 'public'."""
+    engine = _MockPgEngine(rows=[("SELECT 1",)])
+    get_view_definition(cast(Engine, engine), "v", schema=None)
+    assert engine.last_conn is not None
+    assert engine.last_conn.last_params == {"name": "v", "schema": "public"}
+
+
+def test_get_view_definition_pg_view_not_found_raises() -> None:
+    """PostgreSQL 视图不存在应抛 ObjectError."""
+    engine = _MockPgEngine(rows=[])
+    with pytest.raises(ObjectError, match="不存在"):
+        get_view_definition(cast(Engine, engine), "nonexistent", schema="public")
