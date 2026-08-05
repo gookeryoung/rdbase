@@ -158,6 +158,59 @@ class TestSyncService:
         result = service._format_target_table_ref("sqlite")
         assert result == '"users"'
 
+    def test_resolve_source_dialect_known_vendors(self) -> None:
+        """已知 vendor 应映射到对应方言标识."""
+        assert SyncService._resolve_source_dialect("sqlite") == "sqlite"
+        assert SyncService._resolve_source_dialect("mysql") == "mysql"
+        assert SyncService._resolve_source_dialect("postgresql") == "postgresql"
+
+    def test_resolve_source_dialect_unknown_falls_back_to_postgresql(self) -> None:
+        """未知 vendor 应回退为 PostgreSQL 风格."""
+        assert SyncService._resolve_source_dialect("oracle") == "postgresql"
+        assert SyncService._resolve_source_dialect("microsoft") == "postgresql"
+
+    def test_named_placeholder_sqlite_uses_named_style(self) -> None:
+        """SQLite 源应使用 :name 命名占位符."""
+        assert SyncService._named_placeholder("last_sync", "sqlite") == ":last_sync"
+
+    def test_named_placeholder_non_sqlite_uses_pyformat(self) -> None:
+        """MySQL/PostgreSQL 源应使用 %(name)s pyformat 占位符."""
+        assert SyncService._named_placeholder("last_sync", "mysql") == "%(last_sync)s"
+        assert SyncService._named_placeholder("last_sync", "postgresql") == "%(last_sync)s"
+
+    def test_format_source_table_ref_with_schema_mysql(self) -> None:
+        """MySQL 源表带 schema 应使用反引号并包含 schema 部分."""
+        service = SyncService(
+            SyncConfig(
+                source_schema="app",
+                source_table="orders",
+            )
+        )
+        result = service._format_source_table_ref("mysql")
+        assert result == "`app`.`orders`"
+
+    def test_format_source_table_ref_with_schema_postgresql(self) -> None:
+        """PostgreSQL 源表带 schema 应使用双引号并包含 schema 部分."""
+        service = SyncService(
+            SyncConfig(
+                source_schema="public",
+                source_table="orders",
+            )
+        )
+        result = service._format_source_table_ref("postgresql")
+        assert result == '"public"."orders"'
+
+    def test_format_source_table_ref_sqlite_ignores_schema(self) -> None:
+        """SQLite 源表应忽略 schema，仅用双引号包裹表名."""
+        service = SyncService(
+            SyncConfig(
+                source_schema="ignored",
+                source_table="orders",
+            )
+        )
+        result = service._format_source_table_ref("sqlite")
+        assert result == '"orders"'
+
 
 class TestSyncServiceUpsert:
     """UPSERT 各方言实现测试."""
@@ -972,6 +1025,39 @@ class TestSyncServiceExecution:
         service = SyncService(config)
         with pytest.raises(SyncError, match="无效的数据库别名"):
             service._read_source_data(SyncMode.FULL)
+
+    def test_read_source_data_uses_connection_vendor_dialect(
+        self,
+        db: Any,
+        admin_user: User,
+        sync_ds_for_service: DataSource,
+    ) -> None:
+        """源读取应按连接 vendor 选择方言，默认库为 SQLite 全量读取成功（33 源方言化）.
+
+        默认库 vendor=sqlite，方言化后仍能正确构造 SQL 并读取，
+        验证去除 SQLite 硬编码后未破坏原有 SQLite 路径。
+        """
+        config = SyncConfig.objects.create(
+            name="方言化全量读取测试",
+            source_table="accounts_user",
+            target_datasource=sync_ds_for_service,
+            target_table="ext_dialect",
+            sync_mode=SyncMode.FULL,
+            status=SyncStatus.ACTIVE,
+            created_by=admin_user,
+        )
+        SyncFieldMapping.objects.create(
+            config=config,
+            source_field="id",
+            target_field="ext_id",
+            is_pk=True,
+        )
+
+        service = SyncService(config)
+        rows = service._read_source_data(SyncMode.FULL)
+        # auth_user 至少包含 admin_user 一条记录
+        assert isinstance(rows, list)
+        assert any(r.get("username") == admin_user.username for r in rows)
 
     def test_finalize_log(
         self,

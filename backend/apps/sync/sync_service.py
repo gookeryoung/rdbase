@@ -462,17 +462,22 @@ class SyncService:
         except Exception as exc:
             raise SyncError(f"无法连接数据库（alias={db_alias}）: {exc}") from exc
 
+        # 源方言由 Django 连接自身决定（conn.vendor），据此选择标识符引号与参数占位符，
+        # 使源读取兼容 SQLite/MySQL/PostgreSQL 等后端，而非硬编码 SQLite。
+        dialect = self._resolve_source_dialect(conn.vendor)
+
         # 构造 SQL
-        table_ref = self._quote_ident(config.source_table, "sqlite")  # rdbase 默认 SQLite
+        table_ref = self._format_source_table_ref(dialect)
         sql = f"SELECT * FROM {table_ref}"
         params: dict[str, Any] = {}
 
         if mode == SyncMode.INCREMENTAL and config.last_sync_at and config.timestamp_field:
-            ts_field = self._quote_ident(config.timestamp_field, "sqlite")
-            sql += f" WHERE {ts_field} > :last_sync"
+            ts_field = self._quote_ident(config.timestamp_field, dialect)
+            placeholder = self._named_placeholder("last_sync", dialect)
+            sql += f" WHERE {ts_field} > {placeholder}"
             params["last_sync"] = config.last_sync_at.isoformat()
 
-        sql += f" ORDER BY {self._quote_ident('id', 'sqlite')} ASC"
+        sql += f" ORDER BY {self._quote_ident('id', dialect)} ASC"
 
         try:
             with conn.cursor() as cursor:
@@ -794,6 +799,54 @@ class SyncService:
         if dialect == EngineType.MYSQL:
             return f"`{name}`"
         return f'"{name}"'
+
+    # ================================================================
+    # 源方言辅助
+    # ================================================================
+
+    # Django connection.vendor 到本模块方言标识（EngineType 值）的映射。
+    # Django 的 vendor 取值为 sqlite/mysql/postgresql/oracle/microsoft，
+    # 前三者与 EngineType 完全一致，其余方言暂回退为 PostgreSQL 风格（双引号）。
+    _VENDOR_DIALECT_MAP: dict[str, str] = {
+        "sqlite": EngineType.SQLITE,
+        "mysql": EngineType.MYSQL,
+        "postgresql": EngineType.POSTGRESQL,
+    }
+
+    @classmethod
+    def _resolve_source_dialect(cls, vendor: str) -> str:
+        """将 Django connection.vendor 解析为本模块方言标识.
+
+        未知 vendor（如 oracle/microsoft）回退为 PostgreSQL 风格，
+        使用标准 SQL 双引号标识符，避免因方言未知直接报错。
+        """
+        dialect = cls._VENDOR_DIALECT_MAP.get(vendor)
+        if dialect is None:
+            logger.warning("未知的源数据库 vendor=%s，回退为 PostgreSQL 标识符风格", vendor)
+            return EngineType.POSTGRESQL
+        return dialect
+
+    @staticmethod
+    def _named_placeholder(name: str, dialect: str) -> str:
+        """按源方言构造命名参数占位符.
+
+        Django DB-API 游标的 paramstyle 因后端而异：
+        - sqlite3：named（:name），不支持 pyformat。
+        - MySQLdb / psycopg：pyformat（%(name)s）。
+        统一使用 dict 传参，占位符按方言切换以保证跨方言可用。
+        """
+        if dialect == EngineType.SQLITE:
+            return f":{name}"
+        return f"%({name})s"
+
+    def _format_source_table_ref(self, dialect: str) -> str:
+        """构造源表引用（支持 source_schema，方言化引号）."""
+        config = self.config
+        schema = config.source_schema
+        table = config.source_table
+        if schema and dialect != EngineType.SQLITE:
+            return f"{self._quote_ident(schema, dialect)}.{self._quote_ident(table, dialect)}"
+        return self._quote_ident(table, dialect)
 
 
 __all__ = ["BatchSyncResult", "SyncError", "SyncPreview", "SyncService"]
