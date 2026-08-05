@@ -523,6 +523,42 @@ class TestSyncServiceBatch:
         result = SyncService.run_batch([sync_config_with_mappings_for_service.pk])
         assert result.skipped == 1
 
+    def test_run_batch_deduplicates_repeated_config_ids(
+        self,
+        db: Any,
+        sync_config_with_mappings_for_service: SyncConfig,
+    ) -> None:
+        """重复的 config_id 应去重，避免对同一实例并发写造成竞态（R6）.
+
+        传入重复 ID 时，该配置只执行一次，total 反映去重后的唯一 ID 数，
+        且始终满足 total == succeeded + failed + skipped。
+        """
+        pk = sync_config_with_mappings_for_service.pk
+        result = SyncService.run_batch([pk, pk, pk], force_full=True)
+
+        assert result.total == 1
+        assert result.succeeded + result.failed + result.skipped == result.total
+
+    def test_run_batch_total_counts_unique_including_skipped(
+        self,
+        db: Any,
+        sync_config_with_mappings_for_service: SyncConfig,
+    ) -> None:
+        """去重后 total 应涵盖被跳过的唯一 ID（R6）.
+
+        暂停配置的重复 ID 只计一次 skipped，未知 ID 也各计一次 skipped，
+        total 等于去重后的唯一 ID 数。
+        """
+        sync_config_with_mappings_for_service.status = SyncStatus.PAUSED
+        sync_config_with_mappings_for_service.save()
+        pk = sync_config_with_mappings_for_service.pk
+
+        result = SyncService.run_batch([pk, pk, 999999, 999999])
+
+        assert result.total == 2
+        assert result.skipped == 2
+        assert result.succeeded + result.failed + result.skipped == result.total
+
 
 class TestSyncServiceScheduled:
     """SyncService 定时同步测试."""
@@ -912,6 +948,30 @@ class TestSyncServiceExecution:
         rows = service._read_source_data(SyncMode.INCREMENTAL)
         # auth_user 表中应有 admin_user 这条记录
         assert isinstance(rows, list)
+
+    def test_read_source_data_invalid_db_alias_raises(
+        self,
+        db: Any,
+        admin_user: User,
+        sync_ds_for_service: DataSource,
+    ) -> None:
+        """无效的 source_db_alias 应抛出明确的 SyncError（R4）.
+
+        源读取按 alias 选连接，非法别名不应静默回退到 default，
+        而应给出可定位的错误信息。
+        """
+        config = SyncConfig.objects.create(
+            name="非法别名读取测试",
+            source_table="auth_user",
+            target_datasource=sync_ds_for_service,
+            target_table="ext_bad_alias",
+            source_db_alias="not_exist_alias",
+            status=SyncStatus.ACTIVE,
+            created_by=admin_user,
+        )
+        service = SyncService(config)
+        with pytest.raises(SyncError, match="无效的数据库别名"):
+            service._read_source_data(SyncMode.FULL)
 
     def test_finalize_log(
         self,

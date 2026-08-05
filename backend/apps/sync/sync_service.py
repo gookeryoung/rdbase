@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from django.db import connection, connections
+from django.db import connections
 from django.utils import timezone
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
@@ -297,19 +297,28 @@ class SyncService:
         Returns:
             BatchSyncResult: 批量同步结果。
         """
-        result = BatchSyncResult(total=len(config_ids))
+        result = BatchSyncResult()
 
         configs = SyncConfig.objects.filter(pk__in=config_ids, status=SyncStatus.ACTIVE)
         config_map = {c.pk: c for c in configs}
 
         # 过滤出可执行配置，其余计入 skipped（不存在或非 active）。
+        # 对 config_ids 去重：同一 config 实例若被并发执行两次，会对同一 Python
+        # 对象并发写 status/retry_count/last_sync_at 造成竞态，故按 ID 去重。
+        # total 基于去重后的唯一 ID 数，保证 total == succeeded + failed + skipped。
         runnable: list[SyncConfig] = []
+        seen: set[int] = set()
         for config_id in config_ids:
+            if config_id in seen:
+                continue
+            seen.add(config_id)
             config = config_map.get(config_id)
             if config is None or not config.is_active:
                 result.skipped += 1
                 continue
             runnable.append(config)
+
+        result.total = len(seen)
 
         if max_workers <= 1:
             SyncService._run_batch_serial(runnable, result, force_full=force_full, stop_on_error=stop_on_error)
@@ -440,9 +449,15 @@ class SyncService:
         config = self.config
         db_alias = config.source_db_alias or "default"
 
-        # 获取 Django 数据库连接
+        # 按 source_db_alias 选择连接（connections[alias] 为线程局部，
+        # 每个线程持有各自的连接，跨线程互不干扰）。
         try:
-            with connection.cursor() as _cursor:
+            conn = connections[db_alias]
+        except Exception as exc:
+            raise SyncError(f"无效的数据库别名（alias={db_alias}）: {exc}") from exc
+
+        try:
+            with conn.cursor() as _cursor:
                 pass  # 验证连接可用
         except Exception as exc:
             raise SyncError(f"无法连接数据库（alias={db_alias}）: {exc}") from exc
@@ -460,7 +475,7 @@ class SyncService:
         sql += f" ORDER BY {self._quote_ident('id', 'sqlite')} ASC"
 
         try:
-            with connection.cursor() as cursor:
+            with conn.cursor() as cursor:
                 cursor.execute(sql, params)
                 columns = [col[0] for col in cursor.description] if cursor.description else []
                 rows = cursor.fetchall()

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from typing import cast
 
@@ -48,8 +49,11 @@ _DIALECT_MAP: dict[str, str] = {
 }
 
 
-# 模块级引擎缓存：数据源 ID -> Engine，避免重复创建
+# 模块级引擎缓存：数据源 ID -> Engine，避免重复创建。
+# 缓存的读写可能来自多线程（如批量并发同步），用锁保护 check-then-act，
+# 避免并发首次获取同一数据源时重复创建 Engine 导致连接池泄漏。
 _engine_cache: dict[int, Engine] = {}
+_engine_cache_lock = threading.Lock()
 
 
 def build_config(ds: DataSource) -> ConnectionConfig:
@@ -64,20 +68,31 @@ def build_config(ds: DataSource) -> ConnectionConfig:
     )
 
 
-def get_engine(ds: DataSource) -> Engine:
-    """获取或创建数据源对应的 SQLAlchemy 引擎（带缓存）."""
-    if ds.pk in _engine_cache:
-        return _engine_cache[ds.pk]
+def _create_engine_for(ds: DataSource) -> Engine:
+    """按数据源方言创建 SQLAlchemy 引擎（不含缓存）."""
     config = build_config(ds)
     url = config.to_url()
-    # SQLite 默认 check_same_thread=False 以支持多线程测试
-    engine = (
-        create_engine(url, pool_pre_ping=True, future=True)
-        if ds.engine != EngineType.SQLITE
-        else create_engine(url, future=True)
-    )
-    _engine_cache[ds.pk] = engine
-    return engine
+    if ds.engine == EngineType.SQLITE:
+        # sqlite3 默认 check_same_thread=True，禁止跨线程复用同一连接。
+        # 批量并发同步下线程池可能跨线程取用池中连接，显式关闭该检查以允许共享。
+        # SQLite 写为库级串行，真正的高并发写仍受其自身限制，此处仅保证不因线程检查报错。
+        return create_engine(url, future=True, connect_args={"check_same_thread": False})
+    return create_engine(url, pool_pre_ping=True, future=True)
+
+
+def get_engine(ds: DataSource) -> Engine:
+    """获取或创建数据源对应的 SQLAlchemy 引擎（带缓存，线程安全）."""
+    cached = _engine_cache.get(ds.pk)
+    if cached is not None:
+        return cached
+    with _engine_cache_lock:
+        # 双重检查：进入锁后再查一次，避免多线程重复创建。
+        cached = _engine_cache.get(ds.pk)
+        if cached is not None:
+            return cached
+        engine = _create_engine_for(ds)
+        _engine_cache[ds.pk] = engine
+        return engine
 
 
 def verify_connection(ds: DataSource) -> tuple[bool, str]:
@@ -93,16 +108,21 @@ def verify_connection(ds: DataSource) -> tuple[bool, str]:
 
 def dispose_engine(ds_id: int) -> None:
     """释放指定数据源的引擎缓存."""
-    engine = _engine_cache.pop(ds_id, None)
+    with _engine_cache_lock:
+        engine = _engine_cache.pop(ds_id, None)
     if engine is not None:
         engine.dispose()
 
 
 def dispose_all() -> None:
     """释放全部引擎缓存（应用关闭时调用）."""
-    for engine in _engine_cache.values():
+    with _engine_cache_lock:
+        # 先在锁内取快照并清空，避免释放期间其它线程 get_engine 写入
+        # 触发 "dictionary changed size during iteration"。
+        engines = list(_engine_cache.values())
+        _engine_cache.clear()
+    for engine in engines:
         engine.dispose()
-    _engine_cache.clear()
 
 
 __all__ = [
