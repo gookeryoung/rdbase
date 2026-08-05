@@ -228,23 +228,172 @@ class TestSyncServiceUpsert:
         assert "INSERT INTO" in sql
         assert "VALUES" in sql
 
-    def test_upsert_without_pk_falls_back_to_insert(self) -> None:
-        """无主键配置时应回退为 INSERT."""
+    def test_upsert_single_row_dispatches_by_dialect(self) -> None:
+        """有主键时 _upsert_single_row 按方言生成 ON CONFLICT 子句."""
         service = SyncService(SyncConfig())
         mock_conn = MagicMock()
         service._upsert_single_row(
             conn=mock_conn,
             table_ref='"target"',
             dialect="sqlite",
+            all_fields=["id", "name"],
+            pk_fields=["id"],
+            non_pk_fields=["name"],
+            row={"id": 1, "name": "test"},
+        )
+        mock_conn.execute.assert_called_once()
+        sql = _get_sql(mock_conn)
+        assert "ON CONFLICT" in sql
+        assert "DO UPDATE SET" in sql
+
+
+class TestSyncServiceSkip:
+    """SKIP 策略各方言 SQL 生成测试."""
+
+    def test_skip_mysql_uses_insert_ignore(self) -> None:
+        """MySQL SKIP 应使用 INSERT IGNORE."""
+        service = SyncService(SyncConfig())
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value = MagicMock(rowcount=1)
+        service._skip_single_row(
+            conn=mock_conn,
+            table_ref="`target`",
+            dialect="mysql",
+            all_fields=["id", "name"],
+            pk_fields=["id"],
+            row={"id": 1, "name": "test"},
+        )
+        sql = _get_sql(mock_conn)
+        assert "INSERT IGNORE INTO" in sql
+        assert "ON CONFLICT" not in sql
+
+    def test_skip_postgresql_uses_do_nothing(self) -> None:
+        """PostgreSQL SKIP 应使用 ON CONFLICT DO NOTHING."""
+        service = SyncService(SyncConfig())
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value = MagicMock(rowcount=1)
+        service._skip_single_row(
+            conn=mock_conn,
+            table_ref='"target"',
+            dialect="postgresql",
+            all_fields=["id", "name"],
+            pk_fields=["id"],
+            row={"id": 1, "name": "test"},
+        )
+        sql = _get_sql(mock_conn)
+        assert "ON CONFLICT" in sql
+        assert "DO NOTHING" in sql
+
+    def test_skip_sqlite_uses_do_nothing(self) -> None:
+        """SQLite SKIP 应使用 ON CONFLICT DO NOTHING."""
+        service = SyncService(SyncConfig())
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value = MagicMock(rowcount=1)
+        service._skip_single_row(
+            conn=mock_conn,
+            table_ref='"target"',
+            dialect="sqlite",
+            all_fields=["id", "name"],
+            pk_fields=["id"],
+            row={"id": 1, "name": "test"},
+        )
+        sql = _get_sql(mock_conn)
+        assert "ON CONFLICT" in sql
+        assert "DO NOTHING" in sql
+
+    def test_skip_other_dialect_falls_back_to_insert(self) -> None:
+        """未知方言 SKIP 应退化为纯 INSERT."""
+        service = SyncService(SyncConfig())
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value = MagicMock(rowcount=1)
+        service._skip_single_row(
+            conn=mock_conn,
+            table_ref='"target"',
+            dialect="oracle",
+            all_fields=["id", "name"],
+            pk_fields=["id"],
+            row={"id": 1, "name": "test"},
+        )
+        sql = _get_sql(mock_conn)
+        assert "INSERT INTO" in sql
+        assert "ON CONFLICT" not in sql
+        assert "IGNORE" not in sql
+
+    def test_skip_returns_false_on_conflict(self) -> None:
+        """SKIP 冲突（rowcount=0）应返回 False."""
+        service = SyncService(SyncConfig())
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value = MagicMock(rowcount=0)
+        written = service._skip_single_row(
+            conn=mock_conn,
+            table_ref='"target"',
+            dialect="sqlite",
+            all_fields=["id"],
+            pk_fields=["id"],
+            row={"id": 1},
+        )
+        assert written is False
+
+    def test_skip_returns_true_on_unknown_rowcount(self) -> None:
+        """SKIP 在 rowcount=-1（未知）时应按已写入处理，返回 True."""
+        service = SyncService(SyncConfig())
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value = MagicMock(rowcount=-1)
+        written = service._skip_single_row(
+            conn=mock_conn,
+            table_ref='"target"',
+            dialect="sqlite",
+            all_fields=["id"],
+            pk_fields=["id"],
+            row={"id": 1},
+        )
+        assert written is True
+
+
+class TestSyncServiceWriteDispatch:
+    """写入分派（_write_single_row）测试."""
+
+    def test_write_error_strategy_uses_plain_insert(self) -> None:
+        """ERROR 策略应使用纯 INSERT（无冲突处理子句）."""
+        from apps.sync.models import ConflictStrategy
+
+        service = SyncService(SyncConfig())
+        mock_conn = MagicMock()
+        written = service._write_single_row(
+            conn=mock_conn,
+            table_ref='"target"',
+            dialect="sqlite",
+            strategy=ConflictStrategy.ERROR,
+            all_fields=["id", "name"],
+            pk_fields=["id"],
+            non_pk_fields=["name"],
+            row={"id": 1, "name": "test"},
+        )
+        assert written is True
+        sql = _get_sql(mock_conn)
+        assert "INSERT INTO" in sql
+        assert "ON CONFLICT" not in sql
+        assert "ON DUPLICATE" not in sql
+
+    def test_write_no_pk_uses_plain_insert(self) -> None:
+        """无主键时任何策略都退化为纯 INSERT."""
+        from apps.sync.models import ConflictStrategy
+
+        service = SyncService(SyncConfig())
+        mock_conn = MagicMock()
+        written = service._write_single_row(
+            conn=mock_conn,
+            table_ref='"target"',
+            dialect="sqlite",
+            strategy=ConflictStrategy.SKIP,
             all_fields=["name"],
             pk_fields=[],
             non_pk_fields=["name"],
             row={"name": "test"},
         )
-        mock_conn.execute.assert_called_once()
+        assert written is True
         sql = _get_sql(mock_conn)
         assert "INSERT INTO" in sql
-        assert "ON DUPLICATE" not in sql
         assert "ON CONFLICT" not in sql
 
 
@@ -878,3 +1027,313 @@ class TestSyncServiceExecution:
             assert result.scalar() == "updated_user"
 
         dispose_all()
+
+
+def _make_conflict_target(
+    admin_user: User,
+    tmp_path: Any,
+    db_name: str,
+    *,
+    strategy: str,
+    preset_name: str = "old",
+) -> tuple[SyncConfig, Any]:
+    """创建含预置冲突行的文件 SQLite 目标数据源与配置.
+
+    目标表 ct_target(id PK, name)，预置一行 (1, preset_name)。
+    映射 id->id(pk)、name->name。返回 (config, engine)。
+    """
+    from apps.datasources.crypto import encrypt_password
+    from apps.datasources.engine import get_engine
+    from apps.datasources.models import DataSource, EngineType
+    from django.conf import settings
+    from sqlalchemy import text
+
+    db_file = tmp_path / db_name
+    encrypted = encrypt_password("", settings.SECRET_KEY)
+    ds = DataSource.objects.create(
+        name=f"conflict_{db_name}",
+        engine=EngineType.SQLITE,
+        host="",
+        port=None,
+        database=str(db_file),
+        username="",
+        password_encrypted=encrypted,
+        created_by=admin_user,
+    )
+    engine = get_engine(ds)
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE ct_target (id INTEGER PRIMARY KEY, name TEXT)"))
+        conn.execute(text("INSERT INTO ct_target (id, name) VALUES (1, :n)"), {"n": preset_name})
+
+    config = SyncConfig.objects.create(
+        name=f"冲突策略测试_{db_name}",
+        source_table="auth_user",
+        target_datasource=ds,
+        target_table="ct_target",
+        sync_mode=SyncMode.FULL,
+        status=SyncStatus.ACTIVE,
+        conflict_strategy=strategy,
+        created_by=admin_user,
+    )
+    SyncFieldMapping.objects.create(config=config, source_field="id", target_field="id", is_pk=True)
+    SyncFieldMapping.objects.create(config=config, source_field="name", target_field="name", is_pk=False)
+    return config, engine
+
+
+class TestSyncServiceConflictStrategy:
+    """冲突处理策略端到端测试（真实文件 SQLite）."""
+
+    def test_upsert_strategy_updates_existing(
+        self,
+        db: Any,
+        admin_user: User,
+        tmp_path: Any,
+    ) -> None:
+        """UPSERT 策略：主键冲突应更新目标已有行."""
+        from apps.datasources.engine import dispose_all
+
+        config, engine = _make_conflict_target(admin_user, tmp_path, "upsert.db", strategy="upsert")
+        # 源提供 id=1（冲突）与 id=2（新增）
+        source_rows = [{"id": 1, "name": "new"}, {"id": 2, "name": "two"}]
+        service = SyncService(config)
+        with patch.object(service, "_read_source_data", return_value=source_rows):
+            log = service.run()
+
+        from sqlalchemy import text
+
+        assert log.status == SyncLogStatus.SUCCESS
+        assert log.rows_written == 2
+        assert log.rows_skipped == 0
+        with engine.connect() as conn:
+            rows = dict(conn.execute(text("SELECT id, name FROM ct_target ORDER BY id")).fetchall())
+        assert rows == {1: "new", 2: "two"}  # id=1 被更新
+        dispose_all()
+
+    def test_skip_strategy_keeps_existing(
+        self,
+        db: Any,
+        admin_user: User,
+        tmp_path: Any,
+    ) -> None:
+        """SKIP 策略：主键冲突应跳过、保留目标原值，仅新增非冲突行."""
+        from apps.datasources.engine import dispose_all
+
+        config, engine = _make_conflict_target(admin_user, tmp_path, "skip.db", strategy="skip", preset_name="keep")
+        source_rows = [{"id": 1, "name": "new"}, {"id": 2, "name": "two"}]
+        service = SyncService(config)
+        with patch.object(service, "_read_source_data", return_value=source_rows):
+            log = service.run()
+
+        from sqlalchemy import text
+
+        assert log.status == SyncLogStatus.SUCCESS
+        assert log.rows_written == 1  # 仅 id=2 新增
+        assert log.rows_skipped == 1  # id=1 冲突被跳过
+        with engine.connect() as conn:
+            rows = dict(conn.execute(text("SELECT id, name FROM ct_target ORDER BY id")).fetchall())
+        assert rows == {1: "keep", 2: "two"}  # id=1 保留原值
+        dispose_all()
+
+    def test_error_strategy_raises_on_conflict(
+        self,
+        db: Any,
+        admin_user: User,
+        tmp_path: Any,
+    ) -> None:
+        """ERROR 策略：主键冲突应抛 SyncError 并回滚整批（目标不新增）."""
+        from apps.datasources.engine import dispose_all
+
+        config, engine = _make_conflict_target(admin_user, tmp_path, "error.db", strategy="error", preset_name="keep")
+        source_rows = [{"id": 2, "name": "two"}, {"id": 1, "name": "conflict"}]
+        service = SyncService(config)
+        with patch.object(service, "_read_source_data", return_value=source_rows), pytest.raises(SyncError):
+            service.run(max_retries=0)
+
+        from sqlalchemy import text
+
+        # 整批回滚：id=2 也不应写入，目标仅保留预置的 id=1
+        with engine.connect() as conn:
+            rows = dict(conn.execute(text("SELECT id, name FROM ct_target ORDER BY id")).fetchall())
+        assert rows == {1: "keep"}
+        dispose_all()
+
+    def test_error_strategy_success_without_conflict(
+        self,
+        db: Any,
+        admin_user: User,
+        tmp_path: Any,
+    ) -> None:
+        """ERROR 策略无冲突时应正常写入."""
+        from apps.datasources.engine import dispose_all
+
+        config, engine = _make_conflict_target(admin_user, tmp_path, "error_ok.db", strategy="error")
+        source_rows = [{"id": 2, "name": "two"}, {"id": 3, "name": "three"}]
+        service = SyncService(config)
+        with patch.object(service, "_read_source_data", return_value=source_rows):
+            log = service.run()
+
+        from sqlalchemy import text
+
+        assert log.status == SyncLogStatus.SUCCESS
+        assert log.rows_written == 2
+        with engine.connect() as conn:
+            count = conn.execute(text("SELECT COUNT(*) FROM ct_target")).scalar()
+        assert count == 3  # 预置 1 行 + 新增 2 行
+        dispose_all()
+
+
+class TestSyncServiceBatchConcurrent:
+    """批量同步并发执行测试.
+
+    并发聚合逻辑通过 mock SyncService.run 验证，避免测试用 SQLite 单文件在
+    多线程真实并发写时触发锁竞争（生产环境使用 PostgreSQL/MySQL 无此限制）。
+    """
+
+    def test_run_batch_concurrent_all_succeed(
+        self,
+        db: Any,
+        admin_user: User,
+        sync_ds_for_service: DataSource,
+    ) -> None:
+        """并发批量同步应成功聚合多个配置结果."""
+        configs = []
+        for i in range(3):
+            config = SyncConfig.objects.create(
+                name=f"并发成功配置_{i}",
+                source_table="auth_user",
+                target_datasource=sync_ds_for_service,
+                target_table=f"batch_ok_{i}",
+                sync_mode=SyncMode.FULL,
+                status=SyncStatus.ACTIVE,
+                created_by=admin_user,
+            )
+            configs.append(config)
+
+        fake_log = SyncLog(id=1, config=configs[0], status=SyncLogStatus.SUCCESS, mode=SyncMode.FULL)
+        with patch.object(SyncService, "run", return_value=fake_log):
+            result = SyncService.run_batch(
+                [c.pk for c in configs],
+                force_full=True,
+                max_workers=3,
+            )
+
+        assert result.total == 3
+        assert result.succeeded == 3
+        assert result.failed == 0
+        assert len(result.results) == 3
+
+    def test_run_batch_concurrent_stop_on_error(
+        self,
+        db: Any,
+        admin_user: User,
+        sync_ds_for_service: DataSource,
+    ) -> None:
+        """并发批量同步遇错时应记录失败（stop_on_error 尽力而为）."""
+        configs = []
+        for i in range(3):
+            config = SyncConfig.objects.create(
+                name=f"并发失败配置_{i}",
+                source_table="auth_user",
+                target_datasource=sync_ds_for_service,
+                target_table=f"batch_fail_{i}",
+                sync_mode=SyncMode.FULL,
+                status=SyncStatus.ACTIVE,
+                created_by=admin_user,
+            )
+            configs.append(config)
+
+        with patch.object(SyncService, "run", side_effect=SyncError("boom")):
+            result = SyncService.run_batch(
+                [c.pk for c in configs],
+                force_full=True,
+                stop_on_error=True,
+                max_workers=2,
+            )
+        assert result.total == 3
+        assert result.failed >= 1
+        assert result.succeeded == 0
+
+    def test_run_batch_concurrent_mixed_results(
+        self,
+        db: Any,
+        admin_user: User,
+        sync_ds_for_service: DataSource,
+    ) -> None:
+        """并发批量同步应正确聚合成功与失败混合结果."""
+        configs = []
+        for i in range(4):
+            config = SyncConfig.objects.create(
+                name=f"并发混合配置_{i}",
+                source_table="auth_user",
+                target_datasource=sync_ds_for_service,
+                target_table=f"batch_mix_{i}",
+                sync_mode=SyncMode.FULL,
+                status=SyncStatus.ACTIVE,
+                created_by=admin_user,
+            )
+            configs.append(config)
+
+        fake_log = SyncLog(id=1, config=configs[0], status=SyncLogStatus.SUCCESS, mode=SyncMode.FULL)
+        # 偶数索引成功、奇数索引失败
+        calls = {"n": 0}
+
+        def _fake_run(self: SyncService, *, force_full: bool = False, max_retries: int | None = None) -> SyncLog:
+            idx = calls["n"]
+            calls["n"] += 1
+            if idx % 2 == 0:
+                return fake_log
+            raise SyncError("boom")
+
+        with patch.object(SyncService, "run", _fake_run):
+            result = SyncService.run_batch(
+                [c.pk for c in configs],
+                force_full=True,
+                max_workers=4,
+            )
+        assert result.total == 4
+        assert result.succeeded + result.failed == 4
+        assert result.succeeded >= 1
+        assert result.failed >= 1
+
+    def test_run_batch_concurrent_empty_runnable(self, db: Any) -> None:
+        """并发模式下无可运行配置应短路返回（不创建线程池）."""
+        result = SyncService.run_batch([999999], max_workers=4)
+        assert result.total == 1
+        assert result.skipped == 1
+        assert result.succeeded == 0
+
+    def test_run_batch_serial_stop_on_error(
+        self,
+        db: Any,
+        admin_user: User,
+        sync_ds_for_service: DataSource,
+    ) -> None:
+        """串行批量同步 stop_on_error 应在首个失败后停止."""
+        first = SyncConfig.objects.create(
+            name="串行失败配置1",
+            source_table="auth_user",
+            target_datasource=sync_ds_for_service,
+            target_table="serial_fail_1",
+            sync_mode=SyncMode.FULL,
+            status=SyncStatus.ACTIVE,
+            created_by=admin_user,
+        )
+        second = SyncConfig.objects.create(
+            name="串行失败配置2",
+            source_table="auth_user",
+            target_datasource=sync_ds_for_service,
+            target_table="serial_fail_2",
+            sync_mode=SyncMode.FULL,
+            status=SyncStatus.ACTIVE,
+            created_by=admin_user,
+        )
+        with patch.object(SyncService, "run", side_effect=SyncError("boom")):
+            result = SyncService.run_batch(
+                [first.pk, second.pk],
+                force_full=True,
+                stop_on_error=True,
+                max_workers=1,
+            )
+        assert result.total == 2
+        # 首个失败后停止，仅计一次失败
+        assert result.failed == 1

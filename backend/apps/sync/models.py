@@ -40,6 +40,20 @@ class SyncLogStatus(models.TextChoices):
     FAILED = "failed", "失败"
 
 
+class ConflictStrategy(models.TextChoices):
+    """主键冲突处理策略枚举.
+
+    定义写入目标表时遇到主键/唯一键冲突的处理方式：
+    - UPSERT：存在则更新（INSERT ... ON CONFLICT DO UPDATE，默认行为）。
+    - SKIP：存在则跳过（INSERT ... ON CONFLICT DO NOTHING，保留目标已有值）。
+    - ERROR：存在则报错（普通 INSERT，冲突触发异常并使整批失败）。
+    """
+
+    UPSERT = "upsert", "冲突则更新"
+    SKIP = "skip", "冲突则跳过"
+    ERROR = "error", "冲突则报错"
+
+
 class SyncConfig(models.Model):
     """同步任务配置.
 
@@ -84,6 +98,12 @@ class SyncConfig(models.Model):
         choices=SyncStatus.choices,
         default=SyncStatus.ACTIVE,
         verbose_name="状态",
+    )
+    conflict_strategy = models.CharField(
+        max_length=20,
+        choices=ConflictStrategy.choices,
+        default=ConflictStrategy.UPSERT,
+        verbose_name="主键冲突处理策略",
     )
 
     # 增量同步的时间戳字段（源表中用于判断变更的时间列）
@@ -254,6 +274,7 @@ class SyncLog(models.Model):
 
 
 __all__ = [
+    "ConflictStrategy",
     "SyncConfig",
     "SyncFieldMapping",
     "SyncLog",

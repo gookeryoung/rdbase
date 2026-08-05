@@ -27,7 +27,7 @@ from apps.accounts.permissions import require_admin
 from apps.datasources.engine import get_engine as get_ds_engine
 from apps.datasources.models import DataSource
 
-from .models import SyncConfig, SyncFieldMapping, SyncLog
+from .models import ConflictStrategy, SyncConfig, SyncFieldMapping, SyncLog
 from .scheduling import CronError, validate_cron
 from .schemas import (
     MessageOut,
@@ -79,6 +79,7 @@ def _config_to_out(config: SyncConfig) -> SyncConfigOut:
         target_schema=config.target_schema,
         sync_mode=config.sync_mode,
         status=config.status,
+        conflict_strategy=config.conflict_strategy,
         timestamp_field=config.timestamp_field,
         batch_size=config.batch_size,
         scheduler_enabled=config.scheduler_enabled,
@@ -163,6 +164,13 @@ def _validate_cron_or_400(scheduler_enabled: bool, cron_expression: str) -> None
             raise HttpError(400, str(exc)) from exc
 
 
+def _validate_conflict_strategy_or_400(strategy: str) -> None:
+    """校验冲突处理策略取值合法，非法则抛出 400."""
+    valid = {choice.value for choice in ConflictStrategy}
+    if strategy not in valid:
+        raise HttpError(400, f"非法的冲突处理策略：{strategy}（可选：{', '.join(sorted(valid))}）")
+
+
 # ================================================================
 # 同步配置 CRUD
 # ================================================================
@@ -196,6 +204,8 @@ def create_config(request: HttpRequest, payload: SyncConfigCreateIn) -> HttpResp
 
     # 启用调度时校验 cron 表达式
     _validate_cron_or_400(payload.scheduler_enabled, payload.cron_expression)
+    # 校验冲突处理策略
+    _validate_conflict_strategy_or_400(payload.conflict_strategy)
 
     with transaction.atomic():
         config = SyncConfig.objects.create(
@@ -209,6 +219,7 @@ def create_config(request: HttpRequest, payload: SyncConfigCreateIn) -> HttpResp
             target_schema=payload.target_schema,
             sync_mode=payload.sync_mode,
             status=payload.status,
+            conflict_strategy=payload.conflict_strategy,
             timestamp_field=payload.timestamp_field,
             batch_size=payload.batch_size,
             scheduler_enabled=payload.scheduler_enabled,
@@ -264,6 +275,9 @@ def update_config(
 
     # 依据更新后的最终状态校验 cron 表达式
     _validate_cron_or_400(config.scheduler_enabled, config.cron_expression)
+    # 若更新了冲突处理策略则校验其合法性
+    if "conflict_strategy" in data:
+        _validate_conflict_strategy_or_400(config.conflict_strategy)
 
     config.save()
 
@@ -484,6 +498,7 @@ def batch_trigger_sync(
         payload.config_ids,
         force_full=payload.force_full,
         stop_on_error=payload.stop_on_error,
+        max_workers=payload.max_workers,
     )
     return JsonResponse(_batch_result_to_out(result).model_dump())
 

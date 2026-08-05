@@ -18,11 +18,12 @@
 from __future__ import annotations
 
 import logging
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from django.db import connection
+from django.db import connection, connections
 from django.utils import timezone
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
@@ -31,6 +32,7 @@ from apps.datasources.engine import get_engine as get_ds_engine
 from apps.datasources.models import EngineType
 
 from .models import (
+    ConflictStrategy,
     SyncConfig,
     SyncFieldMapping,
     SyncLog,
@@ -279,13 +281,18 @@ class SyncService:
         *,
         force_full: bool = False,
         stop_on_error: bool = False,
+        max_workers: int = 1,
     ) -> BatchSyncResult:
         """批量执行同步.
 
         Args:
             config_ids: 同步配置 ID 列表。
             force_full: 强制全量同步。
-            stop_on_error: 遇错即停。
+            stop_on_error: 遇错即停（并发模式下为尽力而为：收到首个失败后取消
+                尚未开始的任务，已在运行的任务仍会跑完）。
+            max_workers: 并发线程数，默认 1（串行）。同步为 I/O 密集任务，
+                适合线程池并发；每个线程独立持有 Django 数据库连接，任务结束后
+                主动关闭以避免连接泄漏。
 
         Returns:
             BatchSyncResult: 批量同步结果。
@@ -295,19 +302,36 @@ class SyncService:
         configs = SyncConfig.objects.filter(pk__in=config_ids, status=SyncStatus.ACTIVE)
         config_map = {c.pk: c for c in configs}
 
+        # 过滤出可执行配置，其余计入 skipped（不存在或非 active）。
+        runnable: list[SyncConfig] = []
         for config_id in config_ids:
             config = config_map.get(config_id)
-            if config is None:
+            if config is None or not config.is_active:
                 result.skipped += 1
                 continue
+            runnable.append(config)
 
-            if not config.is_active:
-                result.skipped += 1
-                continue
+        if max_workers <= 1:
+            SyncService._run_batch_serial(runnable, result, force_full=force_full, stop_on_error=stop_on_error)
+        else:
+            SyncService._run_batch_concurrent(
+                runnable, result, force_full=force_full, stop_on_error=stop_on_error, max_workers=max_workers
+            )
 
+        return result
+
+    @staticmethod
+    def _run_batch_serial(
+        configs: list[SyncConfig],
+        result: BatchSyncResult,
+        *,
+        force_full: bool,
+        stop_on_error: bool,
+    ) -> None:
+        """串行执行批量同步，遇错即停语义精确."""
+        for config in configs:
             try:
-                service = SyncService(config)
-                log = service.run(force_full=force_full)
+                log = SyncService(config).run(force_full=force_full)
                 result.succeeded += 1
                 result.results.append(log)
             except SyncError:
@@ -315,7 +339,56 @@ class SyncService:
                 if stop_on_error:
                     break
 
-        return result
+    @staticmethod
+    def _run_batch_concurrent(
+        configs: list[SyncConfig],
+        result: BatchSyncResult,
+        *,
+        force_full: bool,
+        stop_on_error: bool,
+        max_workers: int,
+    ) -> None:
+        """线程池并发执行批量同步.
+
+        同步任务以数据库 I/O 为主，线程池可在等待期间并发推进其它任务。
+        每个 worker 运行结束后关闭本线程的 Django 连接，避免连接泄漏。
+        stop_on_error 为尽力而为：收到首个失败后取消尚未开始的任务。
+        """
+        if not configs:
+            return
+        workers = min(max_workers, len(configs))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            pending = {pool.submit(SyncService._run_one, config, force_full=force_full) for config in configs}
+            stopped = False
+            while pending:
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for fut in done:
+                    if fut.cancelled():
+                        continue
+                    log = fut.result()
+                    if log is None:
+                        result.failed += 1
+                        if stop_on_error and not stopped:
+                            stopped = True
+                            for p in pending:
+                                p.cancel()
+                    else:
+                        result.succeeded += 1
+                        result.results.append(log)
+
+    @staticmethod
+    def _run_one(config: SyncConfig, *, force_full: bool) -> SyncLog | None:
+        """在独立线程中执行单个同步任务.
+
+        返回同步日志；失败时返回 None（由调用方计入 failed）。
+        任务结束后关闭本线程的 Django 数据库连接，防止线程池复用线程时连接泄漏。
+        """
+        try:
+            return SyncService(config).run(force_full=force_full)
+        except SyncError:
+            return None
+        finally:
+            connections.close_all()
 
     @staticmethod
     def run_scheduled() -> BatchSyncResult:
@@ -434,7 +507,14 @@ class SyncService:
         rows: list[dict[str, Any]],
         mappings: list[SyncFieldMapping],
     ) -> tuple[int, int]:
-        """批量写入目标表（UPSERT）.
+        """批量写入目标表.
+
+        依据 config.conflict_strategy 决定主键冲突处理方式：
+        - UPSERT：冲突则更新（INSERT ... ON CONFLICT DO UPDATE）。
+        - SKIP：冲突则跳过（INSERT ... ON CONFLICT DO NOTHING / INSERT IGNORE），
+          计入 skipped，保留目标已有值。
+        - ERROR：冲突则报错（普通 INSERT），任一行冲突即抛 SyncError 并回滚整批，
+          不吞异常、不跳过。
 
         Returns:
             (written_count, skipped_count)
@@ -448,32 +528,72 @@ class SyncService:
 
         dialect = engine.dialect.name
         table_ref = self._format_target_table_ref(dialect)
+        strategy = self.config.conflict_strategy
 
-        # 批量 upsert
+        # 批量写入
         written = 0
         skipped = 0
 
         try:
             with engine.begin() as conn:
                 for row in rows:
-                    try:
-                        self._upsert_single_row(
-                            conn,
-                            table_ref,
-                            dialect,
-                            all_fields,
-                            pk_fields,
-                            non_pk_fields,
-                            row,
+                    if strategy == ConflictStrategy.ERROR:
+                        # ERROR 策略：不捕获行级异常，任一行冲突即回滚整批并抛出。
+                        self._write_single_row(
+                            conn, table_ref, dialect, strategy, all_fields, pk_fields, non_pk_fields, row
                         )
                         written += 1
+                        continue
+                    try:
+                        row_written = self._write_single_row(
+                            conn, table_ref, dialect, strategy, all_fields, pk_fields, non_pk_fields, row
+                        )
+                        if row_written:
+                            written += 1
+                        else:
+                            # SKIP 策略下主键冲突：目标已存在，保留原值并计入跳过。
+                            skipped += 1
                     except Exception as exc:
-                        logger.warning("UPSERT 行失败: pk=%s, error=%s", {k: row.get(k) for k in pk_fields}, exc)
+                        logger.warning("写入行失败: pk=%s, error=%s", {k: row.get(k) for k in pk_fields}, exc)
                         skipped += 1
         except Exception as exc:
             raise SyncError(f"写入目标表失败: {exc}") from exc
 
         return written, skipped
+
+    def _write_single_row(  # noqa: PLR0913 PLR0917
+        self,
+        conn: Any,
+        table_ref: str,
+        dialect: str,
+        strategy: str,
+        all_fields: list[str],
+        pk_fields: list[str],
+        non_pk_fields: list[str],
+        row: dict[str, Any],
+    ) -> bool:
+        """按冲突策略写入单行.
+
+        - 无主键：退化为纯 INSERT（无冲突判定依据）。
+        - UPSERT：冲突则更新（各方言 ON CONFLICT DO UPDATE）。
+        - SKIP：冲突则跳过（各方言 ON CONFLICT DO NOTHING）。
+        - ERROR：纯 INSERT，冲突自然抛出数据库异常。
+
+        Returns:
+            bool: 是否实际写入（True 表示插入/更新，False 表示 SKIP 冲突未写入）。
+        """
+        if not pk_fields:
+            # 无主键：无冲突判定依据，直接 INSERT
+            self._insert_only(conn, table_ref, dialect, all_fields, row)
+            return True
+
+        if strategy == ConflictStrategy.ERROR:
+            self._insert_only(conn, table_ref, dialect, all_fields, row)
+            return True
+        if strategy == ConflictStrategy.SKIP:
+            return self._skip_single_row(conn, table_ref, dialect, all_fields, pk_fields, row)
+        self._upsert_single_row(conn, table_ref, dialect, all_fields, pk_fields, non_pk_fields, row)
+        return True
 
     def _upsert_single_row(  # noqa: PLR0913 PLR0917
         self,
@@ -492,11 +612,6 @@ class SyncService:
         - PostgreSQL: INSERT ... ON CONFLICT (pk) DO UPDATE SET col=EXCLUDED.col
         - SQLite: INSERT ... ON CONFLICT(pk) DO UPDATE SET col=excluded.col
         """
-        if not pk_fields:
-            # 无主键：直接 INSERT
-            self._insert_only(conn, table_ref, dialect, all_fields, row)
-            return
-
         if dialect == EngineType.MYSQL:
             self._upsert_mysql(conn, table_ref, all_fields, non_pk_fields, row)
         elif dialect == EngineType.POSTGRESQL:
@@ -505,6 +620,44 @@ class SyncService:
             self._upsert_sqlite(conn, table_ref, all_fields, pk_fields, non_pk_fields, row)
         else:
             self._insert_only(conn, table_ref, dialect, all_fields, row)
+
+    def _skip_single_row(  # noqa: PLR0913 PLR0917
+        self,
+        conn: Any,
+        table_ref: str,
+        dialect: str,
+        all_fields: list[str],
+        pk_fields: list[str],
+        row: dict[str, Any],
+    ) -> bool:
+        """对单行执行"冲突则跳过"写入（INSERT ... ON CONFLICT DO NOTHING）.
+
+        各方言实现：
+        - MySQL: INSERT IGNORE INTO ...
+        - PostgreSQL: INSERT ... ON CONFLICT (pk) DO NOTHING
+        - SQLite: INSERT ... ON CONFLICT(pk) DO NOTHING（或 INSERT OR IGNORE）
+        - 其它方言：退化为纯 INSERT
+
+        Returns:
+            bool: 是否实际插入（True 插入成功，False 因主键冲突被跳过）。
+            以受影响行数（rowcount）判定：冲突未写入时为 0。
+        """
+        col_refs = ", ".join(self._quote_ident(c, dialect) for c in all_fields)
+        placeholders = ", ".join(f":{c}" for c in all_fields)
+        params = {c: row.get(c) for c in all_fields}
+
+        if dialect == EngineType.MYSQL:
+            sql = f"INSERT IGNORE INTO {table_ref} ({col_refs}) VALUES ({placeholders})"
+        elif dialect in (EngineType.POSTGRESQL, EngineType.SQLITE):
+            pk_refs = ", ".join(self._quote_ident(c, dialect) for c in pk_fields)
+            sql = f"INSERT INTO {table_ref} ({col_refs}) VALUES ({placeholders}) ON CONFLICT ({pk_refs}) DO NOTHING"
+        else:
+            sql = f"INSERT INTO {table_ref} ({col_refs}) VALUES ({placeholders})"
+
+        cursor = conn.execute(text(sql), params)
+        # rowcount == 0 表示冲突被跳过（DO NOTHING / IGNORE 未写入任何行）。
+        # 部分驱动可能返回 -1（未知），此时按已写入处理。
+        return cursor.rowcount != 0
 
     def _upsert_mysql(
         self,

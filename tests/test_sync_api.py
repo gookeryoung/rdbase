@@ -203,6 +203,77 @@ class TestSyncConfigAPI:
         response = _post(client, "/api/v1/sync/configs", payload, _auth(admin_user))
         assert response.status_code == 400
 
+    def test_create_config_default_conflict_strategy(
+        self, client: Client, admin_user: User, sync_ds_for_api: DataSource
+    ) -> None:
+        """未指定冲突策略时默认为 upsert."""
+        payload = {
+            "name": "默认策略配置",
+            "source_table": "auth_user",
+            "target_datasource_id": sync_ds_for_api.pk,
+            "target_table": "ext_user",
+            "field_mappings": [],
+        }
+        response = _post(client, "/api/v1/sync/configs", payload, _auth(admin_user))
+        assert response.status_code == 200
+        assert response.json()["conflict_strategy"] == "upsert"
+
+    def test_create_config_with_conflict_strategy(
+        self, client: Client, admin_user: User, sync_ds_for_api: DataSource
+    ) -> None:
+        """创建时指定合法冲突策略应透传保存."""
+        payload = {
+            "name": "跳过策略配置",
+            "source_table": "auth_user",
+            "target_datasource_id": sync_ds_for_api.pk,
+            "target_table": "ext_user",
+            "conflict_strategy": "skip",
+            "field_mappings": [],
+        }
+        response = _post(client, "/api/v1/sync/configs", payload, _auth(admin_user))
+        assert response.status_code == 200
+        assert response.json()["conflict_strategy"] == "skip"
+
+    def test_create_config_invalid_conflict_strategy(
+        self, client: Client, admin_user: User, sync_ds_for_api: DataSource
+    ) -> None:
+        """创建时提供非法冲突策略应返回 400."""
+        payload = {
+            "name": "非法策略配置",
+            "source_table": "auth_user",
+            "target_datasource_id": sync_ds_for_api.pk,
+            "target_table": "ext_user",
+            "conflict_strategy": "not_a_strategy",
+            "field_mappings": [],
+        }
+        response = _post(client, "/api/v1/sync/configs", payload, _auth(admin_user))
+        assert response.status_code == 400
+
+    def test_update_config_conflict_strategy(
+        self, client: Client, admin_user: User, sync_config_for_api: SyncConfig
+    ) -> None:
+        """更新冲突策略应生效."""
+        response = _patch(
+            client,
+            f"/api/v1/sync/configs/{sync_config_for_api.pk}",
+            {"conflict_strategy": "error"},
+            _auth(admin_user),
+        )
+        assert response.status_code == 200
+        assert response.json()["conflict_strategy"] == "error"
+
+    def test_update_config_invalid_conflict_strategy(
+        self, client: Client, admin_user: User, sync_config_for_api: SyncConfig
+    ) -> None:
+        """更新为非法冲突策略应返回 400."""
+        response = _patch(
+            client,
+            f"/api/v1/sync/configs/{sync_config_for_api.pk}",
+            {"conflict_strategy": "bogus"},
+            _auth(admin_user),
+        )
+        assert response.status_code == 400
+
     def test_update_config_invalid_cron(
         self, client: Client, admin_user: User, sync_config_for_api: SyncConfig
     ) -> None:
@@ -493,6 +564,47 @@ class TestSyncBatchAPI:
         assert response.status_code == 200
         data = response.json()
         assert data["total"] == 0
+
+    def test_batch_trigger_default_max_workers_is_serial(
+        self, client: Client, admin_user: User, sync_config_for_api: SyncConfig
+    ) -> None:
+        """未指定 max_workers 时默认按串行（1）透传给服务层."""
+        from unittest.mock import patch
+
+        from apps.sync.sync_service import BatchSyncResult, SyncService
+
+        with patch.object(SyncService, "run_batch", return_value=BatchSyncResult(total=1)) as spy:
+            response = _post(
+                client,
+                "/api/v1/sync/batch-trigger",
+                {"config_ids": [sync_config_for_api.pk], "confirm": True, "force_full": True},
+                _auth(admin_user),
+            )
+        assert response.status_code == 200
+        assert spy.call_args.kwargs["max_workers"] == 1
+
+    def test_batch_trigger_passes_max_workers(
+        self, client: Client, admin_user: User, sync_config_for_api: SyncConfig
+    ) -> None:
+        """请求中的 max_workers 应透传给服务层."""
+        from unittest.mock import patch
+
+        from apps.sync.sync_service import BatchSyncResult, SyncService
+
+        with patch.object(SyncService, "run_batch", return_value=BatchSyncResult(total=1)) as spy:
+            response = _post(
+                client,
+                "/api/v1/sync/batch-trigger",
+                {
+                    "config_ids": [sync_config_for_api.pk],
+                    "confirm": True,
+                    "force_full": True,
+                    "max_workers": 4,
+                },
+                _auth(admin_user),
+            )
+        assert response.status_code == 200
+        assert spy.call_args.kwargs["max_workers"] == 4
 
 
 class TestSyncScheduleAPI:

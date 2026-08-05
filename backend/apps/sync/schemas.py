@@ -46,6 +46,7 @@ class SyncConfigOut(BaseModel):
     target_schema: str
     sync_mode: str
     status: str
+    conflict_strategy: str = "upsert"
     timestamp_field: str
     batch_size: int
     scheduler_enabled: bool = False
@@ -83,6 +84,7 @@ class SyncConfigCreateIn(BaseModel):
     target_schema: str = ""
     sync_mode: str = "incremental"
     status: str = "active"
+    conflict_strategy: str = "upsert"
     timestamp_field: str = "updated_at"
     batch_size: int = 500
     scheduler_enabled: bool = False
@@ -101,6 +103,7 @@ class SyncConfigUpdateIn(BaseModel):
     target_schema: str | None = None
     sync_mode: str | None = None
     status: str | None = None
+    conflict_strategy: str | None = None
     timestamp_field: str | None = None
     batch_size: int | None = None
     scheduler_enabled: bool | None = None
@@ -190,6 +193,7 @@ class SyncBatchIn(BaseModel):
     config_ids: list[int]
     force_full: bool = False
     stop_on_error: bool = False
+    max_workers: int = 1
     confirm: bool = True
 
 

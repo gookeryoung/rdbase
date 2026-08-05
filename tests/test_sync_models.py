@@ -126,6 +126,28 @@ class TestSyncConfig:
         assert sync_config.last_run_at is None
         assert sync_config.next_run_at is None
 
+    def test_conflict_strategy_default_is_upsert(self, sync_config: SyncConfig) -> None:
+        """冲突处理策略默认应为 upsert."""
+        from apps.sync.models import ConflictStrategy
+
+        assert sync_config.conflict_strategy == ConflictStrategy.UPSERT
+
+    def test_conflict_strategy_choices(self) -> None:
+        """ConflictStrategy 应包含 upsert/skip/error 三种取值."""
+        from apps.sync.models import ConflictStrategy
+
+        values = {choice.value for choice in ConflictStrategy}
+        assert values == {"upsert", "skip", "error"}
+
+    def test_conflict_strategy_persisted(self, sync_config: SyncConfig) -> None:
+        """写入非默认策略后应能从库中读回."""
+        from apps.sync.models import ConflictStrategy
+
+        sync_config.conflict_strategy = ConflictStrategy.SKIP
+        sync_config.save(update_fields=["conflict_strategy"])
+        sync_config.refresh_from_db()
+        assert sync_config.conflict_strategy == ConflictStrategy.SKIP
+
     def test_name_unique_constraint(self, sync_config: SyncConfig) -> None:
         """name 字段应唯一."""
         from django.db import IntegrityError
