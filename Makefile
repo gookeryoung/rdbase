@@ -44,7 +44,8 @@ run-be: ## 启动后端开发服务器 (0.0.0.0:8000)
 run-fe: ## 启动前端开发服务器
 	cd $(FRONTEND_DIR) && npm run dev
 
-run: run-be run-fe ## 同时启动后端和前端开发服务器
+run: ## 同时启动后端和前端开发服务器
+	uv run python scripts/dev_run.py
 
 doc: ## 构建 Sphinx 文档
 	uv run sphinx-build -b html docs docs/_build/html
