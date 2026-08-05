@@ -28,6 +28,7 @@ from apps.datasources.engine import get_engine as get_ds_engine
 from apps.datasources.models import DataSource
 
 from .models import SyncConfig, SyncFieldMapping, SyncLog
+from .scheduling import CronError, validate_cron
 from .schemas import (
     MessageOut,
     SyncBatchIn,
@@ -150,6 +151,18 @@ def _batch_result_to_out(result: BatchSyncResult) -> SyncBatchOut:
     )
 
 
+def _validate_cron_or_400(scheduler_enabled: bool, cron_expression: str) -> None:
+    """启用调度时校验 cron 表达式，非法则抛出 400.
+
+    未启用调度时跳过校验（允许保存空 cron 或占位内容）。
+    """
+    if scheduler_enabled:
+        try:
+            validate_cron(cron_expression)
+        except CronError as exc:
+            raise HttpError(400, str(exc)) from exc
+
+
 # ================================================================
 # 同步配置 CRUD
 # ================================================================
@@ -181,6 +194,9 @@ def create_config(request: HttpRequest, payload: SyncConfigCreateIn) -> HttpResp
     except DataSource.DoesNotExist:  # type: ignore[missing-attribute]
         raise HttpError(404, f"数据源 {payload.target_datasource_id} 不存在") from None
 
+    # 启用调度时校验 cron 表达式
+    _validate_cron_or_400(payload.scheduler_enabled, payload.cron_expression)
+
     with transaction.atomic():
         config = SyncConfig.objects.create(
             name=payload.name,
@@ -210,6 +226,9 @@ def create_config(request: HttpRequest, payload: SyncConfigCreateIn) -> HttpResp
                 fixed_value=fm.fixed_value,
                 is_pk=fm.is_pk,
             )
+
+    # 若启用调度则计算首次 next_run_at
+    config.refresh_next_run()
 
     body = _config_to_out(config).model_dump()
     return JsonResponse(body)
@@ -242,6 +261,10 @@ def update_config(
     data = payload.model_dump(exclude_unset=True, exclude={"field_mappings"})
     for key, value in data.items():
         setattr(config, key, value)
+
+    # 依据更新后的最终状态校验 cron 表达式
+    _validate_cron_or_400(config.scheduler_enabled, config.cron_expression)
+
     config.save()
 
     # 更新字段映射（全量替换）
@@ -256,6 +279,9 @@ def update_config(
                 fixed_value=fm.fixed_value,
                 is_pk=fm.is_pk,
             )
+
+    # 调度相关字段可能变更，刷新下次执行时间
+    config.refresh_next_run()
 
     return JsonResponse(_config_to_out(config).model_dump())
 
@@ -485,10 +511,15 @@ def update_schedule(
     except SyncConfig.DoesNotExist:  # type: ignore[missing-attribute]
         raise HttpError(404, f"同步配置 {config_id} 不存在") from None
 
+    # 启用调度时校验 cron 表达式
+    _validate_cron_or_400(payload.scheduler_enabled, payload.cron_expression)
+
     config.scheduler_enabled = payload.scheduler_enabled
     config.cron_expression = payload.cron_expression
     config.max_retries = payload.max_retries
     config.save()
+    # 调度设置变更后刷新下次执行时间
+    config.refresh_next_run()
 
     return JsonResponse(_config_to_out(config).model_dump())
 

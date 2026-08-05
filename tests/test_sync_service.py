@@ -417,6 +417,110 @@ class TestSyncServiceScheduled:
         result = SyncService.run_scheduled()
         assert result.total >= 1
 
+    def test_run_scheduled_rolls_next_run_at(
+        self,
+        db: Any,
+        admin_user: User,
+        sync_ds_for_service: DataSource,
+    ) -> None:
+        """执行后应基于 cron 将 next_run_at 滚动到未来."""
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        past = timezone.now() - timedelta(minutes=10)
+        config = SyncConfig.objects.create(
+            name="滚动调度配置",
+            source_table="auth_user",
+            target_datasource=sync_ds_for_service,
+            target_table="rolled_target",
+            sync_mode=SyncMode.INCREMENTAL,
+            status=SyncStatus.ACTIVE,
+            scheduler_enabled=True,
+            cron_expression="*/5 * * * *",
+            next_run_at=past,
+            max_retries=0,
+            created_by=admin_user,
+        )
+        SyncFieldMapping.objects.create(config=config, source_field="id", target_field="sid", is_pk=True)
+
+        SyncService.run_scheduled()
+
+        config.refresh_from_db()
+        assert config.last_run_at is not None
+        # next_run_at 应被滚动到未来，不再是过去时间
+        assert config.next_run_at is not None
+        assert config.next_run_at > past
+
+    def test_run_scheduled_rolls_next_run_on_failure(
+        self,
+        db: Any,
+        admin_user: User,
+        sync_ds_for_service: DataSource,
+    ) -> None:
+        """即使同步失败，也应滚动 next_run_at 避免反复触发过期任务."""
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        past = timezone.now() - timedelta(minutes=10)
+        # 无字段映射 → _do_run 抛 SyncError
+        config = SyncConfig.objects.create(
+            name="失败滚动配置",
+            source_table="auth_user",
+            target_datasource=sync_ds_for_service,
+            target_table="fail_target",
+            sync_mode=SyncMode.INCREMENTAL,
+            status=SyncStatus.ACTIVE,
+            scheduler_enabled=True,
+            cron_expression="*/5 * * * *",
+            next_run_at=past,
+            max_retries=0,
+            created_by=admin_user,
+        )
+
+        result = SyncService.run_scheduled()
+        assert result.failed >= 1
+
+        config.refresh_from_db()
+        assert config.next_run_at is not None
+        assert config.next_run_at > past
+
+    def test_run_scheduled_skips_next_run_on_invalid_cron(
+        self,
+        db: Any,
+        admin_user: User,
+        sync_ds_for_service: DataSource,
+    ) -> None:
+        """cron 非法时不更新 next_run_at（仅更新 last_run_at），覆盖防御分支."""
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        past = timezone.now() - timedelta(minutes=10)
+        # 绕过 API 校验直接落库非法 cron（模拟历史脏数据）
+        config = SyncConfig.objects.create(
+            name="非法cron调度配置",
+            source_table="auth_user",
+            target_datasource=sync_ds_for_service,
+            target_table="bad_cron_target",
+            sync_mode=SyncMode.INCREMENTAL,
+            status=SyncStatus.ACTIVE,
+            scheduler_enabled=True,
+            cron_expression="bad cron",
+            next_run_at=past,
+            max_retries=0,
+            created_by=admin_user,
+        )
+        SyncFieldMapping.objects.create(config=config, source_field="id", target_field="sid", is_pk=True)
+
+        SyncService.run_scheduled()
+
+        config.refresh_from_db()
+        assert config.last_run_at is not None
+        # cron 非法 → next_run_at 保持原值（未被滚动）
+        assert config.next_run_at == past
+
 
 class TestSyncPreview:
     """SyncPreview 数据类测试."""

@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from django.db import models
 
 from apps.accounts.models import User
@@ -139,6 +141,33 @@ class SyncConfig(models.Model):
     def is_schedulable(self) -> bool:
         """是否可调度（启用且有 cron 表达式）."""
         return bool(self.is_active and self.scheduler_enabled and self.cron_expression)
+
+    def refresh_next_run(self, *, base: datetime | None = None, save: bool = True) -> datetime | None:
+        """依据 cron 表达式刷新 next_run_at.
+
+        可调度时基于 cron 计算下次执行时间；不可调度（未启用/无 cron/已暂停）
+        则清空 next_run_at。计算失败（cron 非法）同样清空，避免残留过期时间。
+
+        Args:
+            base: 计算基准时间，None 则使用当前时区感知时间。
+            save: 是否立即持久化 next_run_at 字段。
+
+        Returns:
+            datetime | None: 刷新后的下次执行时间，不可调度时为 None。
+        """
+        from .scheduling import CronError, compute_next_run
+
+        if self.is_schedulable:
+            try:
+                self.next_run_at = compute_next_run(self.cron_expression, base=base)
+            except CronError:
+                self.next_run_at = None
+        else:
+            self.next_run_at = None
+
+        if save:
+            self.save(update_fields=["next_run_at"])
+        return self.next_run_at  # type: ignore[bad-return]
 
 
 class SyncFieldMapping(models.Model):

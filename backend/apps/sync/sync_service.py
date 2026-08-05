@@ -38,6 +38,7 @@ from .models import (
     SyncMode,
     SyncStatus,
 )
+from .scheduling import compute_next_run, is_valid_cron
 
 logger = logging.getLogger(__name__)
 
@@ -320,7 +321,8 @@ class SyncService:
     def run_scheduled() -> BatchSyncResult:
         """执行所有可调度的配置.
 
-        查找所有启用了定时调度且到达执行时间的配置并执行。
+        查找所有启用了定时调度且到达执行时间的配置并执行，执行后基于
+        cron 表达式滚动更新 next_run_at，使调度可自动循环。
 
         Returns:
             BatchSyncResult: 批量同步结果。
@@ -343,10 +345,16 @@ class SyncService:
                 log = service._do_run()
                 result.succeeded += 1
                 result.results.append(log)
-                config.last_run_at = now
-                config.save(update_fields=["last_run_at"])
             except SyncError:
                 result.failed += 1
+            finally:
+                # 无论成功失败都基于 cron 滚动到下次执行时间，避免过期任务反复触发。
+                # 注意：不依赖 is_active（失败会将 status 置为 ERROR），仅要求
+                # 启用调度且 cron 合法，从而使定时循环在单次失败后仍能持续。
+                config.last_run_at = now
+                if config.scheduler_enabled and is_valid_cron(config.cron_expression):
+                    config.next_run_at = compute_next_run(config.cron_expression, base=now)
+                config.save(update_fields=["last_run_at", "next_run_at"])
 
         return result
 

@@ -144,6 +144,54 @@ class TestSyncConfig:
         result = str(sync_config)
         assert sync_config.name in result
 
+    def test_refresh_next_run_when_schedulable(self, sync_config: SyncConfig) -> None:
+        """可调度配置应基于 cron 计算并持久化 next_run_at."""
+        from django.utils import timezone
+
+        before = timezone.now()
+        sync_config.scheduler_enabled = True
+        sync_config.cron_expression = "* * * * *"
+        sync_config.save()
+
+        result = sync_config.refresh_next_run()
+        assert result is not None
+        assert result > before
+        sync_config.refresh_from_db()
+        assert sync_config.next_run_at == result
+
+    def test_refresh_next_run_clears_when_not_schedulable(self, sync_config: SyncConfig) -> None:
+        """不可调度时应清空 next_run_at."""
+        from django.utils import timezone
+
+        sync_config.next_run_at = timezone.now()
+        sync_config.scheduler_enabled = False
+        sync_config.save()
+
+        result = sync_config.refresh_next_run()
+        assert result is None
+        sync_config.refresh_from_db()
+        assert sync_config.next_run_at is None
+
+    def test_refresh_next_run_clears_on_invalid_cron(self, sync_config: SyncConfig) -> None:
+        """cron 非法时应清空 next_run_at 而非抛异常."""
+        sync_config.scheduler_enabled = True
+        sync_config.cron_expression = "bad cron"
+        sync_config.save()
+
+        result = sync_config.refresh_next_run()
+        assert result is None
+
+    def test_refresh_next_run_without_save(self, sync_config: SyncConfig) -> None:
+        """save=False 时不应持久化，仅返回计算结果."""
+        sync_config.scheduler_enabled = True
+        sync_config.cron_expression = "* * * * *"
+        sync_config.save()
+
+        result = sync_config.refresh_next_run(save=False)
+        assert result is not None
+        sync_config.refresh_from_db()
+        assert sync_config.next_run_at is None
+
 
 class TestSyncFieldMapping:
     """SyncFieldMapping 模型测试."""

@@ -172,6 +172,50 @@ class TestSyncConfigAPI:
         response = _post(client, "/api/v1/sync/configs", payload, _auth(admin_user))
         assert response.status_code == 404
 
+    def test_create_config_with_schedule_computes_next_run(
+        self, client: Client, admin_user: User, sync_ds_for_api: DataSource
+    ) -> None:
+        """创建时启用调度应计算 next_run_at."""
+        payload = {
+            "name": "带调度的配置",
+            "source_table": "auth_user",
+            "target_datasource_id": sync_ds_for_api.pk,
+            "target_table": "ext_user",
+            "scheduler_enabled": True,
+            "cron_expression": "*/5 * * * *",
+            "field_mappings": [],
+        }
+        response = _post(client, "/api/v1/sync/configs", payload, _auth(admin_user))
+        assert response.status_code == 200
+        assert response.json()["next_run_at"] is not None
+
+    def test_create_config_invalid_cron(self, client: Client, admin_user: User, sync_ds_for_api: DataSource) -> None:
+        """创建时启用调度但 cron 非法应返回 400."""
+        payload = {
+            "name": "非法 cron 配置",
+            "source_table": "auth_user",
+            "target_datasource_id": sync_ds_for_api.pk,
+            "target_table": "ext_user",
+            "scheduler_enabled": True,
+            "cron_expression": "bad cron",
+            "field_mappings": [],
+        }
+        response = _post(client, "/api/v1/sync/configs", payload, _auth(admin_user))
+        assert response.status_code == 400
+
+    def test_update_config_invalid_cron(
+        self, client: Client, admin_user: User, sync_config_for_api: SyncConfig
+    ) -> None:
+        """更新为启用调度但 cron 非法应返回 400."""
+        payload = {"scheduler_enabled": True, "cron_expression": "bad cron"}
+        response = _patch(
+            client,
+            f"/api/v1/sync/configs/{sync_config_for_api.pk}",
+            payload,
+            _auth(admin_user),
+        )
+        assert response.status_code == 400
+
     def test_get_config(self, client: Client, admin_user: User, sync_config_for_api: SyncConfig) -> None:
         """管理员应能获取单个配置."""
         response = _get(
@@ -471,6 +515,57 @@ class TestSyncScheduleAPI:
         assert data["scheduler_enabled"] is True
         assert data["cron_expression"] == "*/5 * * * *"
         assert data["max_retries"] == 2
+
+    def test_update_schedule_computes_next_run(
+        self, client: Client, admin_user: User, sync_config_for_api: SyncConfig
+    ) -> None:
+        """启用调度后应计算出 next_run_at."""
+        response = _post(
+            client,
+            f"/api/v1/sync/configs/{sync_config_for_api.pk}/schedule",
+            {
+                "scheduler_enabled": True,
+                "cron_expression": "*/5 * * * *",
+                "max_retries": 2,
+            },
+            _auth(admin_user),
+        )
+        assert response.status_code == 200
+        assert response.json()["next_run_at"] is not None
+
+    def test_update_schedule_invalid_cron(
+        self, client: Client, admin_user: User, sync_config_for_api: SyncConfig
+    ) -> None:
+        """启用调度时提供非法 cron 应返回 400."""
+        response = _post(
+            client,
+            f"/api/v1/sync/configs/{sync_config_for_api.pk}/schedule",
+            {
+                "scheduler_enabled": True,
+                "cron_expression": "bad cron",
+                "max_retries": 2,
+            },
+            _auth(admin_user),
+        )
+        assert response.status_code == 400
+
+    def test_update_schedule_disabled_clears_next_run(
+        self, client: Client, admin_user: User, sync_config_for_api: SyncConfig
+    ) -> None:
+        """关闭调度应清空 next_run_at."""
+        from django.utils import timezone
+
+        sync_config_for_api.next_run_at = timezone.now()
+        sync_config_for_api.save()
+
+        response = _post(
+            client,
+            f"/api/v1/sync/configs/{sync_config_for_api.pk}/schedule",
+            {"scheduler_enabled": False},
+            _auth(admin_user),
+        )
+        assert response.status_code == 200
+        assert response.json()["next_run_at"] is None
 
     def test_run_scheduled(self, client: Client, admin_user: User) -> None:
         """执行定时同步应返回结果."""

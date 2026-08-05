@@ -151,6 +151,13 @@ rdbase/
 - [x] 28 生产配置与性能：gunicorn/uvicorn worker、DB 连接池、前端构建优化
 - [x] 29 P5 测试与文档：端到端测试、部署文档、README 重写、API 文档汇总
 
+### P6 数据同步增强（里程碑：定时调度可自动循环、可监控告警）
+- [x] 30 Cron 调度闭环：croniter 解析、next_run_at 计算、run_scheduled 滚动更新、调度触发管理命令
+- [ ] 31 同步监控与告警：成功率/平均耗时统计接口、失败告警记录、前端监控面板
+- [ ] 32 增量冲突与并发：冲突处理策略（跳过/覆盖/报错）、批量/调度同步线程池加速
+- [ ] 33 源方言化：_read_source_data 按 source_db_alias 方言化，去除 sqlite 硬编码
+- [ ] 34 P6 测试与文档：sync 增强模块测试补全、用户手册与开发文档更新
+
 ## 验收标准
 
 1. `make check` 全套门禁通过（lint + typecheck + cov ≥ 95%）。

@@ -24,6 +24,8 @@ dependencies = [
     "openpyxl>=3.1",
     # JWT 认证（access/refresh 双 token）
     "pyjwt>=2.9",
+    # Cron 表达式解析（同步任务定时调度计算 next_run_at）
+    "croniter>=3.0",
     # ASGI/WSGI 服务器
     "uvicorn[standard]>=0.30",
     "gunicorn>=23.0",
