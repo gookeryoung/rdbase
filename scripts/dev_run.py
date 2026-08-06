@@ -31,8 +31,27 @@ FRONTEND_DIR = ROOT / "frontend"
 
 _IS_WINDOWS = sys.platform == "win32"
 
+# 统一以 UTF-8 处理所有输出：中文 Windows 默认 locale 为 GBK，若用文本模式管道
+# 或直接写入 GBK 编码的 stdout，会在解码/编码 UTF-8 内容（Vite 箭头、Django
+# 中文、本脚本的中文提示）时抛出 UnicodeDecodeError/UnicodeEncodeError。
+_OUTPUT_ENCODING = "utf-8"
+
 # Windows 上 npm 需要通过 npm.cmd 调用
 NPM = "npm.cmd" if _IS_WINDOWS else "npm"
+
+
+def _log(message: str) -> None:
+    """以 UTF-8 字节写入 stdout，避免 GBK 控制台编码中文提示时报错。"""
+    data = message.encode(_OUTPUT_ENCODING, errors="replace")
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is not None:
+        buffer.write(data)
+        buffer.flush()
+    else:
+        # 极少数无 buffer 的场景退化为 errors=replace 的文本写入
+        sys.stdout.write(message)
+        sys.stdout.flush()
+
 
 # 各服务的启动命令与工作目录
 SERVICES: list[tuple[str, list[str], Path]] = [
@@ -47,6 +66,19 @@ SERVICES: list[tuple[str, list[str], Path]] = [
         FRONTEND_DIR,
     ),
 ]
+
+
+def _child_env() -> dict[str, str]:
+    """构造子进程环境，强制 Python 子进程以 UTF-8 输出。
+
+    中文 Windows 默认 locale 为 GBK，Python 子进程写入管道时会用 GBK 编码，
+    与本脚本按 UTF-8 解码不一致导致乱码或错误。设置 PYTHONUTF8/PYTHONIOENCODING
+    让后端 Python 子进程统一输出 UTF-8，与前端 Node（本就输出 UTF-8）保持一致。
+    """
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
 
 
 def _create_win_job() -> int | None:
@@ -150,12 +182,16 @@ def _close_job(job: int | None) -> None:
     kernel32.CloseHandle(wintypes.HANDLE(job))
 
 
-def _stream_output(name: str, stream: IO[str]) -> None:
-    """逐行读取子进程输出并加上服务名前缀转发到当前进程 stdout。"""
+def _stream_output(name: str, stream: IO[bytes]) -> None:
+    """逐行读取子进程二进制输出，按 UTF-8 解码并加服务名前缀转发到 stdout。
+
+    子进程（Vite/Django）以 UTF-8 输出，这里显式按 UTF-8 解码并对非法字节
+    容错替换，避免在 GBK locale 下用文本模式管道解码时抛出 UnicodeDecodeError。
+    """
     prefix = f"[{name}] "
-    for line in iter(stream.readline, ""):
-        sys.stdout.write(prefix + line)
-        sys.stdout.flush()
+    for raw in iter(stream.readline, b""):
+        line = raw.decode(_OUTPUT_ENCODING, errors="replace")
+        _log(prefix + line)
     stream.close()
 
 
@@ -179,7 +215,7 @@ def main() -> int:
     """并行启动全部服务，阻塞直至任一服务退出或收到中断信号。"""
     _install_signal_handlers()
     job = _create_win_job()
-    processes: list[tuple[str, subprocess.Popen[str]]] = []
+    processes: list[tuple[str, subprocess.Popen[bytes]]] = []
     threads: list[threading.Thread] = []
 
     for name, command, cwd in SERVICES:
@@ -187,17 +223,18 @@ def main() -> int:
             proc = subprocess.Popen(
                 command,
                 cwd=cwd,
+                env=_child_env(),
+                # 以二进制模式读取管道，由 _stream_output 按 UTF-8 解码，
+                # 规避 GBK locale 下文本模式管道的 UnicodeDecodeError
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
                 # Windows 下新建进程组，避免控制台 Ctrl+C 直接打断子进程，
                 # 由本脚本统一通过 Job 对象终止；POSIX 下独立成会话
                 creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP if _IS_WINDOWS else 0),
                 start_new_session=not _IS_WINDOWS,
             )
         except FileNotFoundError as exc:
-            sys.stderr.write(f"[dev_run] 启动 {name} 失败：{exc}\n")
+            _log(f"[dev_run] 启动 {name} 失败：{exc}\n")
             _terminate_all(processes, job)
             return 1
 
@@ -209,10 +246,9 @@ def main() -> int:
         thread = threading.Thread(target=_stream_output, args=(name, proc.stdout), daemon=True)
         thread.start()
         threads.append(thread)
-        sys.stdout.write(f"[dev_run] 已启动 {name}（pid={proc.pid}）\n")
+        _log(f"[dev_run] 已启动 {name}（pid={proc.pid}）\n")
 
-    sys.stdout.write("[dev_run] 前后端已并行启动，按 Ctrl+C 停止全部服务。\n")
-    sys.stdout.flush()
+    _log("[dev_run] 前后端已并行启动，按 Ctrl+C 停止全部服务。\n")
 
     exit_code = 0
     try:
@@ -221,7 +257,7 @@ def main() -> int:
             for name, proc in processes:
                 ret = proc.poll()
                 if ret is not None:
-                    sys.stdout.write(f"[dev_run] {name} 已退出（code={ret}）\n")
+                    _log(f"[dev_run] {name} 已退出（code={ret}）\n")
                     exit_code = ret or exit_code
                     raise _ServiceExited
             for _, proc in processes:
@@ -237,13 +273,12 @@ def main() -> int:
     return exit_code
 
 
-def _terminate_all(processes: list[tuple[str, subprocess.Popen[str]]], job: int | None) -> None:
+def _terminate_all(processes: list[tuple[str, subprocess.Popen[bytes]]], job: int | None) -> None:
     """终止全部子进程及其派生进程，超时后强制结束。"""
     for name, proc in processes:
         if proc.poll() is not None:
             continue
-        sys.stdout.write(f"[dev_run] 正在停止 {name}...\n")
-        sys.stdout.flush()
+        _log(f"[dev_run] 正在停止 {name}...\n")
         if not _IS_WINDOWS:
             # POSIX 下子进程已独立成会话，向整个进程组发送 SIGINT
             with contextlib.suppress(ProcessLookupError):
@@ -257,7 +292,7 @@ def _terminate_all(processes: list[tuple[str, subprocess.Popen[str]]], job: int 
         try:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
-            sys.stdout.write(f"[dev_run] {name} 未在超时内退出，强制结束。\n")
+            _log(f"[dev_run] {name} 未在超时内退出，强制结束。\n")
             proc.kill()
 
 
