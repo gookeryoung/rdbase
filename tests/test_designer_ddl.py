@@ -461,6 +461,58 @@ def test_alter_table_modify_column_sqlite_drop_unique_no_index() -> None:
     assert not any("CREATE UNIQUE INDEX" in s for s in result.statements)
 
 
+def test_alter_table_sqlite_add_foreign_key_raises() -> None:
+    """SQLite 新增外键应抛 DDLError（不支持 ALTER TABLE ADD CONSTRAINT）."""
+    old = _make_spec(
+        fields=[
+            FieldSpec(name="id", type="INTEGER", nullable=False, primary_key=True),
+            FieldSpec(name="user_id", type="INTEGER"),
+        ]
+    )
+    new = _make_spec(
+        fields=[
+            FieldSpec(name="id", type="INTEGER", nullable=False, primary_key=True),
+            FieldSpec(name="user_id", type="INTEGER"),
+        ],
+        foreign_keys=[
+            ForeignKeySpec(
+                name="fk_posts_user",
+                columns=["user_id"],
+                referred_table="users",
+                referred_columns=["id"],
+            )
+        ],
+    )
+    with pytest.raises(DDLError, match="不支持通过 ALTER TABLE 增删外键约束"):
+        generate_alter_table(old, new, EngineType.SQLITE)
+
+
+def test_alter_table_sqlite_drop_foreign_key_raises() -> None:
+    """SQLite 删除外键应抛 DDLError（不支持 ALTER TABLE DROP CONSTRAINT）."""
+    old = _make_spec(
+        fields=[
+            FieldSpec(name="id", type="INTEGER", nullable=False, primary_key=True),
+            FieldSpec(name="user_id", type="INTEGER"),
+        ],
+        foreign_keys=[
+            ForeignKeySpec(
+                name="fk_posts_user",
+                columns=["user_id"],
+                referred_table="users",
+                referred_columns=["id"],
+            )
+        ],
+    )
+    new = _make_spec(
+        fields=[
+            FieldSpec(name="id", type="INTEGER", nullable=False, primary_key=True),
+            FieldSpec(name="user_id", type="INTEGER"),
+        ],
+    )
+    with pytest.raises(DDLError, match="不支持通过 ALTER TABLE 增删外键约束"):
+        generate_alter_table(old, new, EngineType.SQLITE)
+
+
 def test_alter_table_add_drop_index() -> None:
     """索引差异应生成 CREATE INDEX / DROP INDEX."""
     old = _make_spec(

@@ -405,6 +405,14 @@ def generate_alter_table(  # noqa: PLR0912
     # 6. 外键差异（按 name 匹配；name 为 None 的外键不参与差异比较）
     old_fks = _index_fks_by_name(old_spec.foreign_keys)
     new_fks = _index_fks_by_name(new_spec.foreign_keys)
+    # SQLite 不支持 ALTER TABLE ADD/DROP CONSTRAINT，有名外键变更需重建表（无名外键本来就跳过）
+    if dialect == EngineType.SQLITE:
+        named_changed = ((old_fks.keys() - new_fks.keys()) | (new_fks.keys() - old_fks.keys())) - {None}
+        if named_changed:
+            raise DDLError(
+                "SQLite 不支持通过 ALTER TABLE 增删外键约束（不支持 ADD/DROP CONSTRAINT），"
+                "请删除并重建表或在 CREATE TABLE 时定义外键"
+            )
     for name in old_fks.keys() - new_fks.keys():
         if name is None:
             continue  # 无名外键无法精确删除，跳过
