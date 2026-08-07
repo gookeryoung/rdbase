@@ -179,6 +179,32 @@ def retrieve_table_view(
     return JsonResponse(body)
 
 
+@router.get("/{ds_id}/tables/{table_name}/reverse", response={200: TableDesignSpec})
+def reverse_table_view(
+    request: HttpRequest,
+    ds_id: int,
+    table_name: str,
+    schema_name: str | None = None,
+) -> HttpResponse:
+    """反向工程：把已有表结构反射为 TableDesignSpec，供新建草稿导入（所有登录用户）.
+
+    复用 ``_reflect_table_to_spec`` 的方言规整逻辑（主键非空、SQLite 隐式自增、
+    自增主键 default 置 None、外键 on_delete 统一 RESTRICT），保证导入草稿后
+    立即应用回库不会误判触发无意义 ALTER。
+    """
+    del request
+    ds = _get_ds_or_404(ds_id)
+    try:
+        engine = get_engine(ds)
+        effective_schema = schema_name if schema_name else None
+        meta = inspect_table(engine, table_name, schema=effective_schema)
+        spec = _reflect_table_to_spec(meta, cast(str, ds.engine))
+    except (SQLAlchemyError, NoSuchTableError) as exc:
+        raise _wrap_reflect_error(exc) from None
+    body = spec.model_dump()
+    return JsonResponse(body)
+
+
 # ============================================================
 # P3-2 表设计器接口
 # ============================================================

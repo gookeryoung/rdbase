@@ -8,6 +8,7 @@ import type {
   DraftUpdate,
   NameItem,
   TableBrief,
+  TableDesignSpec,
   TableDetail,
   Version,
 } from "@/types";
@@ -52,6 +53,18 @@ export const retrieveTable = (
 ): Promise<TableDetail> =>
   client
     .get<TableDetail>(`/designer/${dsId}/tables/${tableName}`, {
+      params: schemaName ? { schema_name: schemaName } : undefined,
+    })
+    .then((res) => res.data);
+
+// 反向工程：把已有表结构反射为 TableDesignSpec，供新建草稿导入
+export const reverseTable = (
+  dsId: number,
+  tableName: string,
+  schemaName?: string | null
+): Promise<TableDesignSpec> =>
+  client
+    .get<TableDesignSpec>(`/designer/${dsId}/tables/${tableName}/reverse`, {
       params: schemaName ? { schema_name: schemaName } : undefined,
     })
     .then((res) => res.data);

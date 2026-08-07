@@ -29,6 +29,7 @@ import {
   HistoryOutlined,
   RollbackOutlined,
   ApartmentOutlined,
+  ImportOutlined,
 } from "@ant-design/icons";
 import {
   listDrafts,
@@ -39,6 +40,7 @@ import {
   rollbackToVersion,
   previewDDL,
   applyDraft,
+  reverseTable,
 } from "@/api/designer";
 import { listDatasources } from "@/api/datasources";
 import { useAuthStore } from "@/store/auth";
@@ -166,6 +168,8 @@ interface DraftFormValues {
   datasource_id: number;
   table_name: string;
   schema_name?: string;
+  // 反向工程导入的 spec：来自已有表结构，存在时优先于默认空 spec 使用
+  imported_spec?: TableDesignSpec | null;
 }
 
 // 数据库设计页：左侧草稿列表，右侧表设计器
@@ -443,7 +447,9 @@ const Designer = () => {
     datasource_id: 0,
     table_name: "",
     schema_name: "",
+    imported_spec: null,
   });
+  const [importing, setImporting] = useState(false);
 
   const openCreate = () => {
     setCreateForm({
@@ -451,8 +457,33 @@ const Designer = () => {
       datasource_id: datasources[0]?.id ?? 0,
       table_name: "",
       schema_name: "",
+      imported_spec: null,
     });
     setCreateOpen(true);
+  };
+
+  // 从已有表反向工程导入结构到 createForm.imported_spec
+  const handleImportFromTable = async () => {
+    if (!createForm.datasource_id || !createForm.table_name) {
+      message.warning("请先选择数据源并填写表名");
+      return;
+    }
+    setImporting(true);
+    try {
+      const spec = await reverseTable(
+        createForm.datasource_id,
+        createForm.table_name,
+        createForm.schema_name || null
+      );
+      setCreateForm((f) => ({ ...f, imported_spec: spec }));
+      message.success(
+        `已导入表结构：${spec.fields.length} 个字段、${spec.indexes.length} 个索引、${spec.foreign_keys.length} 个外键`
+      );
+    } catch (err) {
+      message.error(errMsg(err, "导入失败，请确认表名与 schema 是否正确"));
+    } finally {
+      setImporting(false);
+    }
   };
 
   const handleCreate = async () => {
@@ -462,14 +493,16 @@ const Designer = () => {
     }
     setCreating(true);
     try {
-      const spec: TableDesignSpec = {
-        name: createForm.table_name,
-        schema_name: createForm.schema_name || null,
-        comment: null,
-        fields: [makeDefaultIdField()],
-        indexes: [],
-        foreign_keys: [],
-      };
+      // 已导入 spec 时使用导入的（应用回库走 ALTER），否则构造默认空 spec（走 CREATE）
+      const spec: TableDesignSpec =
+        createForm.imported_spec ?? {
+          name: createForm.table_name,
+          schema_name: createForm.schema_name || null,
+          comment: null,
+          fields: [makeDefaultIdField()],
+          indexes: [],
+          foreign_keys: [],
+        };
       const draft = await createDraft({
         name: createForm.name,
         datasource_id: createForm.datasource_id,
@@ -1191,16 +1224,50 @@ const Designer = () => {
             placeholder="目标表名（如 users）"
             value={createForm.table_name}
             onChange={(e) =>
-              setCreateForm((f) => ({ ...f, table_name: e.target.value }))
+              setCreateForm((f) => ({
+                ...f,
+                table_name: e.target.value,
+                imported_spec:
+                  f.imported_spec && f.imported_spec.name !== e.target.value
+                    ? null
+                    : f.imported_spec,
+              }))
             }
           />
           <Input
             placeholder="目标 schema（可选，SQLite 忽略）"
             value={createForm.schema_name ?? ""}
             onChange={(e) =>
-              setCreateForm((f) => ({ ...f, schema_name: e.target.value }))
+              setCreateForm((f) => ({
+                ...f,
+                schema_name: e.target.value,
+                imported_spec:
+                  f.imported_spec &&
+                    (f.imported_spec.schema_name ?? "") !== e.target.value
+                    ? null
+                    : f.imported_spec,
+              }))
             }
           />
+          <Space style={{ width: "100%" }}>
+            <Button
+              icon={<ImportOutlined />}
+              loading={importing}
+              onClick={handleImportFromTable}
+            >
+              从已有表导入结构
+            </Button>
+            {createForm.imported_spec && (
+              <Tag color="green">
+                已导入：{createForm.imported_spec.fields.length} 字段
+              </Tag>
+            )}
+          </Space>
+          {createForm.imported_spec && (
+            <Typography.Text type="secondary">
+              导入的 spec 将作为草稿初始结构，应用回库时按 ALTER 处理；修改表名或 schema 会清空已导入结构。
+            </Typography.Text>
+          )}
         </Space>
       </Modal>
     </Layout>

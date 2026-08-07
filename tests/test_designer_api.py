@@ -209,6 +209,83 @@ def test_retrieve_table_not_found_returns_404(make_user: Callable[..., User], tm
     assert response.status_code == 404
 
 
+# ---------- 反向工程（reverse）----------
+
+
+@pytest.mark.django_db
+def test_reverse_table_returns_design_spec(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """反向工程接口应返回 TableDesignSpec，含字段/索引/外键（viewer 可读）."""
+    user = make_user(role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _get(client, f"/api/v1/designer/{ds.pk}/tables/posts/reverse", _auth(user))
+    assert response.status_code == 200
+    body = json.loads(response.content)
+    # TableDesignSpec 顶层字段
+    assert body["name"] == "posts"
+    assert body["schema_name"] is None  # SQLite 强制 None
+    # 字段
+    field_names = [f["name"] for f in body["fields"]]
+    assert field_names == ["id", "user_id", "title"]
+    pk = next(f for f in body["fields"] if f["name"] == "id")
+    assert pk["primary_key"] is True
+    assert pk["nullable"] is False  # 主键强制非空
+    assert pk["autoincrement"] is True  # SQLite INTEGER PK 隐式自增
+    assert pk["default"] is None  # 自增主键 default 置 None
+    user_id = next(f for f in body["fields"] if f["name"] == "user_id")
+    assert user_id["nullable"] is False
+    # 外键（on_delete 统一 RESTRICT）
+    assert len(body["foreign_keys"]) == 1
+    fk = body["foreign_keys"][0]
+    assert fk["referred_table"] == "users"
+    assert fk["columns"] == ["user_id"]
+    assert fk["on_delete"] == "RESTRICT"
+    # 索引
+    idx_names = [i["name"] for i in body["indexes"]]
+    assert "idx_posts_user" in idx_names
+
+
+@pytest.mark.django_db
+def test_reverse_table_unique_index_preserved(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """反向工程应保留显式唯一索引."""
+    user = make_user()
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _get(client, f"/api/v1/designer/{ds.pk}/tables/users/reverse", _auth(user))
+    assert response.status_code == 200
+    body = json.loads(response.content)
+    idx = next(i for i in body["indexes"] if i["name"] == "idx_users_email")
+    assert idx["unique"] is True
+    assert idx["columns"] == ["email"]
+
+
+@pytest.mark.django_db
+def test_reverse_table_not_found_returns_404(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """反向工程不存在的表应返回 404."""
+    user = make_user()
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _get(
+        client,
+        f"/api/v1/designer/{ds.pk}/tables/nonexistent/reverse",
+        _auth(user),
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_reverse_table_unknown_ds_returns_404(make_user: Callable[..., User]) -> None:
+    """反向工程不存在的数据源应返回 404."""
+    user = make_user()
+    client = Client()
+    response = _get(
+        client,
+        "/api/v1/designer/99999/tables/anything/reverse",
+        _auth(user),
+    )
+    assert response.status_code == 404
+
+
 # ---------- 认证 ----------
 
 
