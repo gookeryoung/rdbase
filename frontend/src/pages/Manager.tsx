@@ -39,6 +39,7 @@ import {
   FilterOutlined,
   MinusCircleOutlined,
   ClearOutlined,
+  TableOutlined,
 } from "@ant-design/icons";
 import { listDatasources } from "@/api/datasources";
 import { listSchemas, listTables, retrieveTable } from "@/api/designer";
@@ -65,9 +66,12 @@ import {
 import { useAuthStore } from "@/store/auth";
 import { isDesignerOrAdmin } from "@/utils/permission";
 import type {
+  ColumnMeta,
   DataSource,
   EngineType,
   ExportFormat,
+  ForeignKeyMeta,
+  IndexMeta,
   NameItem,
   ObjectUpdate,
   RoutineBrief,
@@ -78,6 +82,7 @@ import type {
   RowListResponse,
   RowQuery,
   TableBrief,
+  TableDetail,
   TriggerBrief,
   TriggerDetail,
   ViewDetail,
@@ -273,6 +278,16 @@ const Manager = () => {
   const [advFilters, setAdvFilters] = useState<AdvancedFilter[]>([]);
   // 高级筛选 Drawer 开关
   const [advFilterOpen, setAdvFilterOpen] = useState(false);
+  // 表完整元数据（由 retrieveTable 加载）
+  const [tableDetail, setTableDetail] = useState<TableDetail | null>(null);
+  // 表结构 Drawer 开关
+  const [structureOpen, setStructureOpen] = useState(false);
+  // 长字段查看 Modal 状态
+  const [longValueModal, setLongValueModal] = useState<{
+    column: string;
+    value: string;
+    isJson: boolean;
+  } | null>(null);
 
   // 编辑/新增 Modal 状态
   const [modalState, setModalState] = useState<ModalState>({
@@ -531,10 +546,17 @@ const Manager = () => {
       setFilterInputs({});
       // 切表时清空内存状态，持久化数据由下方 useEffect 加载
       setAdvFilters([]);
+      setTableDetail(null);
       if (selectedDsId != null) {
         retrieveTable(selectedDsId, tableName, schemaName)
-          .then((detail) => setPkColumns(detail.primary_key))
-          .catch(() => setPkColumns([]));
+          .then((detail) => {
+            setPkColumns(detail.primary_key);
+            setTableDetail(detail);
+          })
+          .catch(() => {
+            setPkColumns([]);
+            setTableDetail(null);
+          });
       }
       return;
     }
@@ -1023,9 +1045,37 @@ const Manager = () => {
           return String(val);
         }
         if (typeof val === "object") {
-          return JSON.stringify(val);
+          const json = JSON.stringify(val);
+          const truncated = json.length > 200 ? `${json.slice(0, 200)}...` : json;
+          return (
+            <Button
+              type="link"
+              size="small"
+              style={{ padding: 0, height: "auto", textAlign: "left" }}
+              onClick={() =>
+                setLongValueModal({ column: col, value: json, isJson: true })
+              }
+            >
+              {truncated}
+            </Button>
+          );
         }
-        return String(val);
+        const str = String(val);
+        if (str.length > 200) {
+          return (
+            <Button
+              type="link"
+              size="small"
+              style={{ padding: 0, height: "auto", textAlign: "left" }}
+              onClick={() =>
+                setLongValueModal({ column: col, value: str, isJson: false })
+              }
+            >
+              {`${str.slice(0, 200)}...`}
+            </Button>
+          );
+        }
+        return str;
       },
     }));
     // 操作列（designer+ 可见）
@@ -1214,6 +1264,12 @@ const Manager = () => {
                       onClick={() => setAdvFilterOpen(true)}
                     />
                   </Badge>
+                </Tooltip>
+                <Tooltip title="表结构">
+                  <Button
+                    icon={<TableOutlined />}
+                    onClick={() => setStructureOpen(true)}
+                  />
                 </Tooltip>
                 <Tooltip title="刷新">
                   <Button
@@ -1576,6 +1632,206 @@ const Manager = () => {
           )}
         </Space>
       </Drawer>
+      <Drawer
+        title={`表结构：${selectedTable?.name ?? ""}`}
+        placement="right"
+        width={720}
+        open={structureOpen}
+        onClose={() => setStructureOpen(false)}
+      >
+        {tableDetail ? (
+          <Space direction="vertical" size={16} style={{ width: "100%" }}>
+            {tableDetail.comment && (
+              <div>
+                <Text type="secondary">表注释：</Text>
+                <Text>{tableDetail.comment}</Text>
+              </div>
+            )}
+            <div>
+              <Title level={5} style={{ marginTop: 0 }}>
+                字段（{tableDetail.columns.length}）
+              </Title>
+              <Table<ColumnMeta>
+                size="small"
+                rowKey="name"
+                pagination={false}
+                scroll={{ x: "max-content" }}
+                dataSource={tableDetail.columns}
+                columns={[
+                  {
+                    title: "字段",
+                    dataIndex: "name",
+                    width: 140,
+                    render: (v: string, r) => (
+                      <Space size={4}>
+                        <Text strong>{v}</Text>
+                        {r.primary_key && <Tag color="gold">PK</Tag>}
+                      </Space>
+                    ),
+                  },
+                  { title: "类型", dataIndex: "type", width: 140 },
+                  {
+                    title: "可空",
+                    dataIndex: "nullable",
+                    width: 60,
+                    render: (v: boolean) => (v ? "YES" : "NO"),
+                  },
+                  {
+                    title: "默认",
+                    dataIndex: "default",
+                    width: 100,
+                    render: (v: string | null | undefined) =>
+                      v ?? <Text type="secondary">-</Text>,
+                  },
+                  {
+                    title: "属性",
+                    key: "attrs",
+                    render: (_, r) => (
+                      <Space size={4} wrap>
+                        {r.autoincrement && <Tag>AUTO</Tag>}
+                        {r.unique && <Tag color="blue">UNIQUE</Tag>}
+                        {r.comment && (
+                          <Text type="secondary" style={{ fontSize: 12 }}>
+                            {r.comment}
+                          </Text>
+                        )}
+                      </Space>
+                    ),
+                  },
+                ]}
+              />
+            </div>
+            {tableDetail.indexes.length > 0 && (
+              <div>
+                <Title level={5}>索引（{tableDetail.indexes.length}）</Title>
+                <Table<IndexMeta>
+                  size="small"
+                  rowKey="name"
+                  pagination={false}
+                  scroll={{ x: "max-content" }}
+                  dataSource={tableDetail.indexes}
+                  columns={[
+                    { title: "名称", dataIndex: "name", width: 180 },
+                    {
+                      title: "唯一",
+                      dataIndex: "unique",
+                      width: 60,
+                      render: (v: boolean) => (v ? "YES" : "NO"),
+                    },
+                    {
+                      title: "列",
+                      dataIndex: "columns",
+                      render: (v: string[]) => v.join(", "),
+                    },
+                  ]}
+                />
+              </div>
+            )}
+            {tableDetail.foreign_keys.length > 0 && (
+              <div>
+                <Title level={5}>外键（{tableDetail.foreign_keys.length}）</Title>
+                <Table<ForeignKeyMeta>
+                  size="small"
+                  rowKey={(r) => r.name ?? r.columns.join(",")}
+                  pagination={false}
+                  scroll={{ x: "max-content" }}
+                  dataSource={tableDetail.foreign_keys}
+                  columns={[
+                    {
+                      title: "名称",
+                      dataIndex: "name",
+                      width: 160,
+                      render: (v: string | null) =>
+                        v ?? <Text type="secondary">-</Text>,
+                    },
+                    {
+                      title: "本表列",
+                      dataIndex: "columns",
+                      render: (v: string[]) => v.join(", "),
+                    },
+                    {
+                      title: "引用表",
+                      dataIndex: "referred_table",
+                      width: 140,
+                    },
+                    {
+                      title: "引用列",
+                      dataIndex: "referred_columns",
+                      render: (v: string[]) => v.join(", "),
+                    },
+                  ]}
+                />
+              </div>
+            )}
+            {tableDetail.unique_constraints.length > 0 && (
+              <div>
+                <Title level={5}>
+                  唯一约束（{tableDetail.unique_constraints.length}）
+                </Title>
+                <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                  {tableDetail.unique_constraints.map((cols, idx) => (
+                    <div key={idx}>
+                      <Tag color="blue">UNIQUE</Tag>
+                      <Text>{cols.join(", ")}</Text>
+                    </div>
+                  ))}
+                </Space>
+              </div>
+            )}
+          </Space>
+        ) : (
+          <Empty description="正在加载表结构..." style={{ marginTop: 60 }} />
+        )}
+      </Drawer>
+      <Modal
+        title={
+          longValueModal
+            ? `字段内容：${longValueModal.column}`
+            : "字段内容"
+        }
+        open={longValueModal != null}
+        onCancel={() => setLongValueModal(null)}
+        footer={[
+          <Button key="close" onClick={() => setLongValueModal(null)}>
+            关闭
+          </Button>,
+        ]}
+        width={780}
+        destroyOnClose
+      >
+        {longValueModal && (
+          <Space direction="vertical" size={8} style={{ width: "100%" }}>
+            <Space size={8}>
+              <Text type="secondary">长度：</Text>
+              <Text>{longValueModal.value.length}</Text>
+              {longValueModal.isJson && <Tag color="geekblue">JSON</Tag>}
+            </Space>
+            <div
+              style={{
+                border: "1px solid #f0f0f0",
+                borderRadius: 4,
+                overflow: "hidden",
+              }}
+            >
+              <Editor
+                height="420px"
+                defaultLanguage={longValueModal.isJson ? "json" : "plaintext"}
+                value={longValueModal.value}
+                theme="vs"
+                options={{
+                  readOnly: true,
+                  minimap: { enabled: false },
+                  fontSize: 13,
+                  scrollBeyondLastLine: false,
+                  automaticLayout: true,
+                  tabSize: 2,
+                  wordWrap: "on",
+                }}
+              />
+            </div>
+          </Space>
+        )}
+      </Modal>
     </Layout>
   );
 };
