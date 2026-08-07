@@ -398,6 +398,69 @@ def test_alter_table_modify_column_sqlite_pk_raises() -> None:
         generate_alter_table(old, new, EngineType.SQLITE)
 
 
+def test_alter_table_modify_column_sqlite_unique_to_index() -> None:
+    """SQLite 修改字段加 UNIQUE 应拆为 DROP+ADD（不含 UNIQUE）+ CREATE UNIQUE INDEX."""
+    old = _make_spec(
+        fields=[
+            FieldSpec(name="id", type="INTEGER", nullable=False, primary_key=True),
+            FieldSpec(name="email", type="VARCHAR", length=100, nullable=True, unique=False),
+        ]
+    )
+    new = _make_spec(
+        fields=[
+            FieldSpec(name="id", type="INTEGER", nullable=False, primary_key=True),
+            FieldSpec(name="email", type="VARCHAR", length=100, nullable=True, unique=True),
+        ]
+    )
+    result = generate_alter_table(old, new, EngineType.SQLITE)
+    add_stmt = next(s for s in result.statements if "ADD COLUMN" in s)
+    # ADD COLUMN 不含 UNIQUE 关键字（SQLite ADD COLUMN 限制）
+    assert "UNIQUE" not in add_stmt
+    # 额外生成 CREATE UNIQUE INDEX，索引名约定 uq_<表名>_<列名>
+    idx_stmt = next(s for s in result.statements if "CREATE UNIQUE INDEX" in s)
+    assert "uq_users_email" in idx_stmt
+    assert '"email"' in idx_stmt
+    # CREATE UNIQUE INDEX 在 ADD COLUMN 之后
+    assert result.statements.index(idx_stmt) > result.statements.index(add_stmt)
+
+
+def test_alter_table_add_column_sqlite_unique_to_index() -> None:
+    """SQLite 新增 UNIQUE 字段应拆为 ADD COLUMN（不含 UNIQUE）+ CREATE UNIQUE INDEX."""
+    old = _make_spec(fields=[FieldSpec(name="id", type="INTEGER", nullable=False, primary_key=True)])
+    new = _make_spec(
+        fields=[
+            FieldSpec(name="id", type="INTEGER", nullable=False, primary_key=True),
+            FieldSpec(name="email", type="VARCHAR", length=100, nullable=True, unique=True),
+        ]
+    )
+    result = generate_alter_table(old, new, EngineType.SQLITE)
+    add_stmt = next(s for s in result.statements if "ADD COLUMN" in s)
+    assert "UNIQUE" not in add_stmt
+    idx_stmt = next(s for s in result.statements if "CREATE UNIQUE INDEX" in s)
+    assert "uq_users_email" in idx_stmt
+
+
+def test_alter_table_modify_column_sqlite_drop_unique_no_index() -> None:
+    """SQLite 取消字段 UNIQUE 不应生成 CREATE UNIQUE INDEX（旧索引随 DROP COLUMN 删除）."""
+    old = _make_spec(
+        fields=[
+            FieldSpec(name="id", type="INTEGER", nullable=False, primary_key=True),
+            FieldSpec(name="email", type="VARCHAR", length=100, nullable=True, unique=True),
+        ]
+    )
+    new = _make_spec(
+        fields=[
+            FieldSpec(name="id", type="INTEGER", nullable=False, primary_key=True),
+            FieldSpec(name="email", type="VARCHAR", length=200, nullable=True, unique=False),
+        ]
+    )
+    result = generate_alter_table(old, new, EngineType.SQLITE)
+    add_stmt = next(s for s in result.statements if "ADD COLUMN" in s)
+    assert "UNIQUE" not in add_stmt
+    # new_f.unique=False，不应生成 CREATE UNIQUE INDEX
+    assert not any("CREATE UNIQUE INDEX" in s for s in result.statements)
+
+
 def test_alter_table_add_drop_index() -> None:
     """索引差异应生成 CREATE INDEX / DROP INDEX."""
     old = _make_spec(

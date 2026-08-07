@@ -258,13 +258,16 @@ def _format_alter_column(
     old_f: FieldSpec,
     new_f: FieldSpec,
     dialect: str,
+    *,
+    table_name: str = "",
 ) -> list[str]:
     """生成修改字段定义的 ALTER 语句（不含重命名）.
 
     - MySQL: 用 MODIFY COLUMN 重写完整列定义
     - PostgreSQL: 拆分为 ALTER COLUMN TYPE / SET NOT NULL / SET DEFAULT 等多条语句
     - SQLite: 不支持直接修改字段定义，用 DROP COLUMN + ADD COLUMN 替代（会丢失原列数据）；
-      主键字段不允许此操作（SQLite DROP COLUMN 不允许删除主键列），抛 DDLError。
+      主键字段不允许此操作（SQLite DROP COLUMN 不允许删除主键列），抛 DDLError；
+      ADD COLUMN 不允许 UNIQUE 约束，需用 CREATE UNIQUE INDEX 替代。
     """
     if dialect == EngineType.SQLITE:
         # SQLite 不支持 ALTER COLUMN，用 DROP + ADD 替代；主键字段不允许删除（SQLite 限制）
@@ -273,10 +276,17 @@ def _format_alter_column(
                 f"SQLite 不支持修改主键字段 {old_f.name} 的定义：DROP COLUMN 不允许删除主键列，请保留原主键定义或重建表"
             )
         col_ref = _quote_ident(old_f.name, dialect)
-        return [
+        # SQLite ADD COLUMN 不允许 UNIQUE 约束，需用 CREATE UNIQUE INDEX 替代
+        add_field = new_f.model_copy(update={"unique": False})
+        stmts = [
             f"ALTER TABLE {table_ref} DROP COLUMN {col_ref}",
-            f"ALTER TABLE {table_ref} ADD COLUMN {_format_column_def(new_f, dialect)}",
+            f"ALTER TABLE {table_ref} ADD COLUMN {_format_column_def(add_field, dialect)}",
         ]
+        if new_f.unique and not new_f.primary_key:
+            # 索引名约定：uq_<表名>_<列名>；命名冲突时由 SQLite 报错，用户可重命名
+            idx_name = f"uq_{table_name}_{new_f.name}" if table_name else f"uq_{new_f.name}"
+            stmts.append(f"CREATE UNIQUE INDEX {_quote_ident(idx_name, dialect)} ON {table_ref} ({col_ref})")
+        return stmts
 
     if dialect == EngineType.MYSQL:
         # MySQL MODIFY COLUMN 重写完整列定义（包含主键与注释）；主键字段需内联 PRIMARY KEY 保留约束
@@ -365,15 +375,24 @@ def generate_alter_table(  # noqa: PLR0912
     # 3. 新增字段
     for name in new_fields.keys() - old_fields.keys():
         field = new_fields[name]
-        col_def = _format_column_def(field, dialect)
-        statements.append(f"ALTER TABLE {table_ref} ADD COLUMN {col_def}")
+        if dialect == EngineType.SQLITE and field.unique and not field.primary_key:
+            # SQLite ADD COLUMN 不允许 UNIQUE，需用 CREATE UNIQUE INDEX 替代
+            add_field = field.model_copy(update={"unique": False})
+            statements.append(f"ALTER TABLE {table_ref} ADD COLUMN {_format_column_def(add_field, dialect)}")
+            idx_name = f"uq_{new_spec.name}_{field.name}"
+            statements.append(
+                f"CREATE UNIQUE INDEX {_quote_ident(idx_name, dialect)} ON {table_ref} ({_quote_ident(field.name, dialect)})"
+            )
+        else:
+            col_def = _format_column_def(field, dialect)
+            statements.append(f"ALTER TABLE {table_ref} ADD COLUMN {col_def}")
 
     # 4. 修改字段定义（类型/可空/默认/注释/约束）
     for name in old_fields.keys() & new_fields.keys():
         old_f = old_fields[name]
         new_f = new_fields[name]
         if _field_attrs_changed(old_f, new_f):
-            statements.extend(_format_alter_column(table_ref, old_f, new_f, dialect))
+            statements.extend(_format_alter_column(table_ref, old_f, new_f, dialect, table_name=new_spec.name))
 
     # 5. 索引差异（按名称匹配）
     old_idx = {i.name: i for i in old_spec.indexes}

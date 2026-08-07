@@ -783,6 +783,47 @@ def test_apply_draft_auto_create_when_table_absent(make_user: Callable[..., User
 
 
 @pytest.mark.django_db
+def test_apply_draft_alter_field_unique_uses_index(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """表已存在，修改非主键字段加 UNIQUE 应通过 CREATE UNIQUE INDEX 实现（SQLite ADD COLUMN 限制）."""
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_ds(tmp_path)
+    engine = create_engine(f"sqlite:///{ds.database}", future=True)
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, name VARCHAR(50) NOT NULL)"))
+    engine.dispose()
+    # 草稿 spec：name 字段加 UNIQUE
+    new_spec = _make_spec_dict(
+        fields=[
+            {"name": "id", "type": "INTEGER", "nullable": False, "primary_key": True, "autoincrement": True},
+            {"name": "name", "type": "VARCHAR", "length": 50, "nullable": False, "unique": True},
+        ]
+    )
+    draft = DesignDraft.objects.create(
+        name="draft1",
+        datasource=ds,
+        table_name="users",
+        spec=new_spec,
+    )
+    client = Client()
+    response = _post(client, f"/api/v1/designer/drafts/{draft.pk}/apply", {}, _auth(user))
+    assert response.status_code == 200, response.content
+    data = json.loads(response.content)
+    # 应生成 DROP COLUMN + ADD COLUMN（不含 UNIQUE）+ CREATE UNIQUE INDEX
+    stmts = data["statements"]
+    assert any("DROP COLUMN" in s and '"name"' in s for s in stmts)
+    add_stmt = next(s for s in stmts if "ADD COLUMN" in s)
+    assert "UNIQUE" not in add_stmt  # SQLite ADD COLUMN 不允许 UNIQUE
+    assert any("CREATE UNIQUE INDEX" in s and "uq_users_name" in s for s in stmts)
+    # 验证目标表 name 列确实有 UNIQUE 约束（通过唯一索引实现）
+    engine = create_engine(f"sqlite:///{ds.database}", future=True)
+    try:
+        idxs = sa_inspect(engine).get_indexes("users")
+        assert any(i.get("unique") for i in idxs), "应有至少一个唯一索引"
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.django_db
 def test_preview_ddl_auto_alter_when_table_exists(make_user: Callable[..., User], tmp_path: Path) -> None:
     """DDL 预览：表已存在且未传 old_spec 应自动反射生成 ALTER；新增字段生成 ADD COLUMN."""
     user = make_user(role=Role.VIEWER)
