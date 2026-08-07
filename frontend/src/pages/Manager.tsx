@@ -19,6 +19,8 @@ import {
   Popconfirm,
   Upload,
   Tag,
+  Badge,
+  Drawer,
   message,
 } from "antd";
 import type { ColumnsType, TableProps } from "antd/es/table";
@@ -34,6 +36,9 @@ import {
   DownloadOutlined,
   UploadOutlined,
   EyeOutlined,
+  FilterOutlined,
+  MinusCircleOutlined,
+  ClearOutlined,
 } from "@ant-design/icons";
 import { listDatasources } from "@/api/datasources";
 import { listSchemas, listTables, retrieveTable } from "@/api/designer";
@@ -68,6 +73,8 @@ import type {
   RoutineBrief,
   RoutineDetail,
   RoutineKind,
+  RowFilter,
+  RowFilterOp,
   RowListResponse,
   RowQuery,
   TableBrief,
@@ -96,6 +103,85 @@ const errMsg = (err: unknown, fallback: string): string => {
 // 判断值是否为数字（用于表单控件选择 Input vs InputNumber）
 const isNumericValue = (val: unknown): boolean =>
   typeof val === "number" || (typeof val === "string" && /^-?\d+(\.\d+)?$/.test(val));
+
+// 高级筛选条件（多列 AND 组合，value 统一为字符串，提交时按操作符转换）
+interface AdvancedFilter {
+  column: string;
+  op: RowFilterOp;
+  value: string;
+}
+
+// 高级筛选操作符选项（与后端 _COMPARATORS 对齐：eq/ne/gt/lt/ge/le/like/in）
+const ADV_FILTER_OPS: { value: RowFilterOp; label: string }[] = [
+  { value: "eq", label: "等于 =" },
+  { value: "ne", label: "不等于 <>" },
+  { value: "gt", label: "大于 >" },
+  { value: "ge", label: "大于等于 >=" },
+  { value: "lt", label: "小于 <" },
+  { value: "le", label: "小于等于 <=" },
+  { value: "like", label: "包含 LIKE" },
+  { value: "in", label: "包含于 IN" },
+];
+
+// 高级筛选 localStorage 键名（按数据源 ID + 表名分键，避免不同表/库互相污染）
+const advFiltersStorageKey = (dsId: number, tableName: string): string =>
+  `rdbase:advFilters:${dsId}:${tableName}`;
+
+// 安全读取 localStorage（解析失败返回 fallback）
+const safeReadAdv = <T,>(key: string, fallback: T): T => {
+  const raw = localStorage.getItem(key);
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+};
+
+// 安全写入 localStorage（配额满或隐私模式静默忽略）
+const safeWriteAdv = (key: string, value: unknown): void => {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // 隐私模式或配额满，静默忽略
+  }
+};
+
+// 将高级筛选条件转换为后端 filters dict（不含列头模糊筛选，由调用方合并）
+// - like: 自动包裹 %val%
+// - in: 逗号分隔转列表，全数字时转 number[]
+// - 比较类: 数字字符串自动转 number
+// 空值条件跳过（不生成 filter）
+const buildAdvancedFilters = (
+  advFilters: AdvancedFilter[]
+): Record<string, RowFilter> => {
+  const result: Record<string, RowFilter> = {};
+  advFilters.forEach(({ column, op, value }) => {
+    if (!column || !op) return;
+    if (op === "like") {
+      const trimmed = value.trim();
+      if (trimmed) result[column] = { op: "like", val: `%${trimmed}%` };
+    } else if (op === "in") {
+      const items = value
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+      if (items.length > 0) {
+        const allNumeric = items.every((s) => /^-?\d+(\.\d+)?$/.test(s));
+        result[column] = {
+          op: "in",
+          val: allNumeric ? items.map(Number) : items,
+        };
+      }
+    } else {
+      const trimmed = value.trim();
+      if (!trimmed) return;
+      const isNumeric = /^-?\d+(\.\d+)?$/.test(trimmed);
+      result[column] = { op, val: isNumeric ? Number(trimmed) : trimmed };
+    }
+  });
+  return result;
+};
 
 // Modal 表单模式
 type ModalMode = "create" | "edit";
@@ -183,6 +269,10 @@ const Manager = () => {
   const [visibleCols, setVisibleCols] = useState<string[] | null>(null);
   // 列头筛选输入：列名 → 关键词（like 模糊匹配）
   const [filterInputs, setFilterInputs] = useState<Record<string, string>>({});
+  // 高级筛选条件列表（多列 AND 组合，多种操作符）
+  const [advFilters, setAdvFilters] = useState<AdvancedFilter[]>([]);
+  // 高级筛选 Drawer 开关
+  const [advFilterOpen, setAdvFilterOpen] = useState(false);
 
   // 编辑/新增 Modal 状态
   const [modalState, setModalState] = useState<ModalState>({
@@ -439,6 +529,8 @@ const Manager = () => {
       setOrderDir("asc");
       setVisibleCols(null);
       setFilterInputs({});
+      // 切表时清空内存状态，持久化数据由下方 useEffect 加载
+      setAdvFilters([]);
       if (selectedDsId != null) {
         retrieveTable(selectedDsId, tableName, schemaName)
           .then((detail) => setPkColumns(detail.primary_key))
@@ -597,12 +689,15 @@ const Manager = () => {
   const loadRows = useCallback(async () => {
     if (selectedDsId == null || !selectedTable) return;
     setLoadingRows(true);
-    // 构造 filters：非空关键词转 like 模糊匹配
-    const filters: Record<string, { op: "like"; val: string }> = {};
+    // 构造 filters：先放列头模糊匹配（like），再叠加高级筛选（同列时后者覆盖）
+    const filters: Record<string, RowFilter> = {};
     Object.entries(filterInputs).forEach(([col, kw]) => {
       if (kw.trim()) {
         filters[col] = { op: "like", val: `%${kw.trim()}%` };
       }
+    });
+    Object.entries(buildAdvancedFilters(advFilters)).forEach(([col, cond]) => {
+      filters[col] = cond;
     });
     const params: RowQuery = {
       schema_name: selectedTable.schemaName,
@@ -638,11 +733,29 @@ const Manager = () => {
     orderDir,
     visibleCols,
     filterInputs,
+    advFilters,
   ]);
 
   useEffect(() => {
     void loadRows();
   }, [loadRows]);
+
+  // 切换数据源/表时加载持久化的高级筛选条件
+  useEffect(() => {
+    if (selectedDsId == null || !selectedTable) {
+      setAdvFilters([]);
+      return;
+    }
+    const key = advFiltersStorageKey(selectedDsId, selectedTable.name);
+    setAdvFilters(safeReadAdv<AdvancedFilter[]>(key, []));
+  }, [selectedDsId, selectedTable]);
+
+  // advFilters 变化时持久化（仅在已选定表时写入，避免清空时机错位覆盖）
+  useEffect(() => {
+    if (selectedDsId == null || !selectedTable) return;
+    const key = advFiltersStorageKey(selectedDsId, selectedTable.name);
+    safeWriteAdv(key, advFilters);
+  }, [advFilters, selectedDsId, selectedTable]);
 
   // 列头排序点击
   const handleTableChange: TableProps<Record<string, unknown>>["onChange"] = (
@@ -668,6 +781,43 @@ const Manager = () => {
   // 列头筛选输入变更
   const handleFilterInputChange = (col: string, value: string) => {
     setFilterInputs((prev) => ({ ...prev, [col]: value }));
+    setPage(1);
+  };
+
+  // 高级筛选：当前生效的条件数（用于工具栏 Badge 显示）
+  const activeAdvFilterCount = useMemo(
+    () => Object.keys(buildAdvancedFilters(advFilters)).length,
+    [advFilters]
+  );
+
+  // 新增一条空的高级筛选条件
+  const handleAdvFilterAdd = () => {
+    if (columns.length === 0) return;
+    setAdvFilters((prev) => [
+      ...prev,
+      { column: columns[0], op: "eq", value: "" },
+    ]);
+  };
+
+  // 修改某一条高级筛选条件字段
+  const handleAdvFilterChange = (
+    idx: number,
+    patch: Partial<AdvancedFilter>
+  ) => {
+    setAdvFilters((prev) =>
+      prev.map((f, i) => (i === idx ? { ...f, ...patch } : f))
+    );
+  };
+
+  // 删除某一条高级筛选条件
+  const handleAdvFilterRemove = (idx: number) => {
+    setAdvFilters((prev) => prev.filter((_, i) => i !== idx));
+    setPage(1);
+  };
+
+  // 清空所有高级筛选条件
+  const handleAdvFilterClear = () => {
+    setAdvFilters([]);
     setPage(1);
   };
 
@@ -1057,6 +1207,14 @@ const Manager = () => {
                     <Button icon={<ColumnHeightOutlined />} />
                   </Dropdown>
                 </Tooltip>
+                <Tooltip title="高级筛选">
+                  <Badge count={activeAdvFilterCount} size="small" offset={[-2, 2]}>
+                    <Button
+                      icon={<FilterOutlined />}
+                      onClick={() => setAdvFilterOpen(true)}
+                    />
+                  </Badge>
+                </Tooltip>
                 <Tooltip title="刷新">
                   <Button
                     icon={<ReloadOutlined />}
@@ -1145,10 +1303,10 @@ const Manager = () => {
                 {canEdit && (
                   <Popconfirm
                     title={`确认删除该${selectedObject.kind === "view"
-                        ? "视图"
-                        : selectedObject.kind === "routine"
-                          ? "例程"
-                          : "触发器"
+                      ? "视图"
+                      : selectedObject.kind === "routine"
+                        ? "例程"
+                        : "触发器"
                       }？`}
                     okText="删除"
                     okButtonProps={{ danger: true }}
@@ -1316,6 +1474,108 @@ const Manager = () => {
           </Upload.Dragger>
         </Space>
       </Modal>
+      <Drawer
+        title="高级筛选"
+        placement="right"
+        width={520}
+        open={advFilterOpen}
+        onClose={() => setAdvFilterOpen(false)}
+        extra={
+          <Space>
+            <Button
+              icon={<ClearOutlined />}
+              onClick={handleAdvFilterClear}
+              disabled={advFilters.length === 0}
+            >
+              清空
+            </Button>
+            <Button
+              type="primary"
+              icon={<PlusOutlined />}
+              onClick={handleAdvFilterAdd}
+              disabled={columns.length === 0}
+            >
+              添加条件
+            </Button>
+          </Space>
+        }
+      >
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            多列条件以 AND 连接；同列上若同时存在列头模糊匹配与高级筛选，高级筛选优先。
+            LIKE 自动包裹 %；IN 用英文逗号分隔多个值。条件按数据源+表持久化到本地。
+          </Text>
+          {advFilters.length === 0 ? (
+            <Empty
+              description="暂无筛选条件，点击「添加条件」开始"
+              style={{ marginTop: 40 }}
+            />
+          ) : (
+            advFilters.map((f, idx) => (
+              <div
+                key={idx}
+                style={{
+                  display: "flex",
+                  alignItems: "flex-start",
+                  gap: 6,
+                  width: "100%",
+                }}
+              >
+                <Select
+                  style={{ width: 140, flexShrink: 0 }}
+                  placeholder="列"
+                  value={f.column || undefined}
+                  showSearch
+                  optionFilterProp="value"
+                  onChange={(v) => handleAdvFilterChange(idx, { column: v })}
+                  options={columns.map((c) => ({ value: c, label: c }))}
+                />
+                <Select
+                  style={{ width: 130, flexShrink: 0 }}
+                  value={f.op}
+                  onChange={(v) => handleAdvFilterChange(idx, { op: v })}
+                  options={ADV_FILTER_OPS}
+                />
+                <Input
+                  style={{ flex: 1, minWidth: 100 }}
+                  placeholder={
+                    f.op === "in" ? "值1,值2,值3" : "值"
+                  }
+                  value={f.value}
+                  onChange={(e) =>
+                    handleAdvFilterChange(idx, { value: e.target.value })
+                  }
+                  onPressEnter={() => {
+                    setPage(1);
+                    void loadRows();
+                  }}
+                  allowClear
+                />
+                <Button
+                  type="text"
+                  danger
+                  icon={<MinusCircleOutlined />}
+                  onClick={() => handleAdvFilterRemove(idx)}
+                  style={{ flexShrink: 0 }}
+                />
+              </div>
+            ))
+          )}
+          {advFilters.length > 0 && (
+            <Button
+              type="primary"
+              block
+              onClick={() => {
+                setPage(1);
+                void loadRows();
+                setAdvFilterOpen(false);
+              }}
+            >
+              应用筛选
+            </Button>
+          )}
+        </Space>
+      </Drawer>
     </Layout>
   );
 };
