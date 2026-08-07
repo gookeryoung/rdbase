@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     Layout,
     Select,
@@ -13,10 +13,16 @@ import {
     Switch,
     Alert,
     Dropdown,
+    Modal,
     message,
 } from "antd";
 import type { MenuProps } from "antd";
-import { PlusOutlined, PlayCircleOutlined, DownloadOutlined } from "@ant-design/icons";
+import {
+    PlusOutlined,
+    PlayCircleOutlined,
+    DownloadOutlined,
+    HistoryOutlined,
+} from "@ant-design/icons";
 import Editor from "@monaco-editor/react";
 import type { ColumnsType } from "antd/es/table";
 import { listDatasources } from "@/api/datasources";
@@ -61,8 +67,100 @@ interface QueryTab {
     error: string | null;
 }
 
+// 持久化的 Tab 形状（仅保留 SQL 内容与元数据，不存执行结果）
+interface PersistedTab {
+    key: string;
+    title: string;
+    sql: string;
+}
+
+// 历史执行记录
+interface SqlHistoryEntry {
+    sql: string;
+    executedAt: string; // ISO 时间
+    success: boolean;
+}
+
+// Monaco 选区最小结构（避免引入 monaco-editor 类型依赖）
+interface SelectionLike {
+    isEmpty(): boolean;
+    startLineNumber: number;
+    startColumn: number;
+    endLineNumber: number;
+    endColumn: number;
+}
+
+// Monaco 编辑器引用所需的最小接口
+interface MonacoEditorRef {
+    getValue: () => string;
+    getSelection: () => SelectionLike | null;
+    getModel: () => { getValueInRange(range: SelectionLike): string } | null;
+    addCommand: (keybinding: number, handler: () => void) => void;
+}
+
 // 初始 SQL 模板
 const DEFAULT_SQL = "-- 输入 SQL 后点击执行\nSELECT * FROM users LIMIT 10;\n";
+
+// 历史记录上限
+const HISTORY_LIMIT = 50;
+// 自动追加的 LIMIT 行数
+const DEFAULT_LIMIT = 1000;
+
+// localStorage 键名（按数据源 ID 分键）
+const tabsStorageKey = (dsId: number): string => `rdbase:sqlTabs:${dsId}`;
+const historyStorageKey = (dsId: number): string => `rdbase:sqlHistory:${dsId}`;
+
+// 安全读取 localStorage（解析失败返回 fallback）
+const safeRead = <T,>(key: string, fallback: T): T => {
+    const raw = localStorage.getItem(key);
+    if (!raw) return fallback;
+    try {
+        return JSON.parse(raw) as T;
+    } catch {
+        return fallback;
+    }
+};
+
+// 安全写入 localStorage（配额满或隐私模式静默忽略）
+const safeWrite = (key: string, value: unknown): void => {
+    try {
+        localStorage.setItem(key, JSON.stringify(value));
+    } catch {
+        // 忽略
+    }
+};
+
+// 加载指定数据源的持久化 Tab（无记录则返回单个默认 Tab）
+const loadPersistedTabs = (dsId: number): PersistedTab[] => {
+    const tabs = safeRead<PersistedTab[]>(tabsStorageKey(dsId), []);
+    if (tabs.length === 0) {
+        return [{ key: nextTabKey(), title: "查询 1", sql: DEFAULT_SQL }];
+    }
+    return tabs;
+};
+
+// 加载指定数据源的历史记录
+const loadPersistedHistory = (dsId: number): SqlHistoryEntry[] =>
+    safeRead<SqlHistoryEntry[]>(historyStorageKey(dsId), []);
+
+// 检测 SQL 是否为 SELECT/WITH 查询且未含 LIMIT 子句
+const isSelectWithoutLimit = (sql: string): boolean => {
+    // 去除行注释与块注释后判断
+    const cleaned = sql
+        .replace(/--[^\n]*/g, "")
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .trim();
+    if (!cleaned) return false;
+    const isQuery = /^\s*(SELECT|WITH)\b/i.test(cleaned);
+    if (!isQuery) return false;
+    return !/\bLIMIT\s+\d+/i.test(cleaned);
+};
+
+// 追加 LIMIT 子句（去除末尾分号后追加，再补回分号）
+const appendLimit = (sql: string, limit: number): string => {
+    const trimmed = sql.replace(/;\s*$/, "");
+    return `${trimmed} LIMIT ${limit};`;
+};
 
 let _tabSeq = 0;
 const nextTabKey = (): string => {
@@ -81,7 +179,7 @@ const makeTab = (title: string): QueryTab => ({
     error: null,
 });
 
-// SQL 控制台页：多 Tab + Monaco + 执行 + 结果表格 + 执行计划
+// SQL 控制台页：多 Tab + Monaco + 执行 + 结果表格 + 执行计划 + 历史持久化
 const SqlConsole = () => {
     const user = useAuthStore((state) => state.user);
     const canWrite = isDesignerOrAdmin(user);
@@ -91,8 +189,17 @@ const SqlConsole = () => {
     const [tabs, setTabs] = useState<QueryTab[]>([makeTab("查询 1")]);
     const [activeKey, setActiveKey] = useState<string>(tabs[0].key);
     const [analyze, setAnalyze] = useState(false);
-    // Monaco editor 主题（dark 适配深色编辑器）
-    const editorRefs = useRef<Record<string, { getValue: () => string } | undefined>>({});
+    const [history, setHistory] = useState<SqlHistoryEntry[]>([]);
+    // LIMIT 保护开关（默认开启）：对无 LIMIT 的 SELECT 执行前询问是否追加
+    const [limitGuard, setLimitGuard] = useState(true);
+
+    // Monaco editor 引用（按 tabKey 索引）
+    const editorRefs = useRef<Record<string, MonacoEditorRef | undefined>>({});
+    // 当前 tabs 所属的数据源 ID（用于持久化时写入正确的键）
+    const tabsDsIdRef = useRef<number | null>(null);
+    // 最新 tabs 与 handleExecute 的引用（供 Monaco 快捷键回调使用，避免闭包过期）
+    const tabsRef = useRef(tabs);
+    const handleExecuteRef = useRef<(tab: QueryTab) => void>(() => { });
 
     // 加载数据源列表
     const loadDatasources = useCallback(async () => {
@@ -115,6 +222,51 @@ const SqlConsole = () => {
 
     // 当前活动 Tab
     const activeTab = tabs.find((t) => t.key === activeKey) ?? tabs[0];
+
+    // 数据源切换时加载持久化的 Tab 与历史记录
+    useEffect(() => {
+        if (selectedDsId == null) return;
+        tabsDsIdRef.current = selectedDsId;
+        const persisted = loadPersistedTabs(selectedDsId);
+        const restored: QueryTab[] = persisted.map((t) => ({
+            key: t.key,
+            title: t.title,
+            sql: t.sql,
+            result: null,
+            explain: null,
+            loading: false,
+            explainLoading: false,
+            error: null,
+        }));
+        setTabs(restored);
+        setActiveKey(restored[0].key);
+        setHistory(loadPersistedHistory(selectedDsId));
+    }, [selectedDsId]);
+
+    // tabs 变化时持久化（写入 tabsDsIdRef 指向的数据源键）
+    useEffect(() => {
+        if (tabsDsIdRef.current == null) return;
+        const persisted: PersistedTab[] = tabs.map((t) => ({
+            key: t.key,
+            title: t.title,
+            sql: t.sql,
+        }));
+        safeWrite(tabsStorageKey(tabsDsIdRef.current), persisted);
+    }, [tabs]);
+
+    // history 变化时持久化
+    useEffect(() => {
+        if (tabsDsIdRef.current == null) return;
+        safeWrite(historyStorageKey(tabsDsIdRef.current), history);
+    }, [history]);
+
+    // 同步 tabs 与 handleExecute 的最新引用供快捷键回调使用
+    useEffect(() => {
+        tabsRef.current = tabs;
+    });
+    useEffect(() => {
+        handleExecuteRef.current = handleExecute;
+    });
 
     // 更新指定 Tab 状态
     const updateTab = (key: string, patch: Partial<QueryTab>) => {
@@ -145,26 +297,70 @@ const SqlConsole = () => {
         });
     };
 
-    // 执行 SQL
-    const handleExecute = async (tab: QueryTab) => {
-        if (selectedDsId == null) {
+    // 追加历史记录（保留最近 HISTORY_LIMIT 条）
+    const addHistory = (entry: SqlHistoryEntry) => {
+        setHistory((prev) => [entry, ...prev].slice(0, HISTORY_LIMIT));
+    };
+
+    // 执行 SQL（支持选中片段执行、LIMIT 保护、历史记录）
+    const handleExecute = (tab: QueryTab) => {
+        const dsId = selectedDsId;
+        if (dsId == null) {
             message.warning("请先选择数据源");
             return;
         }
-        const sql = editorRefs.current[tab.key]?.getValue() ?? tab.sql;
+        const editor = editorRefs.current[tab.key];
+        let sql: string;
+        if (editor) {
+            // 选中片段优先：选区非空时执行选中部分而非全文
+            const selection = editor.getSelection();
+            const selectedText =
+                selection && !selection.isEmpty()
+                    ? editor.getModel()?.getValueInRange(selection) ?? ""
+                    : "";
+            sql = selectedText.trim() ? selectedText : editor.getValue();
+        } else {
+            sql = tab.sql;
+        }
         if (!sql.trim()) {
             message.warning("SQL 不能为空");
             return;
         }
-        updateTab(tab.key, { loading: true, error: null });
-        try {
-            const result = await executeSql(selectedDsId, { sql });
-            updateTab(tab.key, { result, explain: null, loading: false });
-        } catch (err) {
-            const msg = errMsg(err, "执行失败");
-            updateTab(tab.key, { loading: false, error: msg });
-            message.error(msg);
+
+        // 内部执行函数（带历史记录）
+        const run = async (finalSql: string) => {
+            updateTab(tab.key, { loading: true, error: null });
+            let success = false;
+            try {
+                const result = await executeSql(dsId, { sql: finalSql });
+                updateTab(tab.key, { result, explain: null, loading: false });
+                success = true;
+            } catch (err) {
+                const msg = errMsg(err, "执行失败");
+                updateTab(tab.key, { loading: false, error: msg });
+                message.error(msg);
+            } finally {
+                addHistory({ sql: finalSql, executedAt: new Date().toISOString(), success });
+            }
+        };
+
+        // LIMIT 保护：对无 LIMIT 的 SELECT 询问是否追加
+        if (limitGuard && isSelectWithoutLimit(sql)) {
+            Modal.confirm({
+                title: "未检测到 LIMIT 子句",
+                content: `此 SELECT 语句未包含 LIMIT，是否自动追加 LIMIT ${DEFAULT_LIMIT} 后执行？`,
+                okText: "追加并执行",
+                cancelText: "原样执行",
+                onOk: () => {
+                    void run(appendLimit(sql, DEFAULT_LIMIT));
+                },
+                onCancel: () => {
+                    void run(sql);
+                },
+            });
+            return;
         }
+        void run(sql);
     };
 
     // 执行计划
@@ -229,9 +425,78 @@ const SqlConsole = () => {
         },
     });
 
-    // Monaco 编辑器挂载时保存引用
-    const handleEditorMount = (tabKey: string, editorInstance: unknown) => {
-        editorRefs.current[tabKey] = editorInstance as { getValue: () => string };
+    // 历史记录菜单（含清空选项，点击条目回填到当前 Tab）
+    const buildHistoryMenu = (): MenuProps => ({
+        items: [
+            ...(history.length > 0
+                ? [
+                    {
+                        key: "__clear",
+                        label: <Text type="danger">清空历史</Text>,
+                        danger: true,
+                    },
+                ]
+                : []),
+            ...history.map((h, idx) => ({
+                key: String(idx),
+                label: (
+                    <div style={{ maxWidth: 480, padding: "4px 0" }}>
+                        <div
+                            style={{
+                                fontSize: 11,
+                                color: h.success ? "#52c41a" : "#ff4d4f",
+                                marginBottom: 2,
+                            }}
+                        >
+                            {new Date(h.executedAt).toLocaleString()} ·{" "}
+                            {h.success ? "成功" : "失败"}
+                        </div>
+                        <div
+                            style={{
+                                whiteSpace: "pre-wrap",
+                                fontFamily: "monospace",
+                                fontSize: 12,
+                                maxHeight: 100,
+                                overflow: "hidden",
+                            }}
+                        >
+                            {h.sql.slice(0, 300)}
+                        </div>
+                    </div>
+                ),
+            })),
+        ],
+        onClick: ({ key }: { key: string }) => {
+            if (key === "__clear") {
+                setHistory([]);
+                return;
+            }
+            const idx = Number(key);
+            const entry = history[idx];
+            if (entry && activeTab) {
+                updateTab(activeTab.key, { sql: entry.sql });
+                message.success("已回填到当前 Tab");
+            }
+        },
+    });
+
+    // Monaco 编辑器挂载时保存引用并注册 Ctrl+Enter 快捷执行
+    const handleEditorMount = (
+        tabKey: string,
+        editorInstance: unknown,
+        monacoInstance: unknown
+    ) => {
+        const editor = editorInstance as MonacoEditorRef;
+        const monaco = monacoInstance as {
+            KeyMod: { CtrlCmd: number };
+            KeyCode: { Enter: number };
+        };
+        editorRefs.current[tabKey] = editor;
+        // Ctrl/Cmd + Enter 快捷执行当前 Tab（优先选中文本）
+        editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
+            const tab = tabsRef.current.find((t) => t.key === tabKey);
+            if (tab) handleExecuteRef.current(tab);
+        });
     };
 
     // 构造结果表格列定义
@@ -279,14 +544,16 @@ const SqlConsole = () => {
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                     <Space>
-                        <Button
-                            type="primary"
-                            icon={<PlayCircleOutlined />}
-                            loading={tab.loading}
-                            onClick={() => void handleExecute(tab)}
-                        >
-                            执行
-                        </Button>
+                        <Tooltip title="执行（Ctrl+Enter）">
+                            <Button
+                                type="primary"
+                                icon={<PlayCircleOutlined />}
+                                loading={tab.loading}
+                                onClick={() => handleExecute(tab)}
+                            >
+                                执行
+                            </Button>
+                        </Tooltip>
                         <Tooltip title="获取执行计划（EXPLAIN）">
                             <Button
                                 loading={tab.explainLoading}
@@ -344,7 +611,7 @@ const SqlConsole = () => {
                         defaultLanguage="sql"
                         value={tab.sql}
                         onChange={(val) => updateTab(tab.key, { sql: val ?? "" })}
-                        onMount={(editor) => handleEditorMount(tab.key, editor)}
+                        onMount={(editor, monaco) => handleEditorMount(tab.key, editor, monaco)}
                         theme="vs"
                         options={{
                             minimap: { enabled: false },
@@ -479,6 +746,35 @@ const SqlConsole = () => {
                     items={tabItems}
                     hideAdd
                     tabBarStyle={{ marginBottom: 12 }}
+                    tabBarExtraContent={
+                        <Space>
+                            <Tooltip title="开启后，对无 LIMIT 的 SELECT 语句执行前会询问是否追加 LIMIT 1000">
+                                <Space size={4}>
+                                    <Text type="secondary" style={{ fontSize: 12 }}>
+                                        LIMIT 保护
+                                    </Text>
+                                    <Switch
+                                        size="small"
+                                        checked={limitGuard}
+                                        onChange={setLimitGuard}
+                                    />
+                                </Space>
+                            </Tooltip>
+                            <Dropdown
+                                menu={buildHistoryMenu()}
+                                trigger={["click"]}
+                                placement="bottomRight"
+                            >
+                                <Button
+                                    size="small"
+                                    icon={<HistoryOutlined />}
+                                    disabled={history.length === 0}
+                                >
+                                    历史 ({history.length})
+                                </Button>
+                            </Dropdown>
+                        </Space>
+                    }
                 />
             </Content>
         </Layout>
