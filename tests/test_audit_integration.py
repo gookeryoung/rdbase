@@ -232,27 +232,26 @@ def test_designer_apply_ddl_failure_logs_audit(
     """应用 DDL 失败时也应记录 DDL_APPLY，status=FAILURE."""
     admin = make_user(role=Role.ADMIN)
     ds = _make_sqlite_file_ds(tmp_path)
-    # 预置同名表，使 CREATE TABLE 失败
+    # 预置表，使后续 DROP INDEX 不存在索引时执行失败
     engine = create_engine(f"sqlite:///{ds.database}", future=True)
     with engine.begin() as conn:
-        conn.execute(text("CREATE TABLE dup_t (id INTEGER)"))
+        conn.execute(text("CREATE TABLE dup_t (id INTEGER PRIMARY KEY)"))
     engine.dispose()
+    field = {
+        "name": "id",
+        "type": "INTEGER",
+        "nullable": False,
+        "primary_key": True,
+        "unique": False,
+        "autoincrement": False,
+    }
     draft = DesignDraft.objects.create(
         name="d2",
         datasource=ds,
-        table_name="dup_t",  # 重名 → CREATE 失败
+        table_name="dup_t",
         spec={
             "name": "dup_t",
-            "fields": [
-                {
-                    "name": "id",
-                    "type": "INTEGER",
-                    "nullable": False,
-                    "primary_key": True,
-                    "unique": False,
-                    "autoincrement": False,
-                }
-            ],
+            "fields": [field],
             "indexes": [],
             "foreign_keys": [],
         },
@@ -264,10 +263,17 @@ def test_designer_apply_ddl_failure_logs_audit(
         status=AuditStatus.FAILURE,
     ).count()
     client = Client()
+    # 传入含不存在索引的 old_spec，生成 DROP INDEX 在执行阶段失败
+    old_spec = {
+        "name": "dup_t",
+        "fields": [field],
+        "indexes": [{"name": "idx_no", "columns": ["id"], "unique": False}],
+        "foreign_keys": [],
+    }
     response = _post(
         client,
         f"/api/v1/designer/drafts/{draft.pk}/apply",
-        {},
+        {"old_spec": old_spec},
         _auth(admin),
     )
     assert response.status_code == 400

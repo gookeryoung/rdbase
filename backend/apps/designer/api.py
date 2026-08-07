@@ -10,12 +10,14 @@ P3-2 表设计器：草稿 CRUD、版本管理、DDL 预览与执行。
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict
 from typing import Any, cast
 
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from ninja import Router
 from ninja.errors import HttpError
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import text
 from sqlalchemy.exc import NoSuchTableError, SQLAlchemyError
 
@@ -28,7 +30,7 @@ from apps.datasources.engine import get_engine
 from apps.datasources.models import DataSource, EngineType
 
 from .ddl import DDLError, generate_ddl
-from .inspector import inspect_table, list_databases, list_schemas, list_tables, list_views
+from .inspector import TableMeta, inspect_table, list_databases, list_schemas, list_tables, list_views
 from .models import DesignDraft, DesignVersion, DraftStatus
 from .schemas import (
     ColumnOut,
@@ -434,6 +436,102 @@ def rollback_to_version_view(
     return JsonResponse(body)
 
 
+# ----- DDL 反射转 spec（用于自动判断 CREATE/ALTER）-----
+
+# 反射类型字符串解析：如 "VARCHAR(50)" → ("VARCHAR", 50)；"DECIMAL(10, 2)" → ("DECIMAL", 10)
+_REFLECTED_TYPE_RE = re.compile(r"^\s*(.+?)\s*(?:\(\s*(\d+)\s*(?:,\s*\d+\s*)?\))?\s*$")
+
+
+def _parse_reflected_type(type_str: str) -> tuple[str, int | None]:
+    """解析反射得到的类型字符串为基础类型与长度.
+
+    反射返回的 ``ColumnMeta.type`` 为完整类型字符串（如 ``VARCHAR(50)``、``INTEGER``），
+    需拆分为 ``FieldSpec.type`` 与 ``FieldSpec.length`` 以便与设计器 spec 对齐比较。
+    含精度的类型（如 ``DECIMAL(10, 2)``）仅取首位作为长度，scale 不参与比较。
+    """
+    m = _REFLECTED_TYPE_RE.match(type_str)
+    if not m:
+        return type_str.strip().upper(), None
+    base = m.group(1).strip().upper()
+    length = int(m.group(2)) if m.group(2) else None
+    return base, length
+
+
+def _reflect_table_to_spec(meta: TableMeta, dialect: str) -> TableDesignSpec:
+    """将反射的表元数据转为 TableDesignSpec，用作 ALTER 比较的 old_spec.
+
+    规整反射与设计器约定间"语义等价但表示不同"的差异，避免误判触发无意义 ALTER：
+    - 主键列强制 ``nullable=False``（主键必非空，部分方言反射返回 True）。
+    - SQLite 的 ``INTEGER PRIMARY KEY`` 隐式 ROWID 自增，对齐 ``autoincrement=True``。
+    - 自增主键的 default 规整为 None（序列由数据库隐含管理，反射得到的序列表达式
+      与设计器 None 不一致会误判为 default 变更）。
+    外键 on_delete 反射无法获取，统一填 RESTRICT（外键差异仅按 name 比较，不影响）。
+    """
+    fields: list[FieldSpec] = []
+    for col in meta.columns:
+        base_type, length = _parse_reflected_type(col.type)
+        # 主键列必非空
+        nullable = False if col.primary_key else col.nullable
+        autoincrement = col.autoincrement
+        if dialect == EngineType.SQLITE and col.primary_key and base_type in ("INTEGER", "INT"):
+            autoincrement = True
+        default = col.default
+        if autoincrement and col.primary_key:
+            default = None
+        fields.append(
+            FieldSpec(
+                name=col.name,
+                type=base_type,
+                length=length,
+                nullable=nullable,
+                default=default,
+                comment=col.comment,
+                primary_key=col.primary_key,
+                unique=col.unique,
+                autoincrement=autoincrement,
+            )
+        )
+    indexes = [IndexSpec(name=i.name, columns=list(i.columns), unique=i.unique) for i in meta.indexes]
+    foreign_keys = [
+        ForeignKeySpec(
+            name=fk.name,
+            columns=list(fk.columns),
+            referred_table=fk.referred_table,
+            referred_columns=list(fk.referred_columns),
+            on_delete="RESTRICT",
+        )
+        for fk in meta.foreign_keys
+    ]
+    return TableDesignSpec(
+        name=meta.name,
+        schema_name=meta.schema,
+        comment=meta.comment,
+        fields=fields,
+        indexes=indexes,
+        foreign_keys=foreign_keys,
+    )
+
+
+def _resolve_old_spec(ds: DataSource, spec: TableDesignSpec) -> TableDesignSpec | None:
+    """根据目标表是否存在自动构造 old_spec.
+
+    表不存在时返回 None（走 CREATE）；存在时反射当前表结构转为 spec（走 ALTER）。
+    SQLite 无 schema 概念，强制 schema=None。
+    """
+    engine = get_engine(ds)
+    schema = spec.schema_name or None
+    dialect = cast(str, ds.engine)
+    if dialect == EngineType.SQLITE:
+        schema = None
+    if not sa_inspect(engine).has_table(spec.name, schema=schema):
+        return None
+    try:
+        meta = inspect_table(engine, spec.name, schema=schema)
+    except NoSuchTableError:
+        return None
+    return _reflect_table_to_spec(meta, dialect)
+
+
 # ----- DDL 预览与执行 -----
 
 
@@ -441,12 +539,16 @@ def rollback_to_version_view(
 def preview_ddl_view(request: HttpRequest, payload: DDLPreviewIn) -> HttpResponse:
     """预览 DDL 语句（所有登录用户）.
 
-    传入 ``old_spec`` 时生成 ALTER 语句；不传时生成 CREATE 语句。
+    传入 ``old_spec`` 时按显式 ALTER 生成；未传时自动判断：
+    目标表已存在则反射其结构作为 old_spec 生成 ALTER，否则生成 CREATE。
     """
     del request  # 仅认证用
     ds = _get_ds_or_404(payload.datasource_id)
+    old_spec = payload.old_spec
+    if old_spec is None:
+        old_spec = _resolve_old_spec(ds, payload.spec)
     try:
-        result = generate_ddl(payload.spec, cast(str, ds.engine), old_spec=payload.old_spec)
+        result = generate_ddl(payload.spec, cast(str, ds.engine), old_spec=old_spec)
     except DDLError as exc:
         raise HttpError(400, str(exc)) from None
     return JsonResponse({"statements": list(result.statements)})
@@ -460,15 +562,19 @@ def apply_draft_view(
 ) -> HttpResponse:
     """应用草稿：执行 DDL 到目标数据源（designer+）.
 
-    传入 ``old_spec`` 时执行 ALTER；不传时执行 CREATE。
+    传入 ``old_spec`` 时按显式 ALTER 执行；未传时自动判断：
+    目标表已存在则反射其结构作为 old_spec 执行 ALTER，否则执行 CREATE。
     执行成功后草稿状态置为 applied。
     """
     require_designer_or_admin(request)
     draft = _get_draft_or_404(draft_id)
     ds = draft.datasource
     spec = _dict_to_spec(cast("dict[str, Any]", draft.spec))
+    old_spec = payload.old_spec
+    if old_spec is None:
+        old_spec = _resolve_old_spec(ds, spec)
     try:
-        result = generate_ddl(spec, cast(str, ds.engine), old_spec=payload.old_spec)
+        result = generate_ddl(spec, cast(str, ds.engine), old_spec=old_spec)
     except DDLError as exc:
         raise HttpError(400, str(exc)) from None
     if not result.statements:

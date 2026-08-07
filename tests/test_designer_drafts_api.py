@@ -616,13 +616,13 @@ def test_apply_draft_unknown_returns_404(make_user: Callable[..., User]) -> None
 
 @pytest.mark.django_db
 def test_apply_draft_execution_failure_returns_400(make_user: Callable[..., User], tmp_path: Path) -> None:
-    """DDL 执行失败（如表已存在）应返回 400."""
+    """DDL 执行失败（如删除不存在的索引）应返回 400."""
     user = make_user(role=Role.DESIGNER)
     ds = _make_sqlite_ds(tmp_path)
-    # 先创建旧表
+    # 先创建旧表（无索引）
     engine = create_engine(f"sqlite:///{ds.database}", future=True)
     with engine.begin() as conn:
-        conn.execute(text("CREATE TABLE users (id INTEGER PRIMARY KEY)"))
+        conn.execute(text("CREATE TABLE users (id INTEGER PRIMARY KEY, name VARCHAR(50) NOT NULL)"))
     engine.dispose()
 
     draft = DesignDraft.objects.create(
@@ -632,10 +632,12 @@ def test_apply_draft_execution_failure_returns_400(make_user: Callable[..., User
         spec=_make_spec_dict(),
     )
     client = Client()
+    # 传入含不存在索引的 old_spec，触发 DROP INDEX 执行失败
+    old_spec = _make_spec_dict(indexes=[{"name": "idx_nonexistent", "columns": ["name"], "unique": False}])
     response = _post(
         client,
         f"/api/v1/designer/drafts/{draft.pk}/apply",
-        {},
+        {"old_spec": old_spec},
         _auth(user),
     )
     assert response.status_code == 400
@@ -695,3 +697,129 @@ def test_apply_draft_with_old_spec_alters_table(make_user: Callable[..., User], 
     data = json.loads(response.content)
     # 无变更时 executed=0
     assert data["executed"] == 0
+
+
+@pytest.mark.django_db
+def test_apply_draft_auto_alter_when_table_exists(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """表已存在且未传 old_spec 时应自动反射走 ALTER；spec 与表一致时 executed=0."""
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_ds(tmp_path)
+    # 先创建与草稿 spec 一致的表
+    engine = create_engine(f"sqlite:///{ds.database}", future=True)
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE users (id INTEGER PRIMARY KEY, name VARCHAR(50) NOT NULL)"))
+    engine.dispose()
+
+    draft = DesignDraft.objects.create(
+        name="draft1",
+        datasource=ds,
+        table_name="users",
+        spec=_make_spec_dict(),
+    )
+    client = Client()
+    # 不传 old_spec：表已存在应自动反射走 ALTER；spec 与表一致，executed=0
+    response = _post(client, f"/api/v1/designer/drafts/{draft.pk}/apply", {}, _auth(user))
+    assert response.status_code == 200
+    data = json.loads(response.content)
+    assert data["executed"] == 0
+
+
+@pytest.mark.django_db
+def test_apply_draft_auto_alter_add_column(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """表已存在且新增字段（未传 old_spec）应自动 ALTER ADD COLUMN."""
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_ds(tmp_path)
+    engine = create_engine(f"sqlite:///{ds.database}", future=True)
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE users (id INTEGER PRIMARY KEY, name VARCHAR(50) NOT NULL)"))
+    engine.dispose()
+
+    # 草稿 spec 在原表基础上新增 email 字段
+    new_spec = _make_spec_dict(
+        fields=[
+            {"name": "id", "type": "INTEGER", "nullable": False, "primary_key": True, "autoincrement": True},
+            {"name": "name", "type": "VARCHAR", "length": 50, "nullable": False},
+            {"name": "email", "type": "VARCHAR", "length": 100, "nullable": True},
+        ]
+    )
+    draft = DesignDraft.objects.create(
+        name="draft1",
+        datasource=ds,
+        table_name="users",
+        spec=new_spec,
+    )
+    client = Client()
+    response = _post(client, f"/api/v1/designer/drafts/{draft.pk}/apply", {}, _auth(user))
+    assert response.status_code == 200
+    data = json.loads(response.content)
+    assert data["executed"] == 1
+    assert "ADD COLUMN" in data["statements"][0]
+    # 验证目标表已新增 email 列
+    engine = create_engine(f"sqlite:///{ds.database}", future=True)
+    try:
+        cols = {c["name"] for c in sa_inspect(engine).get_columns("users")}
+        assert "email" in cols
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.django_db
+def test_apply_draft_auto_create_when_table_absent(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """表不存在且未传 old_spec 应走 CREATE."""
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_ds(tmp_path)
+    draft = DesignDraft.objects.create(
+        name="draft1",
+        datasource=ds,
+        table_name="users",
+        spec=_make_spec_dict(),
+    )
+    client = Client()
+    response = _post(client, f"/api/v1/designer/drafts/{draft.pk}/apply", {}, _auth(user))
+    assert response.status_code == 200
+    data = json.loads(response.content)
+    assert data["executed"] > 0
+    assert data["statements"][0].startswith("CREATE TABLE")
+
+
+@pytest.mark.django_db
+def test_preview_ddl_auto_alter_when_table_exists(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """DDL 预览：表已存在且未传 old_spec 应自动反射生成 ALTER；新增字段生成 ADD COLUMN."""
+    user = make_user(role=Role.VIEWER)
+    ds = _make_sqlite_ds(tmp_path)
+    engine = create_engine(f"sqlite:///{ds.database}", future=True)
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE users (id INTEGER PRIMARY KEY, name VARCHAR(50) NOT NULL)"))
+    engine.dispose()
+
+    new_spec = _make_spec_dict(
+        fields=[
+            {"name": "id", "type": "INTEGER", "nullable": False, "primary_key": True, "autoincrement": True},
+            {"name": "name", "type": "VARCHAR", "length": 50, "nullable": False},
+            {"name": "age", "type": "INTEGER", "nullable": True},
+        ]
+    )
+    client = Client()
+    body = {"datasource_id": ds.pk, "spec": new_spec}
+    response = _post(client, "/api/v1/designer/ddl/preview", body, _auth(user))
+    assert response.status_code == 200
+    data = json.loads(response.content)
+    assert any("ADD COLUMN" in s for s in data["statements"])
+
+
+@pytest.mark.django_db
+def test_preview_ddl_auto_alter_no_change(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """DDL 预览：表已存在且 spec 与表一致（未传 old_spec）应无 ALTER 语句."""
+    user = make_user(role=Role.VIEWER)
+    ds = _make_sqlite_ds(tmp_path)
+    engine = create_engine(f"sqlite:///{ds.database}", future=True)
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE users (id INTEGER PRIMARY KEY, name VARCHAR(50) NOT NULL)"))
+    engine.dispose()
+
+    client = Client()
+    body = {"datasource_id": ds.pk, "spec": _make_spec_dict()}
+    response = _post(client, "/api/v1/designer/ddl/preview", body, _auth(user))
+    assert response.status_code == 200
+    data = json.loads(response.content)
+    assert data["statements"] == []
