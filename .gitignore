@@ -6,6 +6,9 @@ dist/
 wheels/
 *.egg-info
 
+# 离线部署运行时产物
+backups/
+
 # Virtual environments
 .venv
 

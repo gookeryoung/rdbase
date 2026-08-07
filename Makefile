@@ -5,7 +5,7 @@ BACKEND_DIR := backend
 FRONTEND_DIR := frontend
 COV_THRESHOLD := 95
 
-.PHONY: help sync dev test cov lint typecheck check migrate makemigrations run-be run-fe doc tox bump patch minor major push
+.PHONY: help sync dev test cov lint typecheck check migrate makemigrations run-be run-fe doc tox bump patch minor major push pack
 
 help: ## 显示帮助信息
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z].*:.*##/ {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -63,3 +63,6 @@ patch minor major:
 
 push: ## 推送代码到所有远程仓库
 	@uv run python -c "import subprocess as sp; [print(f'\u63a8\u9001 {r}...',flush=True) or (sp.run(['git','push',r],check=True) and sp.run(['git','push',r,'--tags'],check=True)) for r in sp.check_output(['git','remote'],text=True).split()]"
+
+pack: ## 构建离线发布包到 dist/（联网环境运行）
+	uv run python scripts/offline_pack.py

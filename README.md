@@ -175,6 +175,51 @@ docker-compose ps
 
 可配置环境变量见 `.env.example`。
 
+## 离线内网部署
+
+面向无互联网的内网环境，提供一键打包、部署、备份、迁移脚本。
+
+### 打包（联网环境）
+
+```bash
+make pack
+# 或：uv run python scripts/offline_pack.py
+```
+
+产物 `dist/rdbase-offline-<version>.tar.gz`，内含后端代码、前端构建产物、collectstatic 静态文件、离线 wheels、冻结依赖清单、配置模板与部署脚本。
+
+> 前提：打包机须与目标机 OS/架构/Python 主版本一致，以确保 wheels 二进制兼容。
+
+### 部署（内网目标机）
+
+```bash
+tar -xzf rdbase-offline-<version>.tar.gz -C /opt/
+cd /opt/rdbase-offline-<version>
+
+# 一键部署：创建虚拟环境、离线安装依赖、迁移、收集静态、生成 .env
+python scripts/deploy.py
+
+# 编辑 .env 填入生产密钥与数据库配置后，再执行一次跳过安装的部署
+python scripts/deploy.py --skip-install
+
+# 启动后端（POSIX，先加载 .env）
+. ./.env && .venv/bin/gunicorn --config config/gunicorn.conf.py rdbase.asgi:application
+```
+
+前端静态文件由 `frontend/dist` 提供，可用 nginx 托管（参考 `config/nginx.conf`）并反代 `/api` 到后端。
+
+### 备份与迁移
+
+```bash
+# 一键备份平台库与 .env，保留最近 10 份
+python scripts/backup.py --keep 10
+
+# 从备份归档恢复（覆盖当前库与 .env，恢复后自动 migrate）
+python scripts/restore.py --file backups/rdbase-backup-<时间戳>.tar.gz --yes
+```
+
+数据库类型由 `DB_ENGINE` 环境变量决定（未设置时按 `DB_HOST` 是否存在推断）：PostgreSQL 调用 `pg_dump`/`pg_restore`（需目标机安装 postgresql-client），SQLite 直接复制文件。各脚本参数详见 `--help`。
+
 ## 许可证
 
 MIT
