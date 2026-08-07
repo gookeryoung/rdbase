@@ -9,7 +9,6 @@ import pytest
 from apps.datasources.models import EngineType
 from apps.designer.ddl import (
     DDLError,
-    DDLOperationNotSupported,
     generate_alter_table,
     generate_create_table,
     generate_ddl,
@@ -358,8 +357,8 @@ def test_alter_table_modify_column_postgresql_split() -> None:
     assert '"name"' in default_stmt
 
 
-def test_alter_table_modify_column_sqlite_raises() -> None:
-    """SQLite 不支持修改字段定义，应抛 DDLOperationNotSupported."""
+def test_alter_table_modify_column_sqlite_drop_add() -> None:
+    """SQLite 修改字段定义用 DROP COLUMN + ADD COLUMN 替代（非主键字段）."""
     old = _make_spec(
         fields=[
             FieldSpec(name="id", type="INTEGER", nullable=False, primary_key=True),
@@ -369,10 +368,33 @@ def test_alter_table_modify_column_sqlite_raises() -> None:
     new = _make_spec(
         fields=[
             FieldSpec(name="id", type="INTEGER", nullable=False, primary_key=True),
-            FieldSpec(name="name", type="VARCHAR", length=100, nullable=False),
+            FieldSpec(name="name", type="VARCHAR", length=100, nullable=True),
         ]
     )
-    with pytest.raises(DDLOperationNotSupported, match="SQLite 不支持修改字段定义"):
+    result = generate_alter_table(old, new, EngineType.SQLITE)
+    drop_stmt = next(s for s in result.statements if "DROP COLUMN" in s)
+    add_stmt = next(s for s in result.statements if "ADD COLUMN" in s)
+    assert '"name"' in drop_stmt
+    assert '"name" VARCHAR(100)' in add_stmt
+    # 新字段定义按 new_spec 重写：可空
+    assert "NOT NULL" not in add_stmt
+    # DROP 在 ADD 之前
+    assert result.statements.index(drop_stmt) < result.statements.index(add_stmt)
+
+
+def test_alter_table_modify_column_sqlite_pk_raises() -> None:
+    """SQLite 修改主键字段定义应抛 DDLError（DROP COLUMN 不允许删除主键列）."""
+    old = _make_spec(
+        fields=[
+            FieldSpec(name="id", type="INTEGER", nullable=False, primary_key=True, autoincrement=True),
+        ]
+    )
+    new = _make_spec(
+        fields=[
+            FieldSpec(name="id", type="BIGINT", nullable=False, primary_key=True, autoincrement=True),
+        ]
+    )
+    with pytest.raises(DDLError, match="主键字段 id"):
         generate_alter_table(old, new, EngineType.SQLITE)
 
 

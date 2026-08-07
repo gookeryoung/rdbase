@@ -9,7 +9,7 @@
 - 标识符引用：MySQL 用反引号，PG/SQLite 用双引号
 - 自增主键：MySQL ``AUTO_INCREMENT``、SQLite ``AUTOINCREMENT``、PostgreSQL ``SERIAL`` 替换 ``INTEGER``
 - 注释：MySQL 内联 ``COMMENT``、PostgreSQL 独立 ``COMMENT ON`` 语句、SQLite 忽略
-- 字段修改：MySQL ``MODIFY COLUMN`` 重写整列、PostgreSQL ``ALTER COLUMN`` 拆分多语句、SQLite 不支持
+- 字段修改：MySQL ``MODIFY COLUMN`` 重写整列、PostgreSQL ``ALTER COLUMN`` 拆分多语句、SQLite 用 ``DROP COLUMN`` + ``ADD COLUMN`` 替代（会丢失原列数据，主键字段不允许此操作）
 """
 
 from __future__ import annotations
@@ -37,10 +37,6 @@ _VALID_ON_DELETE: frozenset[str] = frozenset({"CASCADE", "SET NULL", "RESTRICT",
 
 class DDLError(ValueError):
     """DDL 生成错误（如方言不支持的操作、非法配置）."""
-
-
-class DDLOperationNotSupported(DDLError):
-    """DDL 操作在当前方言下不支持（如 SQLite 修改字段类型）."""
 
 
 @dataclass(frozen=True)
@@ -267,10 +263,20 @@ def _format_alter_column(
 
     - MySQL: 用 MODIFY COLUMN 重写完整列定义
     - PostgreSQL: 拆分为 ALTER COLUMN TYPE / SET NOT NULL / SET DEFAULT 等多条语句
-    - SQLite: 不支持修改字段定义，抛 DDLOperationNotSupported
+    - SQLite: 不支持直接修改字段定义，用 DROP COLUMN + ADD COLUMN 替代（会丢失原列数据）；
+      主键字段不允许此操作（SQLite DROP COLUMN 不允许删除主键列），抛 DDLError。
     """
     if dialect == EngineType.SQLITE:
-        raise DDLOperationNotSupported("SQLite 不支持修改字段定义，请使用 DROP COLUMN + ADD COLUMN 替代")
+        # SQLite 不支持 ALTER COLUMN，用 DROP + ADD 替代；主键字段不允许删除（SQLite 限制）
+        if old_f.primary_key:
+            raise DDLError(
+                f"SQLite 不支持修改主键字段 {old_f.name} 的定义：DROP COLUMN 不允许删除主键列，请保留原主键定义或重建表"
+            )
+        col_ref = _quote_ident(old_f.name, dialect)
+        return [
+            f"ALTER TABLE {table_ref} DROP COLUMN {col_ref}",
+            f"ALTER TABLE {table_ref} ADD COLUMN {_format_column_def(new_f, dialect)}",
+        ]
 
     if dialect == EngineType.MYSQL:
         # MySQL MODIFY COLUMN 重写完整列定义（包含主键与注释）；主键字段需内联 PRIMARY KEY 保留约束
@@ -416,7 +422,6 @@ def generate_ddl(
 
 __all__ = [
     "DDLError",
-    "DDLOperationNotSupported",
     "DDLResult",
     "generate_alter_table",
     "generate_create_table",
