@@ -12,16 +12,24 @@ import {
     Tooltip,
     Switch,
     Alert,
+    Dropdown,
     message,
 } from "antd";
-import { PlusOutlined, PlayCircleOutlined } from "@ant-design/icons";
+import type { MenuProps } from "antd";
+import { PlusOutlined, PlayCircleOutlined, DownloadOutlined } from "@ant-design/icons";
 import Editor from "@monaco-editor/react";
 import type { ColumnsType } from "antd/es/table";
 import { listDatasources } from "@/api/datasources";
-import { executeSql, explainSql } from "@/api/manager";
+import { executeSql, explainSql, exportSqlResult } from "@/api/manager";
 import { useAuthStore } from "@/store/auth";
 import { isDesignerOrAdmin } from "@/utils/permission";
-import type { DataSource, EngineType, ExplainResult, SqlResult } from "@/types";
+import type {
+    DataSource,
+    EngineType,
+    ExplainResult,
+    SqlExportFormat,
+    SqlResult,
+} from "@/types";
 
 const { Content } = Layout;
 const { Text, Paragraph } = Typography;
@@ -181,6 +189,46 @@ const SqlConsole = () => {
         }
     };
 
+    // 导出当前 Tab 的 SQL 结果集（强制只读，DDL/DML 会被后端拒绝）
+    const handleExportSql = async (tab: QueryTab, format: SqlExportFormat) => {
+        if (selectedDsId == null) {
+            message.warning("请先选择数据源");
+            return;
+        }
+        const sql = editorRefs.current[tab.key]?.getValue() ?? tab.sql;
+        if (!sql.trim()) {
+            message.warning("SQL 不能为空");
+            return;
+        }
+        try {
+            const blob = await exportSqlResult(selectedDsId, { sql, format });
+            const filename = `query_result.${format === "xlsx" ? "xlsx" : format}`;
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            message.success(`已导出 ${filename}`);
+        } catch (err) {
+            message.error(errMsg(err, "导出失败"));
+        }
+    };
+
+    // 导出格式菜单项
+    const buildExportMenu = (tab: QueryTab): MenuProps => ({
+        items: [
+            { key: "csv", label: "CSV (.csv)" },
+            { key: "json", label: "JSON (.json)" },
+            { key: "xlsx", label: "Excel (.xlsx)" },
+        ],
+        onClick: ({ key }: { key: string }) => {
+            void handleExportSql(tab, key as SqlExportFormat);
+        },
+    });
+
     // Monaco 编辑器挂载时保存引用
     const handleEditorMount = (tabKey: string, editorInstance: unknown) => {
         editorRefs.current[tabKey] = editorInstance as { getValue: () => string };
@@ -272,6 +320,21 @@ const SqlConsole = () => {
                             <Text type="secondary" style={{ fontSize: 12 }}>
                                 影响/返回 {tab.result.rowcount} 行 · 耗时 {tab.result.elapsed_ms} ms
                             </Text>
+                            {tab.result.columns.length > 0 && (
+                                <Dropdown
+                                    menu={buildExportMenu(tab)}
+                                    trigger={["click"]}
+                                    placement="bottomRight"
+                                >
+                                    <Button
+                                        size="small"
+                                        icon={<DownloadOutlined />}
+                                        title="导出结果集（仅 SELECT）"
+                                    >
+                                        导出
+                                    </Button>
+                                </Dropdown>
+                            )}
                         </Space>
                     )}
                 </div>

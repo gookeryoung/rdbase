@@ -16,6 +16,7 @@ import type {
   RowQuery,
   RowUpdate,
   SqlExecRequest,
+  SqlExportRequest,
   SqlResult,
   TriggerBrief,
   TriggerDetail,
@@ -135,6 +136,18 @@ export const explainSql = (
 ): Promise<ExplainResult> =>
   client
     .post<ExplainResult>(`/manager/${dsId}/explain`, body)
+    .then((res) => res.data);
+
+// 导出 SQL 结果集（强制只读，所有登录用户可调）
+// 以 Blob 返回，前端触发下载；format: csv/json/xlsx
+export const exportSqlResult = (
+  dsId: number,
+  body: SqlExportRequest
+): Promise<Blob> =>
+  client
+    .post<Blob>(`/manager/${dsId}/query/export`, body, {
+      responseType: "blob",
+    })
     .then((res) => res.data);
 
 // ----------------- 导入导出（P4-4） -----------------

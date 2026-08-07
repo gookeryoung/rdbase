@@ -16,6 +16,7 @@ P4-3 SQL 查询控制台：执行任意 SQL 与获取执行计划。
 P4-4 导入导出：CSV/Excel/SQL 脚本导入导出（流式处理大文件）。
 - POST ``/{ds_id}/tables/{table_name}/export``：所有登录用户可读
 - POST ``/{ds_id}/tables/{table_name}/import``：designer+（写操作）
+- POST ``/{ds_id}/query/export``：SQL 结果集导出（CSV/JSON/Excel，强制只读，所有登录用户可调）
 
 P4-5 对象管理：视图/存储过程/函数/触发器查看与编辑。
 - GET ``/{ds_id}/views``：列出视图（所有登录用户）
@@ -73,15 +74,18 @@ from .query import (
     execute_sql,
     explain_sql,
     export_excel,
+    export_sql_result_excel,
     get_column_names,
     get_row,
     import_rows,
     insert_row,
+    iter_select_rows,
     iter_table_rows,
     parse_csv_upload,
     parse_excel_upload,
     query_table_rows,
     rows_to_csv,
+    rows_to_json,
     rows_to_sql,
     update_row,
 )
@@ -99,6 +103,7 @@ from .schemas import (
     RowOut,
     RowUpdateIn,
     SqlExecIn,
+    SqlExportIn,
     SqlResultOut,
     TriggerBriefOut,
     TriggerDetailOut,
@@ -604,11 +609,20 @@ def explain_sql_view(
 # ============================================================
 
 # 支持的导出格式 → (扩展名, content_type)
+# 同时服务于表导出（export_table_view）与 SQL 结果集导出（export_sql_result_view）。
+# 表导出支持 csv/sql/xlsx；SQL 结果集导出支持 csv/json/xlsx（SELECT 无表名，sql 格式不适用）。
 _EXPORT_FORMATS: dict[str, tuple[str, str]] = {
     "csv": ("csv", "text/csv; charset=utf-8"),
+    "json": ("json", "application/json; charset=utf-8"),
     "sql": ("sql", "application/sql; charset=utf-8"),
     "xlsx": ("xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
 }
+
+# 表导出允许的格式（json 不适用：表导出有 csv 已足够，json 仅用于 SQL 结果集）
+_TABLE_EXPORT_FORMATS: frozenset[str] = frozenset({"csv", "sql", "xlsx"})
+
+# SQL 结果集导出允许的格式（sql 不适用：SELECT 无目标表，无法生成 INSERT）
+_SQL_EXPORT_FORMATS: frozenset[str] = frozenset({"csv", "json", "xlsx"})
 
 
 @router.post("/{ds_id}/tables/{table_name}/export")
@@ -635,7 +649,7 @@ def export_table_view(
     """
     del request  # 仅认证用
     fmt = format.lower()
-    if fmt not in _EXPORT_FORMATS:
+    if fmt not in _TABLE_EXPORT_FORMATS:
         raise HttpError(400, f"不支持的导出格式: {format}（可选 csv/xlsx/sql）")
     ext, content_type = _EXPORT_FORMATS[fmt]
 
@@ -686,6 +700,112 @@ def export_table_view(
                 yield chunk.encode("utf-8")
         except QueryError as exc:
             # 生成器消费阶段抛错：响应头已发送，无法改状态码，写入错误信息到响应体
+            yield f"\n[导出错误] {exc}".encode()
+        except SQLAlchemyError as exc:
+            yield f"\n[导出错误] {exc}".encode()
+
+    resp = StreamingHttpResponse(_stream(), content_type=content_type)
+    resp["Content-Disposition"] = disposition
+    return resp
+
+
+@router.post("/{ds_id}/query/export")
+def export_sql_result_view(
+    request: HttpRequest,
+    ds_id: int,
+    payload: SqlExportIn,
+) -> HttpResponseBase:
+    """导出 SQL 结果集为 CSV/JSON/Excel（所有登录用户可调，强制只读）.
+
+    导出本就是只读操作（仅 SELECT/WITH/SHOW/DESCRIBE/EXPLAIN），所有登录用户
+    均可调用。后端强制 ``read_only=True``，DDL/DML 直接拒绝（与 viewer 限制一致，
+    但对 designer/admin 也生效——导出场景不应执行写操作）。
+
+    权限分层：
+
+    - viewer：仅允许只读语句（与执行 SQL 一致）。
+    - designer/admin：同样仅允许只读语句（导出强制只读）。
+
+    Body: ``{"sql": "SELECT * FROM users", "format": "csv"}``。
+
+    返回文件下载响应：
+
+    - ``csv``: ``StreamingHttpResponse``，``text/csv; charset=utf-8``，含 UTF-8 BOM。
+    - ``json``: ``StreamingHttpResponse``，``application/json; charset=utf-8``，流式 JSON 数组。
+    - ``xlsx``: ``HttpResponse``，``application/vnd.openxmlformats-officedocument.spreadsheetml.sheet``。
+
+    流式响应：CSV/JSON 用生成器分块产出，避免大结果集 OOM；Excel 用 ``write_only`` 模式
+    逐行写入。
+
+    审计：与 ``execute_sql_view`` 一致，只读 SELECT 不记审计日志（避免噪音）；失败时记录。
+    """
+    fmt = payload.format.lower()
+    if fmt not in _SQL_EXPORT_FORMATS:
+        raise HttpError(400, f"不支持的导出格式: {payload.format}（可选 csv/json/xlsx）")
+    ext, content_type = _EXPORT_FORMATS[fmt]
+
+    ds = _get_ds_or_404(ds_id)
+    # 先在流式响应外执行查询以捕获错误（iter_select_rows 内部已触发首行 next，
+    # SQL 语法错误或非只读语句会在返回响应前抛出，便于转换为 400）
+    try:
+        engine = get_engine(ds)
+        columns, rows_iter = iter_select_rows(engine, payload.sql, read_only=True)
+    except QueryError as exc:
+        # 非只读 SQL → 403（与 execute_sql_view 一致）；其他 QueryError → 400
+        log_audit(
+            request,
+            action=AuditAction.SQL_EXECUTE,
+            status=AuditStatus.FAILURE,
+            resource_type="sql",
+            datasource_id=ds.pk,
+            datasource_name=ds.name,
+            sql=payload.sql,
+            error_message=str(exc),
+        )
+        if "仅允许只读" in str(exc):
+            raise HttpError(403, str(exc)) from None
+        raise HttpError(400, str(exc)) from None
+    except SQLAlchemyError as exc:
+        log_audit(
+            request,
+            action=AuditAction.SQL_EXECUTE,
+            status=AuditStatus.FAILURE,
+            resource_type="sql",
+            datasource_id=ds.pk,
+            datasource_name=ds.name,
+            sql=payload.sql,
+            error_message=f"SQL 执行失败: {exc}",
+        )
+        raise HttpError(400, f"SQL 执行失败: {exc}") from None
+
+    filename = f"query_result.{ext}"
+    from urllib.parse import quote
+
+    disposition = f"attachment; filename=\"{filename}\"; filename*=UTF-8''{quote(filename)}"
+
+    if fmt == "xlsx":
+        # xlsx 需完整字节，无法流式；export_sql_result_excel 内部会重新执行查询
+        try:
+            data = export_sql_result_excel(engine, payload.sql)
+        except QueryError as exc:
+            raise HttpError(400, str(exc)) from None
+        except SQLAlchemyError as exc:
+            raise HttpError(400, f"导出失败: {exc}") from None
+        resp = HttpResponse(data, content_type=content_type)
+        resp["Content-Disposition"] = disposition
+        return resp
+
+    # CSV / JSON：流式生成器（rows_iter 已就绪，包含首行）
+    if fmt == "csv":
+        chunks: Iterator[str] = rows_to_csv(rows_iter, columns)
+    else:
+        chunks = rows_to_json(rows_iter, columns)
+
+    def _stream() -> Iterator[bytes]:
+        try:
+            for chunk in chunks:
+                yield chunk.encode("utf-8")
+        except QueryError as exc:
             yield f"\n[导出错误] {exc}".encode()
         except SQLAlchemyError as exc:
             yield f"\n[导出错误] {exc}".encode()

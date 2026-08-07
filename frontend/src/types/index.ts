@@ -341,6 +341,15 @@ export interface ExplainResult {
 // 导出格式
 export type ExportFormat = "csv" | "xlsx" | "sql";
 
+// SQL 结果集导出格式（表导出支持 sql，SQL 结果集导出支持 json，二者不重叠）
+export type SqlExportFormat = "csv" | "json" | "xlsx";
+
+// SQL 结果集导出请求
+export interface SqlExportRequest {
+  sql: string;
+  format: SqlExportFormat;
+}
+
 // 导入结果
 export interface ImportResult {
   success_count: number;
@@ -680,6 +689,41 @@ export interface SyncLog {
 export interface SyncLogList {
   items: SyncLog[];
   total: number;
+}
+
+// 同步统计（监控面板）
+export interface SyncStats {
+  total: number;
+  succeeded: number;
+  partial: number;
+  failed: number;
+  success_rate: number;
+  avg_duration_ms: number;
+  total_rows_read: number;
+  total_rows_written: number;
+  total_rows_skipped: number;
+}
+
+// 告警级别
+export type AlertLevel = "warning" | "error";
+
+// 同步告警
+export interface SyncAlert {
+  id: number;
+  config_id: number;
+  config_name: string;
+  level: AlertLevel;
+  message: string;
+  acknowledged: boolean;
+  acknowledged_at: string | null;
+  created_at: string;
+}
+
+// 同步告警列表
+export interface SyncAlertList {
+  items: SyncAlert[];
+  total: number;
+  unacknowledged: number;
 }
 
 // 源表列信息

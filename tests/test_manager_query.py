@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import io
+from collections.abc import Iterator
 from datetime import date, datetime
 from typing import Any, cast
 
@@ -26,16 +27,19 @@ from apps.manager.query import (
     execute_sql,
     explain_sql,
     export_excel,
+    export_sql_result_excel,
     get_column_names,
     get_pk_columns,
     get_row,
     import_rows,
     insert_row,
+    iter_select_rows,
     iter_table_rows,
     parse_csv_upload,
     parse_excel_upload,
     query_table_rows,
     rows_to_csv,
+    rows_to_json,
     rows_to_sql,
     update_row,
 )
@@ -1820,6 +1824,256 @@ def test_export_excel_unknown_table_raises() -> None:
     try:
         with pytest.raises(QueryError):
             export_excel(engine, "nonexistent", schema=None)
+    finally:
+        engine.dispose()
+
+
+# ============================================================
+# iter-22 SQL 结果集导出 - iter_select_rows
+# ============================================================
+
+
+def test_iter_select_rows_returns_columns_and_rows() -> None:
+    """应返回结果集列名与全部行（首行已接回迭代器）."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        columns, rows_iter = iter_select_rows(
+            engine, "SELECT id, name FROM users WHERE id <= 2 ORDER BY id", read_only=True
+        )
+        assert columns == ["id", "name"]
+        rows = list(rows_iter)
+        assert len(rows) == 2
+        assert rows[0]["name"] == "Alice"
+        assert rows[1]["name"] == "Bob"
+    finally:
+        engine.dispose()
+
+
+def test_iter_select_rows_empty_result_keeps_columns() -> None:
+    """空结果集应保留列名、返回空迭代器."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        columns, rows_iter = iter_select_rows(engine, "SELECT id, name FROM users WHERE id < 0", read_only=True)
+        assert columns == ["id", "name"]
+        assert list(rows_iter) == []
+    finally:
+        engine.dispose()
+
+
+def test_iter_select_rows_batch_size_small() -> None:
+    """小 batch_size 也应正确分批拉取全部行."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        columns, rows_iter = iter_select_rows(engine, "SELECT id FROM users ORDER BY id", read_only=True, batch_size=2)
+        assert columns == ["id"]
+        rows = list(rows_iter)
+        assert len(rows) == 5
+        assert [r["id"] for r in rows] == [1, 2, 3, 4, 5]
+    finally:
+        engine.dispose()
+
+
+def test_iter_select_rows_read_only_blocks_ddl() -> None:
+    """read_only=True 时 DDL 应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        with pytest.raises(QueryError, match="仅允许只读"):
+            iter_select_rows(engine, "DROP TABLE users", read_only=True)
+    finally:
+        engine.dispose()
+
+
+def test_iter_select_rows_read_only_blocks_dml() -> None:
+    """read_only=True 时 DML 应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        with pytest.raises(QueryError, match="仅允许只读"):
+            iter_select_rows(
+                engine,
+                "INSERT INTO users (name, email, age) VALUES ('X', 'x@e.com', 1)",
+                read_only=True,
+            )
+    finally:
+        engine.dispose()
+
+
+def test_iter_select_rows_read_only_allows_select_without_flag() -> None:
+    """read_only=False 时 SELECT 应正常执行."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        columns, rows_iter = iter_select_rows(engine, "SELECT COUNT(*) AS cnt FROM users", read_only=False)
+        assert columns == ["cnt"]
+        rows = list(rows_iter)
+        assert rows[0]["cnt"] == 5
+    finally:
+        engine.dispose()
+
+
+def test_iter_select_rows_empty_sql_raises() -> None:
+    """空 SQL 应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        with pytest.raises(QueryError):
+            iter_select_rows(engine, "   ;  ", read_only=True)
+    finally:
+        engine.dispose()
+
+
+def test_iter_select_rows_trailing_semicolon() -> None:
+    """末尾分号应被正确处理."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        columns, rows_iter = iter_select_rows(engine, "SELECT 1 AS one;", read_only=True)
+        assert columns == ["one"]
+        list(rows_iter)  # 消费迭代器以释放连接，避免 GC 时资源告警
+    finally:
+        engine.dispose()
+
+
+# ============================================================
+# iter-22 SQL 结果集导出 - rows_to_json
+# ============================================================
+
+
+def test_rows_to_json_basic_array() -> None:
+    """应输出合法 JSON 数组，首块含 [ + 首行，末块含 ]."""
+    rows = iter([{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}])
+    chunks = list(rows_to_json(rows, ["id", "name"]))
+    text = "".join(chunks)
+    assert text.startswith("[\n")
+    assert text.endswith("\n]\n")
+    # 解析为 JSON 验证
+    import json as _json
+
+    parsed = _json.loads(text)
+    assert parsed == [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]
+
+
+def test_rows_to_json_empty_result() -> None:
+    """空结果集应输出 [\\n]\\n."""
+    rows: Iterator[dict[str, Any]] = iter(())
+    chunks = list(rows_to_json(rows, ["id"]))
+    assert chunks == ["[\n]\n"]
+
+
+def test_rows_to_json_single_row() -> None:
+    """单行应正确输出，无逗号前缀."""
+    rows = iter([{"id": 1}])
+    chunks = list(rows_to_json(rows, ["id"]))
+    text = "".join(chunks)
+    # 首块 [ + 行，末块 \n]
+    assert text.startswith("[\n{")
+    assert text.endswith("\n]\n")
+
+
+def test_rows_to_json_none_value() -> None:
+    """None 值应序列化为 null."""
+    rows = iter([{"id": 1, "name": None}])
+    chunks = list(rows_to_json(rows, ["id", "name"]))
+    text = "".join(chunks)
+    assert '"name": null' in text
+
+
+def test_rows_to_json_chinese_ensure_ascii_false() -> None:
+    """中文应原样输出（ensure_ascii=False）."""
+    rows = iter([{"name": "张三"}])
+    chunks = list(rows_to_json(rows, ["name"]))
+    text = "".join(chunks)
+    assert "张三" in text
+
+
+# ============================================================
+# iter-22 SQL 结果集导出 - export_sql_result_excel
+# ============================================================
+
+
+def test_export_sql_result_excel_returns_xlsx_bytes() -> None:
+    """应返回可被 openpyxl 解析的 xlsx bytes，sheet 名为 query_result."""
+    from openpyxl import load_workbook
+
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        data = export_sql_result_excel(engine, "SELECT id, name FROM users WHERE id <= 2")
+        assert isinstance(data, bytes)
+        assert data[:2] == b"PK"
+        wb = load_workbook(io.BytesIO(data))
+        ws = wb.active
+        assert ws is not None
+        assert ws.title == "query_result"
+        rows = list(ws.iter_rows(values_only=True))
+        assert rows[0] == ("id", "name")
+        assert len(rows) == 3  # 表头 + 2 行
+        assert rows[1][1] == "Alice"
+        wb.close()
+    finally:
+        engine.dispose()
+
+
+def test_export_sql_result_excel_empty_result_keeps_header() -> None:
+    """空结果集应保留表头行."""
+    from openpyxl import load_workbook
+
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        data = export_sql_result_excel(engine, "SELECT id, name FROM users WHERE id < 0")
+        wb = load_workbook(io.BytesIO(data))
+        ws = wb.active
+        rows = list(ws.iter_rows(values_only=True))
+        assert rows[0] == ("id", "name")
+        assert len(rows) == 1  # 仅表头
+        wb.close()
+    finally:
+        engine.dispose()
+
+
+def test_export_sql_result_excel_rejects_ddl() -> None:
+    """DDL 应被拒绝（强制 read_only）."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        with pytest.raises(QueryError, match="仅允许只读"):
+            export_sql_result_excel(engine, "DROP TABLE users")
+    finally:
+        engine.dispose()
+
+
+def test_export_sql_result_excel_rejects_dml() -> None:
+    """DML 应被拒绝（强制 read_only）."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        with pytest.raises(QueryError, match="仅允许只读"):
+            export_sql_result_excel(
+                engine,
+                "INSERT INTO users (name, email, age) VALUES ('X', 'x@e.com', 1)",
+            )
+    finally:
+        engine.dispose()
+
+
+def test_export_sql_result_excel_trailing_semicolon() -> None:
+    """末尾分号应被正确处理."""
+    from openpyxl import load_workbook
+
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        data = export_sql_result_excel(engine, "SELECT 1 AS one;")
+        wb = load_workbook(io.BytesIO(data))
+        ws = wb.active
+        rows = list(ws.iter_rows(values_only=True))
+        assert rows[0] == ("one",)
+        assert rows[1][0] == 1
+        wb.close()
     finally:
         engine.dispose()
 

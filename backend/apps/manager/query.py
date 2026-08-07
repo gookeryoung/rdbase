@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import csv
 import io
+import itertools
 import json
 import time
 from collections.abc import Iterator
@@ -973,6 +974,129 @@ def export_excel(
     return buf.getvalue()
 
 
+def iter_select_rows(
+    engine: Engine,
+    sql: str,
+    *,
+    read_only: bool = False,
+    batch_size: int = 1000,
+) -> tuple[list[str], Iterator[dict[str, Any]]]:
+    """流式执行 SELECT 语句，返回 ``(列名列表, 行 dict 生成器)``.
+
+    复用 ``_strip_sql``/``_is_read_only`` 进行前缀判断；强制 ``read_only=True``
+    （调用方传入的 ``read_only`` 仅用于二次校验，导出场景禁止 DDL/DML）。
+    PG/MySQL 启用 ``stream_results=True`` 服务端游标，``fetchmany(batch_size)`` 分批
+    拉取，避免大结果集 OOM。
+
+    Args:
+        engine: SQLAlchemy 引擎。
+        sql: 原始 SQL（可含末尾分号）。
+        read_only: 是否要求语句本身为只读。导出场景调用方应传 ``True``，使
+            非只读语句在执行前直接抛 ``QueryError``（防止导出走 DDL/DML）。
+        batch_size: 每批拉取行数，默认 1000。
+
+    Returns:
+        ``(columns, rows_iter)``：``columns`` 为结果集列名列表；
+        ``rows_iter`` 为行 dict 生成器（消费时维持连接打开）。
+
+    Raises:
+        QueryError: SQL 为空、语句非只读（``read_only=True`` 时）。
+        SQLAlchemyError: SQL 执行失败（在函数返回前触发，因首行 ``next`` 已执行查询）。
+    """
+    cleaned = _strip_sql(sql)
+    if read_only and not _is_read_only(cleaned):
+        raise QueryError("导出仅允许只读查询（SELECT/WITH/SHOW/DESCRIBE/EXPLAIN）")
+
+    dialect = engine.dialect.name
+    state: dict[str, list[str]] = {"columns": []}
+
+    def _stream() -> Iterator[dict[str, Any]]:
+        with engine.connect() as conn:
+            exec_conn = conn.execution_options(stream_results=True) if dialect != EngineType.SQLITE else conn
+            result = exec_conn.execute(text(cleaned))
+            state["columns"] = list(result.keys()) if result.returns_rows else []
+            if not result.returns_rows:
+                return
+            while True:
+                batch = result.fetchmany(batch_size)
+                if not batch:
+                    break
+                for row in batch:
+                    yield cast("dict[str, Any]", dict(row._mapping))
+
+    gen = _stream()
+    try:
+        # 触发生成器执行查询并填充 state["columns"]；保留首行接回迭代器头部
+        first_row = next(gen)
+    except StopIteration:
+        # 空结果集（无返回行）：columns 已填充，返回空迭代器
+        return state["columns"], iter(())
+    return state["columns"], itertools.chain([first_row], gen)
+
+
+def rows_to_json(
+    rows_iter: Iterator[dict[str, Any]],
+    columns: list[str],
+) -> Iterator[str]:
+    """将行迭代器转为流式 JSON 数组文本块（生成器）.
+
+    首块输出 ``[`` + 第一行 JSON（无前置逗号），后续每行输出 ``,\\n`` + 行 JSON，
+    末块输出 ``]``。空结果集输出 ``[\\n]\\n``。
+
+    Args:
+        rows_iter: 行 dict 迭代器。
+        columns: 列名顺序（仅作参考，行 dict 已含键值；保留参数与 ``rows_to_csv`` 签名对齐）。
+
+    Yields:
+        JSON 文本块（字符串，UTF-8 编码由调用方处理）。
+    """
+    del columns  # 行 dict 自带键，无需按 columns 重排
+
+    first = True
+    for row in rows_iter:
+        if first:
+            yield "[\n" + json.dumps(row, ensure_ascii=False, default=str)
+            first = False
+        else:
+            yield ",\n" + json.dumps(row, ensure_ascii=False, default=str)
+    if first:
+        yield "[\n]\n"
+    else:
+        yield "\n]\n"
+
+
+def export_sql_result_excel(engine: Engine, sql: str) -> bytes:
+    """导出 SQL 结果集为 Excel xlsx 二进制（openpyxl write_only 流式写入）.
+
+    复用 ``iter_select_rows`` 流式拉取数据，强制 ``read_only=True``（导出仅允许 SELECT）。
+    sheet 名固定 ``query_result``（SQL 结果集无表名概念）。
+
+    Args:
+        engine: SQLAlchemy 引擎。
+        sql: 原始 SELECT SQL（可含末尾分号）。
+
+    Returns:
+        完整 xlsx 文件字节。
+
+    Raises:
+        QueryError: SQL 为空或非只读。
+        SQLAlchemyError: SQL 执行失败。
+    """
+    from openpyxl import Workbook
+
+    columns, rows_iter = iter_select_rows(engine, sql, read_only=True)
+    wb = Workbook(write_only=True)
+    ws = wb.create_sheet(title="query_result")
+    ws.append(columns)
+
+    for row in rows_iter:
+        ws.append([_format_excel_value(row.get(c)) for c in columns])
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def parse_csv_upload(file_obj: Any) -> tuple[list[str], Iterator[dict[str, Any]]]:
     """解析上传的 CSV 文件，返回 ``(列名列表, 行 dict 生成器)``.
 
@@ -1128,16 +1252,19 @@ __all__ = [
     "execute_sql",
     "explain_sql",
     "export_excel",
+    "export_sql_result_excel",
     "get_column_names",
     "get_pk_columns",
     "get_row",
     "import_rows",
     "insert_row",
+    "iter_select_rows",
     "iter_table_rows",
     "parse_csv_upload",
     "parse_excel_upload",
     "query_table_rows",
     "rows_to_csv",
+    "rows_to_json",
     "rows_to_sql",
     "update_row",
 ]

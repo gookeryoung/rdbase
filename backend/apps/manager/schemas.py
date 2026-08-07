@@ -9,7 +9,7 @@ P4-5 对象管理：视图/存储过程/函数/触发器响应。
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from ninja import Schema
 
@@ -65,6 +65,18 @@ class SqlExecIn(Schema):
     """
 
     sql: str
+
+
+class SqlExportIn(Schema):
+    """SQL 结果集导出请求.
+
+    - ``sql``: 原始 SQL（仅允许只读语句 SELECT/WITH/SHOW/DESCRIBE/EXPLAIN，
+      后端强制 ``read_only=True`` 拦截 DDL/DML）。
+    - ``format``: 导出格式，``csv`` / ``json`` / ``xlsx``。
+    """
+
+    sql: str
+    format: Literal["csv", "json", "xlsx"] = "csv"
 
 
 class SqlResultOut(Schema):
@@ -238,6 +250,7 @@ __all__ = [
     "RowOut",
     "RowUpdateIn",
     "SqlExecIn",
+    "SqlExportIn",
     "SqlResultOut",
     "TriggerBriefOut",
     "TriggerDetailOut",

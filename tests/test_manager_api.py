@@ -1413,6 +1413,231 @@ def test_export_unknown_table_returns_400(make_user: Callable[..., User], tmp_pa
 
 
 # ============================================================
+# iter-22 SQL 结果集导出 - /query/export 接口
+# ============================================================
+
+
+@pytest.mark.django_db
+def test_export_sql_result_csv_returns_200(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """viewer 导出 SELECT 结果集为 CSV 应返回 200 + 流式响应含表头与数据."""
+    user = make_user(role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/query/export",
+        body={"sql": "SELECT id, name FROM users WHERE id <= 2", "format": "csv"},
+        headers=_auth(user),
+    )
+    assert response.status_code == 200
+    assert "text/csv" in response["Content-Type"]
+    content = b"".join(response.streaming_content) if hasattr(response, "streaming_content") else response.content
+    text = content.decode("utf-8")
+    assert "\ufeff" in text  # BOM
+    assert "id,name" in text
+    assert "Alice" in text
+    assert "Bob" in text
+
+
+@pytest.mark.django_db
+def test_export_sql_result_json_returns_200(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """viewer 导出 SELECT 结果集为 JSON 应返回 200 + 合法 JSON 数组."""
+    user = make_user(role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/query/export",
+        body={"sql": "SELECT id, name FROM users WHERE id = 1", "format": "json"},
+        headers=_auth(user),
+    )
+    assert response.status_code == 200
+    assert "application/json" in response["Content-Type"]
+    content = b"".join(response.streaming_content) if hasattr(response, "streaming_content") else response.content
+    parsed = json.loads(content.decode("utf-8"))
+    assert isinstance(parsed, list)
+    assert len(parsed) == 1
+    assert parsed[0]["name"] == "Alice"
+    assert parsed[0]["id"] == 1
+
+
+@pytest.mark.django_db
+def test_export_sql_result_xlsx_returns_200(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """viewer 导出 SELECT 结果集为 Excel 应返回 200 + xlsx 二进制."""
+    user = make_user(role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/query/export",
+        body={"sql": "SELECT id, name FROM users", "format": "xlsx"},
+        headers=_auth(user),
+    )
+    assert response.status_code == 200
+    assert "spreadsheetml" in response["Content-Type"]
+    assert response.content[:2] == b"PK"
+
+
+@pytest.mark.django_db
+def test_export_sql_result_default_format_csv(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """未指定 format 应默认 csv."""
+    user = make_user(role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/query/export",
+        body={"sql": "SELECT 1 AS one"},
+        headers=_auth(user),
+    )
+    assert response.status_code == 200
+    assert "text/csv" in response["Content-Type"]
+
+
+@pytest.mark.django_db
+def test_export_sql_result_viewer_can_export_select(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """viewer 可导出 SELECT（导出本就只读，与 viewer 限制一致）."""
+    user = make_user(role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/query/export",
+        body={"sql": "SELECT COUNT(*) AS cnt FROM users", "format": "json"},
+        headers=_auth(user),
+    )
+    assert response.status_code == 200
+    content = b"".join(response.streaming_content) if hasattr(response, "streaming_content") else response.content
+    parsed = json.loads(content.decode("utf-8"))
+    assert parsed[0]["cnt"] == 3
+
+
+@pytest.mark.django_db
+def test_export_sql_result_ddl_returns_403(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """导出 DDL 应返回 403（强制只读，对所有角色生效）."""
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/query/export",
+        body={"sql": "DROP TABLE users", "format": "csv"},
+        headers=_auth(user),
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.django_db
+def test_export_sql_result_dml_returns_403(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """导出 DML 应返回 403（强制只读，对 designer 也生效）."""
+    user = make_user(role=Role.DESIGNER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/query/export",
+        body={
+            "sql": "INSERT INTO users (name, email, age) VALUES ('X', 'x@e.com', 1)",
+            "format": "csv",
+        },
+        headers=_auth(user),
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.django_db
+def test_export_sql_result_unsupported_format_returns_422(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """不支持的格式（sql）应返回 422（Pydantic Literal 校验失败）."""
+    user = make_user()
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/query/export",
+        body={"sql": "SELECT 1", "format": "sql"},
+        headers=_auth(user),
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.django_db
+def test_export_sql_result_without_token_returns_401() -> None:
+    """未认证访问应返回 401."""
+    client = Client()
+    response = _post(
+        client,
+        "/api/v1/manager/1/query/export",
+        body={"sql": "SELECT 1", "format": "csv"},
+    )
+    assert response.status_code == 401
+
+
+@pytest.mark.django_db
+def test_export_sql_result_unknown_datasource_returns_404(
+    make_user: Callable[..., User],
+) -> None:
+    """不存在的数据源应返回 404."""
+    user = make_user()
+    client = Client()
+    response = _post(
+        client,
+        "/api/v1/manager/99999/query/export",
+        body={"sql": "SELECT 1", "format": "csv"},
+        headers=_auth(user),
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_export_sql_result_empty_sql_returns_400(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """空 SQL 应返回 400."""
+    user = make_user()
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/query/export",
+        body={"sql": "", "format": "csv"},
+        headers=_auth(user),
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_export_sql_result_syntax_error_returns_400(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """SQL 语法错误应返回 400."""
+    user = make_user()
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/query/export",
+        body={"sql": "SELECT FROM WHERE", "format": "csv"},
+        headers=_auth(user),
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_export_sql_result_empty_result_keeps_columns(make_user: Callable[..., User], tmp_path: Path) -> None:
+    """空结果集导出 CSV 应保留表头行."""
+    user = make_user(role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    client = Client()
+    response = _post(
+        client,
+        f"/api/v1/manager/{ds.pk}/query/export",
+        body={"sql": "SELECT id, name FROM users WHERE id < 0", "format": "csv"},
+        headers=_auth(user),
+    )
+    assert response.status_code == 200
+    content = b"".join(response.streaming_content) if hasattr(response, "streaming_content") else response.content
+    text = content.decode("utf-8")
+    assert "id,name" in text  # 表头存在
+    # 无数据行（仅 BOM + 表头 + 末尾换行）
+
+
+# ============================================================
 # P4-4 导入导出 - /import 接口
 # ============================================================
 
