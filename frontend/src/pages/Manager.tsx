@@ -299,6 +299,7 @@ const Manager = () => {
     initialValues: {},
   });
   const [modalSubmitting, setModalSubmitting] = useState(false);
+  const [modalNonce, setModalNonce] = useState(0);
   const [form] = Form.useForm<Record<string, unknown>>();
 
   // 导入 Modal 状态
@@ -874,6 +875,7 @@ const Manager = () => {
     columns.forEach((col) => {
       initialValues[col] = null;
     });
+    setModalNonce((n) => n + 1);
     setModalState({ open: true, mode: "create", pk: null, initialValues });
   };
 
@@ -891,17 +893,9 @@ const Manager = () => {
         initialValues[col] = row[col] ?? null;
       }
     });
+    setModalNonce((n) => n + 1);
     setModalState({ open: true, mode: "edit", pk, initialValues });
   };
-
-  // Modal 打开后填充表单值。
-  // Modal 配了 destroyOnClose，Form 在 Modal 打开时才挂载；事件处理器内同步
-  // setFieldsValue 会因 Form 未挂载而丢失，须在 useEffect 中于渲染完成后调用。
-  useEffect(() => {
-    if (modalState.open) {
-      form.setFieldsValue(modalState.initialValues as never);
-    }
-  }, [modalState.open, modalState.initialValues, form]);
 
   // Modal 提交
   const handleModalSubmit = async () => {
@@ -1515,10 +1509,14 @@ const Manager = () => {
         onOk={() => void handleModalSubmit()}
         onCancel={() => setModalState((prev) => ({ ...prev, open: false }))}
         confirmLoading={modalSubmitting}
-        destroyOnClose
         width={600}
       >
-        <Form form={form} layout="vertical" preserve={false}>
+        <Form
+          key={`modal-form-${modalNonce}`}
+          form={form}
+          layout="vertical"
+          initialValues={modalState.initialValues}
+        >
           {modalFormFields.map((col) => {
             // 根据初始值类型选择控件：数字用 InputNumber，其他用 Input
             const initVal = modalState.initialValues[col];
