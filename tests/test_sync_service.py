@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from apps.accounts.models import User
 from apps.datasources.models import DataSource, EngineType
-from apps.sync.models import SyncConfig, SyncFieldMapping, SyncLog, SyncLogStatus, SyncMode, SyncStatus
+from apps.sync.models import SyncAlert, SyncConfig, SyncFieldMapping, SyncLog, SyncLogStatus, SyncMode, SyncStatus
 from apps.sync.sync_service import SyncError, SyncService
 
 
@@ -537,6 +537,43 @@ class TestSyncServiceRetry:
 
         sync_config_with_mappings_for_service.refresh_from_db()
         assert sync_config_with_mappings_for_service.status == SyncStatus.ERROR
+
+    def test_run_raises_alert_on_final_failure(self, sync_config_for_service: SyncConfig) -> None:
+        """重试全部耗尽的最终失败应产生一条 error 级别告警."""
+        service = SyncService(sync_config_for_service)
+        with suppress(SyncError):
+            service.run(max_retries=0)  # 无映射，直接失败
+
+        alerts = SyncAlert.objects.filter(config=sync_config_for_service)
+        assert alerts.count() == 1
+        alert = alerts.first()
+        assert alert is not None
+        assert alert.level == "error"
+        assert "未配置字段映射" in alert.message
+
+    def test_run_alerts_once_after_retries_exhausted(self, sync_config_for_service: SyncConfig) -> None:
+        """多次重试后仅在最终失败时告警一次，不应每次重试都告警."""
+        service = SyncService(sync_config_for_service)
+        with suppress(SyncError):
+            service.run(max_retries=2)  # 共尝试 3 次，全部失败
+
+        assert SyncAlert.objects.filter(config=sync_config_for_service).count() == 1
+
+    def test_run_success_does_not_raise_alert(self, sync_config_for_service: SyncConfig) -> None:
+        """空数据成功路径不应产生告警."""
+        # 无待同步数据（源表读取被 mock 为空）→ 走成功分支
+        service = SyncService(sync_config_for_service)
+        # 先补一个映射避免 "未配置字段映射"，再让源数据为空以触发成功早返回
+        SyncFieldMapping.objects.create(
+            config=sync_config_for_service,
+            source_field="id",
+            target_field="ext_id",
+            is_pk=True,
+        )
+        with patch.object(service, "_read_source_data", return_value=[]):
+            log = service.run(max_retries=0)
+        assert log.status == SyncLogStatus.SUCCESS
+        assert SyncAlert.objects.filter(config=sync_config_for_service).count() == 0
 
 
 class TestSyncServiceBatch:

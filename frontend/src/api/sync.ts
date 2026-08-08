@@ -1,5 +1,7 @@
 import client from "./client";
 import type {
+  SyncAlert,
+  SyncAlertList,
   SyncBatchRequest,
   SyncBatchResult,
   SyncConfig,
@@ -10,6 +12,7 @@ import type {
   SyncPreview,
   SyncResult,
   SyncScheduleUpdate,
+  SyncStats,
 } from "@/types";
 
 // 列出所有同步配置
@@ -83,3 +86,38 @@ export const listSyncLogs = (
     .get<SyncLogList>("/sync/logs", { params })
     .then((res) => res.data);
 };
+
+// 获取同步统计（成功率、平均耗时、总读写行数）
+export const getSyncStats = (
+  configId?: number,
+  days?: number
+): Promise<SyncStats> => {
+  const params: Record<string, unknown> = {};
+  if (configId !== undefined) params.config_id = configId;
+  if (days !== undefined) params.days = days;
+  return client
+    .get<SyncStats>("/sync/stats", { params })
+    .then((res) => res.data);
+};
+
+// 列出同步告警
+export const listSyncAlerts = (
+  params: {
+    configId?: number;
+    acknowledged?: boolean;
+    level?: string;
+    limit?: number;
+  } = {}
+): Promise<SyncAlertList> => {
+  const query: Record<string, unknown> = { limit: params.limit ?? 50 };
+  if (params.configId !== undefined) query.config_id = params.configId;
+  if (params.acknowledged !== undefined) query.acknowledged = params.acknowledged;
+  if (params.level !== undefined) query.level = params.level;
+  return client
+    .get<SyncAlertList>("/sync/alerts", { params: query })
+    .then((res) => res.data);
+};
+
+// 确认告警（标记已处理）
+export const ackSyncAlert = (id: number): Promise<SyncAlert> =>
+  client.post<SyncAlert>(`/sync/alerts/${id}/ack`, {}).then((res) => res.data);

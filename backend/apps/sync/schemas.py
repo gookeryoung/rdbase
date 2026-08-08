@@ -223,8 +223,49 @@ class MessageOut(BaseModel):
     detail: str
 
 
+class SyncStatsOut(BaseModel):
+    """同步统计输出.
+
+    汇总一段时间内（或某配置）的同步执行情况，用于监控面板展示。
+    success_rate 为百分比（0-100，保留一位小数）。
+    """
+
+    total: int
+    succeeded: int
+    partial: int
+    failed: int
+    success_rate: float
+    avg_duration_ms: int
+    total_rows_read: int
+    total_rows_written: int
+    total_rows_skipped: int
+
+
+class SyncAlertOut(BaseModel):
+    """同步告警输出."""
+
+    id: int
+    config_id: int
+    config_name: str
+    level: str
+    message: str
+    acknowledged: bool
+    acknowledged_at: datetime | None = None
+    created_at: datetime
+
+
+class SyncAlertListOut(BaseModel):
+    """同步告警列表输出."""
+
+    items: list[SyncAlertOut]
+    total: int
+    unacknowledged: int
+
+
 __all__ = [
     "MessageOut",
+    "SyncAlertListOut",
+    "SyncAlertOut",
     "SyncBatchIn",
     "SyncBatchOut",
     "SyncConfigCreateIn",
@@ -239,6 +280,7 @@ __all__ = [
     "SyncResultOut",
     "SyncScheduleIn",
     "SyncSourceTableOut",
+    "SyncStatsOut",
     "SyncTargetTableOut",
     "SyncTriggerIn",
 ]

@@ -8,11 +8,14 @@ import pytest
 from apps.accounts.models import User
 from apps.datasources.models import DataSource, EngineType
 from apps.sync.models import (
+    AlertLevel,
+    SyncAlert,
     SyncConfig,
     SyncFieldMapping,
     SyncLog,
     SyncLogStatus,
     SyncMode,
+    SyncStats,
     SyncStatus,
 )
 from django.db.models import QuerySet
@@ -304,3 +307,163 @@ class TestSyncLog:
             started_at=timezone.now(),
         )
         assert log.config_id == sync_config.pk
+
+
+def _make_log(  # noqa: PLR0913
+    config: SyncConfig,
+    status: str,
+    *,
+    duration_ms: int = 0,
+    rows_read: int = 0,
+    rows_written: int = 0,
+    rows_skipped: int = 0,
+    started_at: Any = None,
+) -> SyncLog:
+    """构造一条同步日志，便于统计聚合测试复用."""
+    from django.utils import timezone
+
+    return SyncLog.objects.create(
+        config=config,
+        status=status,
+        mode=SyncMode.FULL,
+        rows_read=rows_read,
+        rows_written=rows_written,
+        rows_skipped=rows_skipped,
+        duration_ms=duration_ms,
+        started_at=started_at or timezone.now(),
+    )
+
+
+class TestAggregateStats:
+    """SyncLog.aggregate_stats 统计聚合测试."""
+
+    def test_empty_returns_zero_stats(self, db: Any) -> None:
+        """无任何日志时各项应为 0，成功率为 0.0."""
+        stats = SyncLog.aggregate_stats()
+        assert isinstance(stats, SyncStats)
+        assert stats.total == 0
+        assert stats.succeeded == 0
+        assert stats.failed == 0
+        assert stats.success_rate == 0.0
+        assert stats.avg_duration_ms == 0
+        assert stats.total_rows_written == 0
+
+    def test_success_rate_and_avg_duration(self, sync_config: SyncConfig) -> None:
+        """成功率仅计完全成功，平均耗时取整."""
+        _make_log(sync_config, SyncLogStatus.SUCCESS, duration_ms=100, rows_written=10)
+        _make_log(sync_config, SyncLogStatus.SUCCESS, duration_ms=200, rows_written=20)
+        _make_log(sync_config, SyncLogStatus.PARTIAL, duration_ms=300, rows_skipped=5)
+        _make_log(sync_config, SyncLogStatus.FAILED, duration_ms=400)
+
+        stats = SyncLog.aggregate_stats()
+        assert stats.total == 4
+        assert stats.succeeded == 2
+        assert stats.partial == 1
+        assert stats.failed == 1
+        # 仅 2/4 完全成功
+        assert stats.success_rate == 50.0
+        # (100+200+300+400)/4 = 250
+        assert stats.avg_duration_ms == 250
+        assert stats.total_rows_written == 30
+        assert stats.total_rows_skipped == 5
+
+    def test_filter_by_config_id(self, sync_config: SyncConfig, sync_ds: DataSource, admin_user: User) -> None:
+        """config_id 过滤应仅统计指定配置的日志."""
+        other = SyncConfig.objects.create(
+            name="另一个配置",
+            source_table="auth_user",
+            target_datasource=sync_ds,
+            target_table="other_target",
+            created_by=admin_user,
+        )
+        _make_log(sync_config, SyncLogStatus.SUCCESS)
+        _make_log(other, SyncLogStatus.FAILED)
+
+        stats = SyncLog.aggregate_stats(config_id=sync_config.pk)
+        assert stats.total == 1
+        assert stats.succeeded == 1
+        assert stats.failed == 0
+
+    def test_filter_by_days(self, sync_config: SyncConfig) -> None:
+        """days 过滤应排除早于窗口的日志."""
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        _make_log(sync_config, SyncLogStatus.SUCCESS, started_at=timezone.now())
+        _make_log(
+            sync_config,
+            SyncLogStatus.FAILED,
+            started_at=timezone.now() - timedelta(days=10),
+        )
+
+        stats = SyncLog.aggregate_stats(days=7)
+        assert stats.total == 1
+        assert stats.succeeded == 1
+
+    def test_days_non_positive_ignored(self, sync_config: SyncConfig) -> None:
+        """days<=0 时应不做时间过滤（视为不限时间）."""
+        _make_log(sync_config, SyncLogStatus.SUCCESS)
+        stats = SyncLog.aggregate_stats(days=0)
+        assert stats.total == 1
+
+
+class TestSyncAlert:
+    """SyncAlert 模型测试."""
+
+    def test_alert_level_choices(self) -> None:
+        """AlertLevel 应包含 warning/error 两种取值."""
+        values = {choice.value for choice in AlertLevel}
+        assert values == {"warning", "error"}
+
+    def test_raise_alert_default_error(self, sync_config: SyncConfig) -> None:
+        """raise_alert 默认级别为 error 且写入内容."""
+        alert = SyncAlert.raise_alert(sync_config, "同步失败原因")
+        assert alert.pk > 0
+        assert alert.level == AlertLevel.ERROR
+        assert alert.message == "同步失败原因"
+        assert alert.acknowledged is False
+        assert alert.acknowledged_at is None
+
+    def test_raise_alert_warning_level(self, sync_config: SyncConfig) -> None:
+        """可指定 warning 级别."""
+        alert = SyncAlert.raise_alert(sync_config, "提示", level=AlertLevel.WARNING)
+        assert alert.level == AlertLevel.WARNING
+
+    def test_acknowledge_sets_flag_and_time(self, sync_config: SyncConfig) -> None:
+        """确认告警应置 acknowledged=True 并记录确认时间."""
+        alert = SyncAlert.raise_alert(sync_config, "失败")
+        alert.acknowledge()
+        alert.refresh_from_db()
+        assert alert.acknowledged is True
+        assert alert.acknowledged_at is not None
+
+    def test_acknowledge_without_save(self, sync_config: SyncConfig) -> None:
+        """save=False 时仅改内存状态不持久化."""
+        alert = SyncAlert.raise_alert(sync_config, "失败")
+        alert.acknowledge(save=False)
+        assert alert.acknowledged is True
+        alert.refresh_from_db()
+        assert alert.acknowledged is False
+
+    def test_alert_cascade_delete(self, sync_config: SyncConfig) -> None:
+        """删除配置应级联删除其告警."""
+        SyncAlert.raise_alert(sync_config, "失败")
+        config_id = sync_config.pk
+        sync_config.delete()
+        assert not SyncAlert.objects.filter(config_id=config_id).exists()
+
+    def test_alert_default_ordering(self, sync_config: SyncConfig) -> None:
+        """告警应按创建时间降序排列（最新在前）."""
+        first = SyncAlert.raise_alert(sync_config, "第一条")
+        second = SyncAlert.raise_alert(sync_config, "第二条")
+        alerts = list(SyncAlert.objects.all())
+        assert alerts[0].pk == second.pk
+        assert alerts[1].pk == first.pk
+
+    def test_str_representation(self, sync_config: SyncConfig) -> None:
+        """字符串表示应包含级别与配置名."""
+        alert = SyncAlert.raise_alert(sync_config, "失败原因")
+        text = str(alert)
+        assert sync_config.name in text
+        assert AlertLevel.ERROR in text

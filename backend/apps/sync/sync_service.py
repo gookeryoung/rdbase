@@ -32,7 +32,9 @@ from apps.datasources.engine import get_engine as get_ds_engine
 from apps.datasources.models import EngineType
 
 from .models import (
+    AlertLevel,
     ConflictStrategy,
+    SyncAlert,
     SyncConfig,
     SyncFieldMapping,
     SyncLog,
@@ -128,6 +130,8 @@ class SyncService:
                         config.name,
                         exc,
                     )
+                    # 仅在重试全部耗尽的最终失败时告警一次，避免每次重试都产生告警。
+                    SyncAlert.raise_alert(config, str(exc), level=AlertLevel.ERROR)
 
         raise SyncError(str(last_exception)) if last_exception else SyncError("未知错误")
 

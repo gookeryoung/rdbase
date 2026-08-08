@@ -9,7 +9,7 @@ import pytest
 from apps.accounts.jwt import create_access_token
 from apps.accounts.models import User
 from apps.datasources.models import DataSource, EngineType
-from apps.sync.models import SyncConfig, SyncFieldMapping, SyncLog, SyncMode, SyncStatus
+from apps.sync.models import SyncAlert, SyncConfig, SyncFieldMapping, SyncLog, SyncLogStatus, SyncMode, SyncStatus
 from django.http import HttpResponse
 from django.test import Client
 
@@ -749,3 +749,144 @@ class TestSyncColumnsAPI:
             **_auth(admin_user),
         )
         assert response.status_code == 404
+
+
+class TestSyncStatsAPI:
+    """同步统计 API 测试."""
+
+    def _make_log(self, config: SyncConfig, status: str, *, duration_ms: int = 0) -> SyncLog:
+        """构造一条日志。"""
+        from django.utils import timezone
+
+        return SyncLog.objects.create(
+            config=config,
+            status=status,
+            mode=SyncMode.FULL,
+            duration_ms=duration_ms,
+            started_at=timezone.now(),
+        )
+
+    def test_stats_empty(self, client: Client, admin_user: User, sync_config_for_api: SyncConfig) -> None:
+        """无日志时统计应全 0。"""
+        response = _get(client, "/api/v1/sync/stats", _auth(admin_user))
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 0
+        assert data["success_rate"] == 0.0
+
+    def test_stats_aggregates(self, client: Client, admin_user: User, sync_config_for_api: SyncConfig) -> None:
+        """统计应正确聚合成功率与平均耗时。"""
+        self._make_log(sync_config_for_api, SyncLogStatus.SUCCESS, duration_ms=100)
+        self._make_log(sync_config_for_api, SyncLogStatus.FAILED, duration_ms=300)
+        response = _get(client, "/api/v1/sync/stats", _auth(admin_user))
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 2
+        assert data["succeeded"] == 1
+        assert data["failed"] == 1
+        assert data["success_rate"] == 50.0
+        assert data["avg_duration_ms"] == 200
+
+    def test_stats_filter_by_config(
+        self, client: Client, admin_user: User, sync_config_for_api: SyncConfig, sync_ds_for_api: DataSource
+    ) -> None:
+        """config_id 过滤应仅统计指定配置。"""
+        other = SyncConfig.objects.create(
+            name="统计其他配置",
+            source_table="auth_user",
+            target_datasource=sync_ds_for_api,
+            target_table="ext_other",
+            created_by=admin_user,
+        )
+        self._make_log(sync_config_for_api, SyncLogStatus.SUCCESS)
+        self._make_log(other, SyncLogStatus.FAILED)
+        response = _get(
+            client,
+            f"/api/v1/sync/stats?config_id={sync_config_for_api.pk}",
+            _auth(admin_user),
+        )
+        data = response.json()
+        assert data["total"] == 1
+        assert data["succeeded"] == 1
+
+    def test_stats_requires_admin(self, client: Client, regular_user: User) -> None:
+        """非管理员访问应被拒绝。"""
+        response = _get(client, "/api/v1/sync/stats", _auth(regular_user))
+        assert response.status_code in {401, 403}
+
+
+class TestSyncAlertAPI:
+    """同步告警 API 测试."""
+
+    def test_list_alerts(self, client: Client, admin_user: User, sync_config_for_api: SyncConfig) -> None:
+        """应能列出告警并返回未确认计数。"""
+        SyncAlert.raise_alert(sync_config_for_api, "失败原因A")
+        SyncAlert.raise_alert(sync_config_for_api, "失败原因B")
+        response = _get(client, "/api/v1/sync/alerts", _auth(admin_user))
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 2
+        assert data["unacknowledged"] == 2
+        assert len(data["items"]) == 2
+        assert data["items"][0]["config_name"] == sync_config_for_api.name
+
+    def test_list_alerts_filter_acknowledged(
+        self, client: Client, admin_user: User, sync_config_for_api: SyncConfig
+    ) -> None:
+        """acknowledged 过滤应只返回对应状态的告警。"""
+        acked = SyncAlert.raise_alert(sync_config_for_api, "已处理")
+        acked.acknowledge()
+        SyncAlert.raise_alert(sync_config_for_api, "待处理")
+        response = _get(client, "/api/v1/sync/alerts?acknowledged=false", _auth(admin_user))
+        data = response.json()
+        assert len(data["items"]) == 1
+        assert data["items"][0]["acknowledged"] is False
+        assert data["unacknowledged"] == 1
+
+    def test_list_alerts_filter_by_config(
+        self, client: Client, admin_user: User, sync_config_for_api: SyncConfig, sync_ds_for_api: DataSource
+    ) -> None:
+        """config_id 过滤应只返回指定配置的告警。"""
+        other = SyncConfig.objects.create(
+            name="告警其他配置",
+            source_table="auth_user",
+            target_datasource=sync_ds_for_api,
+            target_table="ext_other2",
+            created_by=admin_user,
+        )
+        SyncAlert.raise_alert(sync_config_for_api, "本配置告警")
+        SyncAlert.raise_alert(other, "其他配置告警")
+        response = _get(
+            client,
+            f"/api/v1/sync/alerts?config_id={sync_config_for_api.pk}",
+            _auth(admin_user),
+        )
+        data = response.json()
+        assert len(data["items"]) == 1
+        assert data["items"][0]["config_id"] == sync_config_for_api.pk
+
+    def test_list_alerts_invalid_level(self, client: Client, admin_user: User, sync_config_for_api: SyncConfig) -> None:
+        """非法 level 应返回 400。"""
+        response = _get(client, "/api/v1/sync/alerts?level=bogus", _auth(admin_user))
+        assert response.status_code == 400
+
+    def test_acknowledge_alert(self, client: Client, admin_user: User, sync_config_for_api: SyncConfig) -> None:
+        """确认告警应返回已确认状态。"""
+        alert = SyncAlert.raise_alert(sync_config_for_api, "待确认")
+        response = _post(client, f"/api/v1/sync/alerts/{alert.pk}/ack", {}, _auth(admin_user))
+        assert response.status_code == 200
+        data = response.json()
+        assert data["acknowledged"] is True
+        assert data["acknowledged_at"] is not None
+        alert.refresh_from_db()
+        assert alert.acknowledged is True
+
+    def test_acknowledge_alert_not_found(self, client: Client, admin_user: User) -> None:
+        """确认不存在的告警应返回 404。"""
+        response = _post(client, "/api/v1/sync/alerts/99999/ack", {}, _auth(admin_user))
+        assert response.status_code == 404
+
+    def test_alerts_requires_admin(self, client: Client, regular_user: User) -> None:
+        """非管理员访问应被拒绝。"""
+        response = _get(client, "/api/v1/sync/alerts", _auth(regular_user))
+        assert response.status_code in {401, 403}

@@ -19,6 +19,8 @@ import {
   Statistic,
   Row,
   Col,
+  Badge,
+  Segmented,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
@@ -31,6 +33,8 @@ import {
   FileSearchOutlined,
   ReloadOutlined,
   ThunderboltOutlined,
+  DashboardOutlined,
+  CheckCircleOutlined,
 } from "@ant-design/icons";
 
 import {
@@ -43,6 +47,9 @@ import {
   batchTriggerSync,
   updateSchedule,
   listSyncLogs,
+  getSyncStats,
+  listSyncAlerts,
+  ackSyncAlert,
 } from "@/api/sync";
 import { listDatasources } from "@/api/datasources";
 import type {
@@ -54,6 +61,8 @@ import type {
   SyncPreview,
   SyncBatchResult,
   SyncScheduleUpdate,
+  SyncStats,
+  SyncAlert,
 } from "@/types";
 
 const { Text, Title } = Typography;
@@ -134,6 +143,17 @@ export default function SyncPage() {
   const [batchResult, setBatchResult] = useState<SyncBatchResult | null>(null);
   const [batchLoading, setBatchLoading] = useState(false);
 
+  // 监控面板（统计 + 告警）
+  const [monitorOpen, setMonitorOpen] = useState(false);
+  const [stats, setStats] = useState<SyncStats | null>(null);
+  const [alerts, setAlerts] = useState<SyncAlert[]>([]);
+  const [unackCount, setUnackCount] = useState(0);
+  const [monitorLoading, setMonitorLoading] = useState(false);
+  // 统计时间范围（天），null 表示全部
+  const [statsDays, setStatsDays] = useState<number | null>(7);
+  // 告警过滤：仅未确认
+  const [onlyUnacked, setOnlyUnacked] = useState(true);
+
   // 加载数据
   const loadConfigs = useCallback(async () => {
     setLoading(true);
@@ -165,10 +185,46 @@ export default function SyncPage() {
     }
   }, []);
 
+  // 加载未确认告警数量（用于顶部徽标）
+  const loadUnackCount = useCallback(async () => {
+    try {
+      const data = await listSyncAlerts({ acknowledged: false, limit: 1 });
+      setUnackCount(data.unacknowledged);
+    } catch {
+      // 徽标为辅助信息，加载失败静默处理
+    }
+  }, []);
+
+  // 加载监控面板数据（统计 + 告警列表）
+  const loadMonitor = useCallback(async () => {
+    setMonitorLoading(true);
+    try {
+      const [statsData, alertData] = await Promise.all([
+        getSyncStats(undefined, statsDays ?? undefined),
+        listSyncAlerts({ acknowledged: onlyUnacked ? false : undefined, limit: 100 }),
+      ]);
+      setStats(statsData);
+      setAlerts(alertData.items);
+      setUnackCount(alertData.unacknowledged);
+    } catch {
+      message.error("加载监控数据失败");
+    } finally {
+      setMonitorLoading(false);
+    }
+  }, [statsDays, onlyUnacked]);
+
   useEffect(() => {
     loadConfigs();
     loadDatasources();
-  }, [loadConfigs, loadDatasources]);
+    loadUnackCount();
+  }, [loadConfigs, loadDatasources, loadUnackCount]);
+
+  // 面板打开时（含过滤条件变更）重新加载监控数据
+  useEffect(() => {
+    if (monitorOpen) {
+      loadMonitor();
+    }
+  }, [monitorOpen, loadMonitor]);
 
   // --- 创建/编辑 ---
   const handleOpenCreate = () => {
@@ -288,6 +344,17 @@ export default function SyncPage() {
     setViewingLogsConfigId(configId);
     loadLogs(configId);
     setLogsOpen(true);
+  };
+
+  // --- 监控告警 ---
+  const handleAckAlert = async (id: number) => {
+    try {
+      await ackSyncAlert(id);
+      message.success("告警已确认");
+      loadMonitor();
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "确认告警失败");
+    }
   };
 
   // --- 字段映射编辑 ---
@@ -542,6 +609,59 @@ export default function SyncPage() {
     },
   ];
 
+  // 告警表格列
+  const alertColumns: ColumnsType<SyncAlert> = [
+    {
+      title: "级别",
+      dataIndex: "level",
+      width: 70,
+      render: (level: string) => (
+        <Tag color={level === "error" ? "error" : "warning"}>
+          {level === "error" ? "错误" : "警告"}
+        </Tag>
+      ),
+    },
+    { title: "配置", dataIndex: "config_name", width: 140, ellipsis: true },
+    {
+      title: "内容",
+      dataIndex: "message",
+      ellipsis: true,
+      render: (v: string) => v || "-",
+    },
+    {
+      title: "时间",
+      dataIndex: "created_at",
+      width: 160,
+      render: (v: string) => new Date(v).toLocaleString("zh-CN"),
+    },
+    {
+      title: "状态",
+      dataIndex: "acknowledged",
+      width: 90,
+      render: (acked: boolean) =>
+        acked ? <Tag color="default">已确认</Tag> : <Tag color="processing">待处理</Tag>,
+    },
+    {
+      title: "操作",
+      width: 90,
+      render: (_: unknown, record: SyncAlert) =>
+        record.acknowledged ? (
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            —
+          </Text>
+        ) : (
+          <Button
+            type="link"
+            size="small"
+            icon={<CheckCircleOutlined />}
+            onClick={() => handleAckAlert(record.id)}
+          >
+            确认
+          </Button>
+        ),
+    },
+  ];
+
   // 预览采样数据列
   const previewSampleColumns =
     previewData && previewData.sample_rows.length > 0
@@ -563,6 +683,14 @@ export default function SyncPage() {
           {selectedIds.length > 0 && (
             <Text type="secondary">已选择 {selectedIds.length} 项</Text>
           )}
+          <Badge count={unackCount} size="small" offset={[-2, 2]}>
+            <Button
+              icon={<DashboardOutlined />}
+              onClick={() => setMonitorOpen(true)}
+            >
+              监控面板
+            </Button>
+          </Badge>
           <Button
             icon={<ThunderboltOutlined />}
             disabled={selectedIds.length === 0}
@@ -1243,6 +1371,104 @@ export default function SyncPage() {
             </Form>
           </div>
         )}
+      </Modal>
+
+      {/* 监控面板对话框 */}
+      <Modal
+        open={monitorOpen}
+        title="同步监控面板"
+        onCancel={() => setMonitorOpen(false)}
+        footer={null}
+        width={960}
+      >
+        <Space style={{ marginBottom: 12, width: "100%", justifyContent: "space-between" }}>
+          <Space>
+            <Text type="secondary">统计范围</Text>
+            <Segmented
+              value={statsDays ?? "all"}
+              onChange={(v) => setStatsDays(v === "all" ? null : Number(v))}
+              options={[
+                { label: "近 7 天", value: 7 },
+                { label: "近 30 天", value: 30 },
+                { label: "全部", value: "all" },
+              ]}
+            />
+          </Space>
+          <Button
+            size="small"
+            icon={<ReloadOutlined />}
+            onClick={loadMonitor}
+          >
+            刷新
+          </Button>
+        </Space>
+
+        <Spin spinning={monitorLoading}>
+          <Row gutter={16} style={{ marginBottom: 8 }}>
+            <Col span={6}>
+              <Statistic
+                title="成功率"
+                value={stats?.success_rate ?? 0}
+                suffix="%"
+                precision={1}
+                valueStyle={{
+                  color: (stats?.success_rate ?? 100) >= 90 ? "#3f8600" : "#cf1322",
+                }}
+              />
+            </Col>
+            <Col span={6}>
+              <Statistic title="执行次数" value={stats?.total ?? 0} />
+            </Col>
+            <Col span={6}>
+              <Statistic
+                title="失败次数"
+                value={stats?.failed ?? 0}
+                valueStyle={{ color: (stats?.failed ?? 0) > 0 ? "#cf1322" : undefined }}
+              />
+            </Col>
+            <Col span={6}>
+              <Statistic
+                title="平均耗时"
+                value={stats?.avg_duration_ms ?? 0}
+                suffix="ms"
+              />
+            </Col>
+          </Row>
+          <Row gutter={16} style={{ marginBottom: 16 }}>
+            <Col span={6}>
+              <Statistic title="成功" value={stats?.succeeded ?? 0} />
+            </Col>
+            <Col span={6}>
+              <Statistic title="部分成功" value={stats?.partial ?? 0} />
+            </Col>
+            <Col span={6}>
+              <Statistic title="累计写入行" value={stats?.total_rows_written ?? 0} />
+            </Col>
+            <Col span={6}>
+              <Statistic title="累计跳过行" value={stats?.total_rows_skipped ?? 0} />
+            </Col>
+          </Row>
+
+          <Space style={{ marginBottom: 8, width: "100%", justifyContent: "space-between" }}>
+            <Title level={5} style={{ margin: 0 }}>
+              失败告警
+            </Title>
+            <Checkbox
+              checked={onlyUnacked}
+              onChange={(e) => setOnlyUnacked(e.target.checked)}
+            >
+              仅看未确认
+            </Checkbox>
+          </Space>
+          <Table
+            columns={alertColumns}
+            dataSource={alerts}
+            rowKey="id"
+            size="small"
+            pagination={{ pageSize: 10 }}
+            locale={{ emptyText: onlyUnacked ? "暂无未确认告警" : "暂无告警记录" }}
+          />
+        </Spin>
       </Modal>
     </div>
   );

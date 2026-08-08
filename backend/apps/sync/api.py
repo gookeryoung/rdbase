@@ -27,10 +27,12 @@ from apps.accounts.permissions import require_admin
 from apps.datasources.engine import get_engine as get_ds_engine
 from apps.datasources.models import DataSource
 
-from .models import ConflictStrategy, SyncConfig, SyncFieldMapping, SyncLog
+from .models import AlertLevel, ConflictStrategy, SyncAlert, SyncConfig, SyncFieldMapping, SyncLog
 from .scheduling import CronError, validate_cron
 from .schemas import (
     MessageOut,
+    SyncAlertListOut,
+    SyncAlertOut,
     SyncBatchIn,
     SyncBatchOut,
     SyncConfigCreateIn,
@@ -44,6 +46,7 @@ from .schemas import (
     SyncResultOut,
     SyncScheduleIn,
     SyncSourceTableOut,
+    SyncStatsOut,
     SyncTargetTableOut,
     SyncTriggerIn,
 )
@@ -125,6 +128,20 @@ def _preview_to_out(preview: SyncPreview) -> SyncPreviewOut:
         pk_fields=preview.pk_fields,
         can_sync=preview.can_sync,
         error_message=preview.error_message,
+    )
+
+
+def _alert_to_out(alert: SyncAlert) -> SyncAlertOut:
+    """将 SyncAlert 模型转为 SyncAlertOut."""
+    return SyncAlertOut(
+        id=alert.pk,
+        config_id=alert.config_id,
+        config_name=alert.config.name,
+        level=alert.level,
+        message=alert.message,
+        acknowledged=alert.acknowledged,
+        acknowledged_at=alert.acknowledged_at,
+        created_at=alert.created_at,
     )
 
 
@@ -376,6 +393,82 @@ def list_logs(
     total = SyncLog.objects.count()
     body = SyncLogListOut(items=items, total=total).model_dump()
     return JsonResponse(body)
+
+
+# ================================================================
+# 监控与告警
+# ================================================================
+
+
+@router.get("/stats", response={200: SyncStatsOut})
+def get_stats(
+    request: HttpRequest,
+    config_id: int | None = None,
+    days: int | None = None,
+) -> HttpResponse:
+    """获取同步统计（成功率、平均耗时、总读写行数）.
+
+    可按 config_id 过滤到单个配置，按 days 限定最近 N 天（不传则统计全部）。
+    """
+    require_admin(request)
+    stats = SyncLog.aggregate_stats(config_id=config_id, days=days)
+    body = SyncStatsOut(
+        total=stats.total,
+        succeeded=stats.succeeded,
+        partial=stats.partial,
+        failed=stats.failed,
+        success_rate=stats.success_rate,
+        avg_duration_ms=stats.avg_duration_ms,
+        total_rows_read=stats.total_rows_read,
+        total_rows_written=stats.total_rows_written,
+        total_rows_skipped=stats.total_rows_skipped,
+    ).model_dump()
+    return JsonResponse(body)
+
+
+@router.get("/alerts", response={200: SyncAlertListOut})
+def list_alerts(
+    request: HttpRequest,
+    config_id: int | None = None,
+    acknowledged: bool | None = None,
+    level: str | None = None,
+    limit: int = 50,
+) -> HttpResponse:
+    """列出同步告警.
+
+    支持按 config_id、acknowledged（是否已确认）、level（告警级别）过滤。
+    返回项内含未确认告警总数，便于前端展示待处理数量徽标。
+    """
+    require_admin(request)
+
+    if level is not None and level not in {choice.value for choice in AlertLevel}:
+        raise HttpError(400, f"非法的告警级别：{level}")
+
+    qs = SyncAlert.objects.select_related("config").order_by("-created_at")
+    if config_id is not None:
+        qs = qs.filter(config_id=config_id)
+    if acknowledged is not None:
+        qs = qs.filter(acknowledged=acknowledged)
+    if level is not None:
+        qs = qs.filter(level=level)
+
+    items = [_alert_to_out(a) for a in qs[:limit]]
+    total = SyncAlert.objects.count()
+    unacknowledged = SyncAlert.objects.filter(acknowledged=False).count()
+    body = SyncAlertListOut(items=items, total=total, unacknowledged=unacknowledged).model_dump()
+    return JsonResponse(body)
+
+
+@router.post("/alerts/{alert_id}/ack", response={200: SyncAlertOut})
+def acknowledge_alert(request: HttpRequest, alert_id: int) -> HttpResponse:
+    """确认告警（标记为已处理）."""
+    require_admin(request)
+    try:
+        alert = SyncAlert.objects.select_related("config").get(pk=alert_id)
+    except SyncAlert.DoesNotExist:  # type: ignore[missing-attribute]
+        raise HttpError(404, f"告警 {alert_id} 不存在") from None
+    alert.acknowledge()
+    return JsonResponse(_alert_to_out(alert).model_dump())
 
 
 # ================================================================

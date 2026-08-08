@@ -9,9 +9,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 from django.db import models
+from django.db.models import Avg, Count, Q, Sum
+from django.utils import timezone
 
 from apps.accounts.models import User
 from apps.datasources.models import DataSource
@@ -52,6 +55,32 @@ class ConflictStrategy(models.TextChoices):
     UPSERT = "upsert", "冲突则更新"
     SKIP = "skip", "冲突则跳过"
     ERROR = "error", "冲突则报错"
+
+
+class AlertLevel(models.TextChoices):
+    """同步告警级别枚举."""
+
+    WARNING = "warning", "警告"
+    ERROR = "error", "错误"
+
+
+@dataclass(frozen=True)
+class SyncStats:
+    """同步执行统计聚合结果.
+
+    汇总一段时间内（或某配置）的同步日志，用于监控面板展示。
+    success_rate 为百分比（0-100，保留一位小数），无日志时为 0。
+    """
+
+    total: int
+    succeeded: int
+    partial: int
+    failed: int
+    success_rate: float
+    avg_duration_ms: int
+    total_rows_read: int
+    total_rows_written: int
+    total_rows_skipped: int
 
 
 class SyncConfig(models.Model):
@@ -272,13 +301,116 @@ class SyncLog(models.Model):
     def __str__(self) -> str:  # type: ignore[missing-override-decorator]
         return f"{self.config.name} {self.started_at}: {self.status} ({self.rows_written}行)"  # type: ignore[bad-return]
 
+    @classmethod
+    def aggregate_stats(cls, *, config_id: int | None = None, days: int | None = None) -> SyncStats:
+        """聚合同步日志，计算成功率、平均耗时与总读写行数.
+
+        Args:
+            config_id: 仅统计指定配置，None 则统计全部。
+            days: 仅统计最近 days 天（按 started_at），None 或非正数则不限时间。
+
+        Returns:
+            SyncStats: 聚合统计结果，无匹配日志时各项为 0。
+        """
+        qs = cls.objects.all()
+        if config_id is not None:
+            qs = qs.filter(config_id=config_id)
+        if days is not None and days > 0:
+            qs = qs.filter(started_at__gte=timezone.now() - timedelta(days=days))
+
+        agg = qs.aggregate(
+            total=Count("id"),
+            succeeded=Count("id", filter=Q(status=SyncLogStatus.SUCCESS)),
+            partial=Count("id", filter=Q(status=SyncLogStatus.PARTIAL)),
+            failed=Count("id", filter=Q(status=SyncLogStatus.FAILED)),
+            avg_duration=Avg("duration_ms"),
+            rows_read=Sum("rows_read"),
+            rows_written=Sum("rows_written"),
+            rows_skipped=Sum("rows_skipped"),
+        )
+
+        total = agg["total"] or 0
+        succeeded = agg["succeeded"] or 0
+        # 成功率将 PARTIAL 视为部分成功，仅完全成功计入分子，保留一位小数。
+        success_rate = round(succeeded / total * 100, 1) if total else 0.0
+
+        return SyncStats(
+            total=total,
+            succeeded=succeeded,
+            partial=agg["partial"] or 0,
+            failed=agg["failed"] or 0,
+            success_rate=success_rate,
+            avg_duration_ms=int(agg["avg_duration"] or 0),
+            total_rows_read=agg["rows_read"] or 0,
+            total_rows_written=agg["rows_written"] or 0,
+            total_rows_skipped=agg["rows_skipped"] or 0,
+        )
+
+
+class SyncAlert(models.Model):
+    """同步告警记录.
+
+    同步失败（达最大重试仍失败）时产生告警，供监控面板展示与确认处理。
+    """
+
+    objects: models.Manager[SyncAlert]
+
+    config = models.ForeignKey(
+        SyncConfig,
+        on_delete=models.CASCADE,
+        related_name="alerts",
+        verbose_name="同步配置",
+    )
+    level = models.CharField(
+        max_length=20,
+        choices=AlertLevel.choices,
+        default=AlertLevel.ERROR,
+        verbose_name="告警级别",
+    )
+    message = models.TextField(verbose_name="告警内容")
+    acknowledged = models.BooleanField(default=False, verbose_name="是否已确认")
+    acknowledged_at = models.DateTimeField(null=True, blank=True, verbose_name="确认时间")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
+
+    class Meta:
+        verbose_name = "同步告警"
+        verbose_name_plural = "同步告警"
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:  # type: ignore[missing-override-decorator]
+        return f"[{self.level}] {self.config.name}: {self.message[:40]}"  # type: ignore[bad-return]
+
+    @classmethod
+    def raise_alert(cls, config: SyncConfig, message: str, *, level: str = AlertLevel.ERROR) -> SyncAlert:
+        """为指定配置创建一条告警记录.
+
+        Args:
+            config: 触发告警的同步配置。
+            message: 告警内容（通常为失败原因）。
+            level: 告警级别，默认 ERROR。
+
+        Returns:
+            SyncAlert: 新建的告警记录。
+        """
+        return cls.objects.create(config=config, level=level, message=message)
+
+    def acknowledge(self, *, save: bool = True) -> None:
+        """确认告警（标记已处理并记录确认时间）."""
+        self.acknowledged = True
+        self.acknowledged_at = timezone.now()
+        if save:
+            self.save(update_fields=["acknowledged", "acknowledged_at"])
+
 
 __all__ = [
+    "AlertLevel",
     "ConflictStrategy",
+    "SyncAlert",
     "SyncConfig",
     "SyncFieldMapping",
     "SyncLog",
     "SyncLogStatus",
     "SyncMode",
+    "SyncStats",
     "SyncStatus",
 ]
