@@ -73,3 +73,12 @@ class MessageOut(Schema):
     """通用消息响应."""
 
     detail: str
+
+
+class ScanResultOut(Schema):
+    """扫描结果响应."""
+
+    directory: str
+    scanned: int
+    created: list[DataSourceOut]
+    skipped: list[str]

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from .base import *  # noqa: F403
-from .base import BASE_DIR
+from .base import DATA_DIR
 
 DEBUG = True
 ALLOWED_HOSTS = ["*"]
@@ -12,7 +12,7 @@ ALLOWED_HOSTS = ["*"]
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db" / "db.sqlite3",
+        "NAME": DATA_DIR / "db.sqlite3",
     }
 }
 

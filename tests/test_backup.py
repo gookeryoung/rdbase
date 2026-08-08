@@ -54,7 +54,7 @@ def test_sqlite_db_path_from_db_name_absolute() -> None:
 
 def test_sqlite_db_path_default(tmp_path: Path) -> None:
     p = backup.sqlite_db_path({}, tmp_path)
-    assert p == tmp_path / "backend" / "db" / "db.sqlite3"
+    assert p == tmp_path / "dbs" / "db.sqlite3"
 
 
 def test_pg_dump_cmd() -> None:
@@ -122,8 +122,8 @@ def test_read_version_missing(tmp_path: Path) -> None:
 
 def test_main_sqlite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     app = tmp_path / "app"
-    (app / "backend" / "db").mkdir(parents=True)
-    db = app / "backend" / "db" / "db.sqlite3"
+    (app / "dbs").mkdir(parents=True)
+    db = app / "dbs" / "db.sqlite3"
     db.write_text("SQLITE_CONTENT", encoding="utf-8")
     (app / ".env").write_text("DB_ENGINE=sqlite\n", encoding="utf-8")
     (app / "backend" / "rdbase").mkdir(parents=True)

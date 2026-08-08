@@ -75,7 +75,7 @@ def sqlite_db_path(env: dict[str, str], app_dir: Path) -> Path:
     if name and (name.endswith(".sqlite3") or name.endswith(".sqlite") or name.endswith(".db")):
         path = Path(name)
         return path if path.is_absolute() else app_dir / path
-    return app_dir / "backend" / "db" / "db.sqlite3"
+    return app_dir / "dbs" / "db.sqlite3"
 
 
 def pg_restore_cmd(env: dict[str, str], dump_file: Path) -> list[str]:

@@ -10,6 +10,12 @@ from pathlib import Path
 # 项目根目录：backend/rdbase/settings/base.py -> backend/
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
+# 仓库根目录（backend/ 的上一级），用于存放跨环境的本地数据文件
+ROOT_DIR = BASE_DIR.parent
+
+# 本地数据目录：SQLite 数据库文件等运行时产物存放于此（已加入 .gitignore）
+DATA_DIR = ROOT_DIR / "dbs"
+
 # 密钥：开发可用占位，生产必须从环境变量读取
 SECRET_KEY = "django-insecure-development-key-do-not-use-in-production"
 
@@ -79,7 +85,7 @@ ASGI_APPLICATION = "rdbase.asgi.application"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db" / "db.sqlite3",
+        "NAME": DATA_DIR / "db.sqlite3",
     }
 }
 

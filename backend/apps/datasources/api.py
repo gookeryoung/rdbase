@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, cast
 
 from django.http import HttpRequest, HttpResponse, JsonResponse
@@ -21,11 +22,13 @@ from apps.audit.models import AuditAction
 
 from .engine import dispose_engine, verify_connection
 from .models import DataSource, EngineType
+from .scanner import scan_sqlite_files
 from .schemas import (
     DataSourceCreateIn,
     DataSourceOut,
     DataSourceUpdateIn,
     MessageOut,
+    ScanResultOut,
     TestConnectionIn,
     TestConnectionOut,
 )
@@ -123,6 +126,35 @@ def test_temp_datasource(request: HttpRequest, payload: TestConnectionIn) -> Htt
     ds.set_password(payload.password)
     ok, detail = verify_connection(ds)
     return JsonResponse({"ok": ok, "detail": detail})
+
+
+@router.post("/scan", response={200: ScanResultOut})
+def scan_datasources(request: HttpRequest, directory: str | None = None) -> HttpResponse:
+    """扫描本地 SQLite 数据库文件并注册为数据源（仅管理员）.
+
+    可通过 ``directory`` 查询参数指定扫描目录，默认使用 ``DATA_DIR``。
+    """
+    require_admin(request)
+    target = Path(directory) if directory else None
+    result = scan_sqlite_files(target)
+    log_audit(
+        request,
+        action=AuditAction.DATASOURCE_SCAN,
+        resource_type="datasource",
+        extra={
+            "directory": str(result.directory),
+            "scanned": result.scanned,
+            "created": [ds.name for ds in result.created],
+            "skipped_count": len(result.skipped),
+        },
+    )
+    body = {
+        "directory": str(result.directory),
+        "scanned": result.scanned,
+        "created": [DataSourceOut(**_ds_dict(ds)).model_dump() for ds in result.created],
+        "skipped": result.skipped,
+    }
+    return JsonResponse(body)
 
 
 @router.get("/{ds_id}", response={200: DataSourceOut})

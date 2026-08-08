@@ -1,4 +1,4 @@
-extend-exclude = ["template", "docs", "frontend", "backend/db", "backend/staticfiles"]
+extend-exclude = ["template", "docs", "frontend", "dbs", "backend/staticfiles"]
 line-length    = 120
 target-version = "py310"
 

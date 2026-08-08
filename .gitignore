@@ -39,7 +39,7 @@ docs/_build/
 .trae/ref
 
 # Django 运行时产物
-backend/db/
+/dbs/
 backend/staticfiles/
 backend/media/
 

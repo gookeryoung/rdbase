@@ -33,7 +33,7 @@ def test_detect_db_engine() -> None:
 
 
 def test_sqlite_db_path_default(tmp_path: Path) -> None:
-    assert restore.sqlite_db_path({}, tmp_path) == tmp_path / "backend" / "db" / "db.sqlite3"
+    assert restore.sqlite_db_path({}, tmp_path) == tmp_path / "dbs" / "db.sqlite3"
 
 
 def test_pg_restore_cmd() -> None:
@@ -72,8 +72,8 @@ def test_extract_archive(tmp_path: Path) -> None:
 
 def test_main_sqlite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     app = tmp_path / "app"
-    (app / "backend" / "db").mkdir(parents=True)
-    target = app / "backend" / "db" / "db.sqlite3"
+    (app / "dbs").mkdir(parents=True)
+    target = app / "dbs" / "db.sqlite3"
     target.write_text("OLD", encoding="utf-8")
     (app / ".env").write_text("DB_ENGINE=sqlite\n", encoding="utf-8")
 

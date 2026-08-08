@@ -51,8 +51,8 @@ def test_audit_status_choices() -> None:
 
 
 def test_audit_action_choices_count() -> None:
-    """AuditAction 共 18 个枚举值."""
-    assert len(AuditAction.choices) == 18
+    """AuditAction 共 19 个枚举值."""
+    assert len(AuditAction.choices) == 19
 
 
 def test_audit_log_meta_ordering() -> None:
