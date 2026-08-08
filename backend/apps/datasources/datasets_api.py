@@ -6,19 +6,25 @@
   ``require_admin`` 校验，复用 ``log_audit`` 记录 ``DATASET_*`` 审计动作。
 - **公开查询端点**（``GET /{slug}/rows``）：``ApiTokenAuth`` 认证 + ``datasets:read``
   scope 校验，供外部应用按 slug 查询数据。
+- **公开写入端点**（``POST /{slug}/rows``）：``ApiTokenAuth`` 认证 +
+  ``datasets:write`` scope 校验，单行/批量 UPSERT；接入限流、每日配额、幂等保护
+  与 ``DATASET_WRITE`` 审计。
 - **行级过滤**：``Dataset.filter_expression`` 与查询时 ``filters`` 参数 AND 组合；
   同名列以 Dataset 配置为准，防止调用方绕过。
 - **列级权限**：``Dataset.fields_whitelist`` 非空时，请求 ``columns`` 必须是其子集，
-  否则 400；``columns`` 未指定时返回白名单列（或全部列）。
-- **is_active=False 不可查询**：公开端点对未启用数据集返回 404；管理端点仍可访问。
+  否则 400；``columns`` 未指定时返回白名单列（或全部列）。写入端点同样校验
+  ``fields_whitelist``：rows 的所有键必须是白名单子集，实现列级写权限。
+- **is_active=False 不可查询/写入**：公开端点对未启用数据集返回 404；管理端点仍可访问。
 - **version 自增**：每次 PATCH 自动 ``increment_version``，调用方可据此检测契约变化。
 """
 
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, cast
 
+from django.conf import settings
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from ninja import Router
 from ninja.errors import HttpError
@@ -28,8 +34,17 @@ from apps.accounts.auth import ApiTokenAuth, JWTAuth
 from apps.accounts.models import ApiToken, User
 from apps.accounts.permissions import require_admin
 from apps.audit.audit import log_audit
-from apps.audit.models import AuditAction
-from apps.manager.query import QueryError, get_column_names, query_table_rows
+from apps.audit.models import AuditAction, AuditStatus
+from apps.ingest.models import ConflictStrategy
+from apps.ingest.writer import write_rows
+from apps.manager.query import QueryError, get_column_names, get_pk_columns, query_table_rows
+from apps.system.idempotency import (
+    check_idempotency,
+    release_idempotency,
+    store_idempotency_result,
+)
+from apps.system.quota import check_and_consume_quota
+from apps.system.rate_limiter import check_rate_limit
 
 from .engine import get_engine
 from .models import Dataset, DataSource
@@ -39,8 +54,13 @@ from .schemas import (
     DatasetOut,
     DatasetRowsOut,
     DatasetUpdateIn,
+    DatasetWriteIn,
+    DatasetWriteOut,
     MessageOut,
 )
+
+# 单批写入行数上限（防一次性写入过大请求体）。
+_MAX_BATCH_ROWS = 1000
 
 # 管理端 Router：默认 JWT 认证，公开端点通过路由级 auth 覆盖
 router = Router(tags=["datasets"], auth=JWTAuth())
@@ -470,6 +490,209 @@ def query_rows(  # noqa: PLR0913, PLR0917
         page_size=page_size,
         columns=returned_columns,
     ).model_dump()
+    return JsonResponse(body)
+
+
+# ============================================================
+# 公开写入端点：POST /rows
+# ============================================================
+
+
+def _validate_conflict_strategy(strategy: str) -> str:
+    """校验冲突策略取值合法，返回归一化后的策略值，非法抛 400."""
+    valid = {choice.value for choice in ConflictStrategy}
+    if strategy not in valid:
+        raise HttpError(400, f"非法的冲突策略：{strategy}（可选：{', '.join(sorted(valid))}）")
+    return strategy
+
+
+def _collect_row_fields(rows: list[dict[str, Any]]) -> list[str]:
+    """收集 rows 中出现过的全部字段名（保持首次出现顺序）."""
+    seen: dict[str, None] = {}
+    for row in rows:
+        for col in row:
+            seen.setdefault(col, None)
+    return list(seen)
+
+
+@router.post("/{slug}/rows", response={200: DatasetWriteOut}, auth=ApiTokenAuth())
+def write_dataset_rows(  # noqa: PLR0912
+    request: HttpRequest,
+    slug: str,
+    payload: DatasetWriteIn,
+) -> HttpResponse:
+    """外部应用按 slug 写入数据集行（API Token + datasets:write scope）.
+
+    支持单行/批量 UPSERT，冲突策略复用 ``ConflictStrategy``（upsert/skip/error）。
+
+    处理流程：
+
+    1. ``datasets:write`` scope 校验。
+    2. 幂等检查（``Idempotency-Key`` 命中则回放缓存）。
+    3. 速率限制（每 Token 每分钟 ``RATE_LIMIT_DATASET_WRITE`` 次，超限 429）。
+    4. 数据集存在性 + ``is_active`` 校验（404）；数据源 ``is_active`` 校验（404）。
+    5. 入参校验：rows 非空（400）、单批 <= 1000 行（400）、冲突策略合法（400）。
+    6. 列级写权限：``fields_whitelist`` 非空时 rows 所有键必须是其子集（400）；
+       反射校验 rows 键是表列子集（400）。
+    7. 主键推断：``pk_fields`` 未传时由 ``get_pk_columns`` 反射；无主键且策略非 error
+       时 400（UPSERT/SKIP 依赖主键判定冲突）。
+    8. 每日配额（``DATASET_WRITE_DAILY_QUOTA``，超限 429）。
+    9. 调 ``write_rows`` 写入；记录 ``DATASET_WRITE`` 审计日志。
+    10. 存幂等结果返回。
+    """
+    token = _require_scope(request, "datasets:write")
+
+    # 幂等检查：命中已完成缓存则直接回放，命中 in_progress 返回 409。
+    cached = check_idempotency(request)
+    if cached is not None:
+        return cached
+
+    # 速率限制：每 Token 每分钟写入请求数上限。
+    rate_key = f"dataset_write:{token.prefix}"
+    allowed, retry_after = check_rate_limit(
+        rate_key,
+        max_requests=settings.RATE_LIMIT_DATASET_WRITE,
+        window_seconds=60,
+    )
+    if not allowed:
+        release_idempotency(request)
+        resp = JsonResponse(
+            {"detail": f"写入请求过于频繁，请 {retry_after} 秒后重试"},
+            status=429,
+        )
+        resp["Retry-After"] = str(retry_after)
+        return resp
+
+    ds = _get_dataset_or_404(slug, active_only=True)
+    if not ds.datasource.is_active:
+        release_idempotency(request)
+        raise HttpError(404, "数据源已停用")
+
+    # 入参校验
+    rows = payload.rows
+    if not rows:
+        release_idempotency(request)
+        raise HttpError(400, "rows 不能为空")
+    if len(rows) > _MAX_BATCH_ROWS:
+        release_idempotency(request)
+        raise HttpError(400, f"单批写入行数不能超过 {_MAX_BATCH_ROWS}")
+    strategy = _validate_conflict_strategy(payload.conflict_strategy)
+
+    engine = get_engine(ds.datasource)
+    schema = ds.schema_name or None
+    try:
+        table_columns = get_column_names(engine, ds.table_name, schema)
+    except QueryError as exc:
+        release_idempotency(request)
+        raise HttpError(400, str(exc)) from None
+
+    table_cols_set = set(table_columns)
+    # 列级写权限：白名单非空时 rows 键必须是其子集
+    whitelist = list(cast("list[str]", ds.fields_whitelist))
+    if whitelist:
+        whitelist_set = set(whitelist)
+        for i, row in enumerate(rows):
+            invalid = [c for c in row if c not in whitelist_set]
+            if invalid:
+                release_idempotency(request)
+                raise HttpError(400, f"第 {i} 行包含非白名单列: {invalid}")
+    # 反射校验：rows 键必须是表列子集
+    for i, row in enumerate(rows):
+        unknown = [c for c in row if c not in table_cols_set]
+        if unknown:
+            release_idempotency(request)
+            raise HttpError(400, f"第 {i} 行包含不存在的列: {unknown}")
+
+    # 主键推断
+    if payload.pk_fields:
+        pk_fields = list(payload.pk_fields)
+        # 校验传入的主键列确实存在
+        bad_pk = [c for c in pk_fields if c not in table_cols_set]
+        if bad_pk:
+            release_idempotency(request)
+            raise HttpError(400, f"pk_fields 包含不存在的列: {bad_pk}")
+    else:
+        try:
+            pk_fields = get_pk_columns(engine, ds.table_name, schema)
+        except QueryError as exc:
+            release_idempotency(request)
+            raise HttpError(400, str(exc)) from None
+        if not pk_fields and strategy != ConflictStrategy.ERROR.value:
+            release_idempotency(request)
+            raise HttpError(
+                400,
+                "表无主键且冲突策略非 error，无法判定冲突；请显式传入 pk_fields 或改用 error 策略",
+            )
+
+    # 每日配额：每 Token 每日写入总行数上限
+    quota_key = f"dataset_write_daily:{token.prefix}"
+    quota_allowed, _remaining = check_and_consume_quota(
+        quota_key,
+        rows=len(rows),
+        daily_limit=settings.DATASET_WRITE_DAILY_QUOTA,
+    )
+    if not quota_allowed:
+        release_idempotency(request)
+        resp = JsonResponse(
+            {"detail": "已达每日写入配额上限，请明日再试"},
+            status=429,
+        )
+        return resp
+
+    # 写入目标表
+    target_fields = _collect_row_fields(rows)
+    start = time.perf_counter()
+    try:
+        written, skipped = write_rows(
+            engine,
+            rows,
+            target_table=ds.table_name,
+            target_fields=target_fields,
+            pk_fields=pk_fields,
+            conflict_strategy=strategy,
+        )
+    except ValueError as exc:
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        log_audit(
+            request,
+            action=AuditAction.DATASET_WRITE,
+            status=AuditStatus.FAILURE,
+            resource_type="dataset",
+            resource_id=str(ds.pk),
+            datasource_id=ds.datasource_id,
+            datasource_name=ds.datasource.name,
+            row_count=len(rows),
+            elapsed_ms=elapsed_ms,
+            error_message=str(exc),
+            extra={"slug": ds.slug, "strategy": strategy},
+        )
+        release_idempotency(request)
+        raise HttpError(400, str(exc)) from exc
+
+    elapsed_ms = int((time.perf_counter() - start) * 1000)
+    log_audit(
+        request,
+        action=AuditAction.DATASET_WRITE,
+        resource_type="dataset",
+        resource_id=str(ds.pk),
+        datasource_id=ds.datasource_id,
+        datasource_name=ds.datasource.name,
+        row_count=written + skipped,
+        elapsed_ms=elapsed_ms,
+        extra={
+            "slug": ds.slug,
+            "strategy": strategy,
+            "written": written,
+            "skipped": skipped,
+        },
+    )
+
+    body = DatasetWriteOut(
+        written=written,
+        skipped=skipped,
+        total=written + skipped,
+    ).model_dump()
+    store_idempotency_result(request, 200, body)
     return JsonResponse(body)
 
 

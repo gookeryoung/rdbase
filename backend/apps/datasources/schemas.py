@@ -156,3 +156,25 @@ class DatasetRowsOut(Schema):
     page: int
     page_size: int
     columns: list[str]
+
+
+class DatasetWriteIn(Schema):
+    """数据集写入请求（单行/批量 UPSERT）.
+
+    Attributes:
+        rows: 行数据列表，每项为 ``列名 -> 值`` 的 dict。
+        conflict_strategy: 主键冲突处理策略（upsert/skip/error），默认 upsert。
+        pk_fields: 主键字段名列表；为空时由反射自动推断。
+    """
+
+    rows: list[dict[str, Any]]
+    conflict_strategy: str = "upsert"
+    pk_fields: list[str] | None = None
+
+
+class DatasetWriteOut(Schema):
+    """数据集写入响应."""
+
+    written: int
+    skipped: int
+    total: int

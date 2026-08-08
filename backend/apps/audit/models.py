@@ -43,6 +43,7 @@ class AuditAction(models.TextChoices):
     DATASET_CREATE = "dataset.create", "创建数据集"
     DATASET_UPDATE = "dataset.update", "更新数据集"
     DATASET_DELETE = "dataset.delete", "删除数据集"
+    DATASET_WRITE = "dataset.write", "写入数据集"
     # 设计器
     DRAFT_CREATE = "draft.create", "创建草稿"
     DRAFT_UPDATE = "draft.update", "更新草稿"

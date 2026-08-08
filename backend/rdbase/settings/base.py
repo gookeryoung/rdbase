@@ -97,6 +97,12 @@ DATABASES = {
 REDIS_URL: str = ""
 REDIS_FAKE: bool = False
 
+# 数据集写入端点限流与配额（req-03 item 43）
+# - RATE_LIMIT_DATASET_WRITE: 单 Token 每分钟最大写入请求数
+# - DATASET_WRITE_DAILY_QUOTA: 单 Token 每日写入总行数上限
+RATE_LIMIT_DATASET_WRITE: int = 60
+DATASET_WRITE_DAILY_QUOTA: int = 10000
+
 # 密码验证
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
