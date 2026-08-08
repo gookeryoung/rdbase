@@ -139,7 +139,7 @@ from enum import Enum, IntEnum, auto
 class TaskStatus(Enum):
     """任务生命周期状态。"""
 
-    PENDING = auto()    # auto() 自动分配递增值
+    PENDING = auto()  # auto() 自动分配递增值
     RUNNING = auto()
     DONE = auto()
     FAILED = auto()
@@ -186,6 +186,7 @@ from typing import List
 @dataclass(frozen=True)
 class Address:
     """地址值对象。"""
+
     city: str
     street: str
     zip_code: str
@@ -194,6 +195,7 @@ class Address:
 @dataclass
 class User:
     """用户聚合，通过组合持有地址（而非继承 Address）。"""
+
     name: str
     address: Address  # has-a 关系
     aliases: List[str] = field(default_factory=list)
@@ -358,6 +360,7 @@ class JsonSerializableMixin:
     def to_json(self) -> str:
         """序列化为 JSON 字符串。"""
         import json
+
         return json.dumps(self.to_dict(), ensure_ascii=False)
 
 
@@ -409,14 +412,17 @@ class Parser(ABC):
 
 class JsonParser(Parser):
     """JSON 解析器。"""
+
     def parse(self, raw: str) -> dict:
         """解析 JSON。"""
         import json
+
         return json.loads(raw)
 
 
 class YamlParser(Parser):
     """YAML 解析器。"""
+
     def parse(self, raw: str) -> dict:
         """解析 YAML。"""
         # 实际用 yaml.safe_load
@@ -425,6 +431,7 @@ class YamlParser(Parser):
 
 class TomlParser(Parser):
     """TOML 解析器。"""
+
     def parse(self, raw: str) -> dict:
         """解析 TOML。"""
         # 实际用 tomllib.loads
@@ -448,6 +455,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class SortConfig:
     """排序策略配置。"""
+
     key: Callable[[object], object]
     reverse: bool = False
 
@@ -495,6 +503,7 @@ class EventBus:
             except (TypeError, ValueError) as exc:
                 # 第三方回调异常仅记录，不影响主流程
                 import logging
+
                 logging.getLogger(__name__).warning("事件处理器异常: %s", exc)
 
 

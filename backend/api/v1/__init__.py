@@ -10,6 +10,7 @@ from apps.accounts.users import router as users_router
 from apps.audit.api import router as audit_router
 from apps.datasources.api import router as datasources_router
 from apps.designer.api import router as designer_router
+from apps.ingest.api import router as ingest_router
 from apps.manager.api import router as manager_router
 from apps.settings.api import router as settings_router
 from apps.sync.api import router as sync_router
@@ -29,3 +30,4 @@ api.add_router("/manager", manager_router)
 api.add_router("/audit", audit_router)
 api.add_router("/settings", settings_router)
 api.add_router("/sync", sync_router)
+api.add_router("/ingest", ingest_router)

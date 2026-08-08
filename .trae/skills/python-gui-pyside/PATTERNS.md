@@ -20,14 +20,26 @@ from __future__ import annotations
 try:
     from PySide2.QtCore import Qt
     from PySide2.QtWidgets import (
-        QFormLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-        QSpinBox, QVBoxLayout, QWidget,
+        QFormLayout,
+        QHBoxLayout,
+        QLabel,
+        QLineEdit,
+        QPushButton,
+        QSpinBox,
+        QVBoxLayout,
+        QWidget,
     )
 except ImportError:
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import (
-        QFormLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-        QSpinBox, QVBoxLayout, QWidget,
+        QFormLayout,
+        QHBoxLayout,
+        QLabel,
+        QLineEdit,
+        QPushButton,
+        QSpinBox,
+        QVBoxLayout,
+        QWidget,
     )
 
 from rdbase import theme
@@ -55,9 +67,7 @@ class ValidatedField(QWidget):
         """显示错误信息。"""
         self._error_label.setText(message)
         self._error_label.show()
-        self._widget.setStyleSheet(
-            f"border: 2px solid {theme.COLOR_DANGER}; border-radius: {theme.RADIUS_SM};"
-        )
+        self._widget.setStyleSheet(f"border: 2px solid {theme.COLOR_DANGER}; border-radius: {theme.RADIUS_SM};")
 
     def _clear_error(self) -> None:
         """清除错误状态。"""
@@ -253,6 +263,7 @@ try:
     from PySide2.QtGui import QAction, QKeySequence
 except ImportError:
     from PySide6.QtGui import QAction, QKeySequence
+
     # PySide6 中 QAction 从 QtGui 导入；PySide2 从 QtWidgets 导入
     try:
         from PySide2.QtWidgets import QAction  # type: ignore[no-redef]

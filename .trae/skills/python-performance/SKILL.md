@@ -70,10 +70,10 @@ def measure_time(
 def format_stats(timings: list[float]) -> str:
     """格式化耗时统计为可读字符串。"""
     return (
-        f"min={min(timings)*1000:.2f}ms "
-        f"median={statistics.median(timings)*1000:.2f}ms "
-        f"mean={statistics.mean(timings)*1000:.2f}ms "
-        f"stdev={statistics.stdev(timings)*1000:.2f}ms "
+        f"min={min(timings) * 1000:.2f}ms "
+        f"median={statistics.median(timings) * 1000:.2f}ms "
+        f"mean={statistics.mean(timings) * 1000:.2f}ms "
+        f"stdev={statistics.stdev(timings) * 1000:.2f}ms "
         f"n={len(timings)}"
     )
 ```
@@ -332,10 +332,10 @@ from __future__ import annotations
 
 def process_items(items: list[int]) -> list[int]:
     """逐行剖析此函数。"""
-    result = []                                    # 装饰后显示每行耗时
-    for item in items:                             # 循环本身耗时
-        squared = item * item                      # 计算
-        result.append(squared)                     # append 耗时
+    result = []  # 装饰后显示每行耗时
+    for item in items:  # 循环本身耗时
+        squared = item * item  # 计算
+        result.append(squared)  # append 耗时
     return result
 
 
@@ -571,6 +571,7 @@ from __future__ import annotations
 
 class PointDict:
     """普通类：每个实例有 __dict__（约 100+ 字节额外开销）。"""
+
     def __init__(self, x: float, y: float) -> None:
         self.x = x
         self.y = y
@@ -578,6 +579,7 @@ class PointDict:
 
 class PointSlots:
     """__slots__ 类：无 __dict__，省内存。"""
+
     __slots__ = ("x", "y")
 
     def __init__(self, x: float, y: float) -> None:
@@ -627,6 +629,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class Point:
     """不可变值对象：天然无需深拷贝。"""
+
     x: float
     y: float
 

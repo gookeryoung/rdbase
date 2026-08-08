@@ -33,11 +33,11 @@ def git_branches(repo: Path) -> list[str]:
     result = subprocess.run(
         ["git", "branch", "--list", "--format=%(refname:short)"],
         cwd=repo,
-        check=True,                  # 非零退出码抛 CalledProcessError
-        capture_output=True,         # 捕获 stdout/stderr
-        text=True,                   # 返回 str 而非 bytes
-        encoding="utf-8",            # 显式编码，Windows 默认 GBK 会乱码
-        timeout=10,                  # 10 秒超时抛 TimeoutExpired
+        check=True,  # 非零退出码抛 CalledProcessError
+        capture_output=True,  # 捕获 stdout/stderr
+        text=True,  # 返回 str 而非 bytes
+        encoding="utf-8",  # 显式编码，Windows 默认 GBK 会乱码
+        timeout=10,  # 10 秒超时抛 TimeoutExpired
     )
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 ```
@@ -63,11 +63,19 @@ from pathlib import Path
 def convert_video(src: Path, dst: Path, crf: int = 23) -> None:
     """调用 ffmpeg 转码视频（list[str] 形式，shlex.join 仅用于日志显示）。"""
     cmd = [
-        "ffmpeg", "-y", "-i", str(src),     # 输入文件
-        "-c:v", "libx264", "-crf", str(crf),  # 数字也需转 str
-        "-c:a", "aac", str(dst),
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(src),  # 输入文件
+        "-c:v",
+        "libx264",
+        "-crf",
+        str(crf),  # 数字也需转 str
+        "-c:a",
+        "aac",
+        str(dst),
     ]
-    print(f"执行命令: {shlex.join(cmd)}")   # 仅日志显示
+    print(f"执行命令: {shlex.join(cmd)}")  # 仅日志显示
     subprocess.run(cmd, check=True, capture_output=True, text=True, encoding="utf-8")
 ```
 
@@ -88,7 +96,11 @@ from typing import Iterator
 def run_and_capture(cmd: list[str]) -> tuple[str, str]:
     """运行命令并返回 (stdout, stderr)。"""
     r = subprocess.run(
-        cmd, check=True, capture_output=True, text=True, encoding="utf-8",
+        cmd,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
     )
     return r.stdout, r.stderr
 
@@ -96,10 +108,12 @@ def run_and_capture(cmd: list[str]) -> tuple[str, str]:
 def run_merge_output(cmd: list[str]) -> str:
     """合并 stdout 与 stderr 到一个流（按时间顺序查看）。"""
     r = subprocess.run(
-        cmd, check=True,
+        cmd,
+        check=True,
         stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,       # stderr 重定向到 stdout
-        text=True, encoding="utf-8",
+        stderr=subprocess.STDOUT,  # stderr 重定向到 stdout
+        text=True,
+        encoding="utf-8",
     )
     return r.stdout
 
@@ -107,7 +121,9 @@ def run_merge_output(cmd: list[str]) -> str:
 def iter_command_output(cmd: list[str], chunk_size: int = 8192) -> Iterator[bytes]:
     """生成器：分块产出子进程 stdout（大输出流式，不爆内存）。"""
     with subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     ) as proc:
         assert proc.stdout is not None
         while True:
@@ -142,12 +158,13 @@ def stream_lines(cmd: list[str]) -> Iterator[str]:
     with subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,        # 合并到 stdout
-        text=True, encoding="utf-8",
-        bufsize=1,                       # 行缓冲（text 模式才有效）
+        stderr=subprocess.STDOUT,  # 合并到 stdout
+        text=True,
+        encoding="utf-8",
+        bufsize=1,  # 行缓冲（text 模式才有效）
     ) as proc:
         assert proc.stdout is not None
-        for line in proc.stdout:         # 逐行迭代，实时产出
+        for line in proc.stdout:  # 逐行迭代，实时产出
             yield line.rstrip("\n")
         proc.wait()
         if proc.returncode != 0:
@@ -172,8 +189,11 @@ import subprocess
 def popen_with_timeout(cmd: list[str], timeout: float = 30) -> str:
     """Popen 带超时：超时后必须手动 kill + communicate 回收（run 自动 kill）。"""
     with subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, encoding="utf-8",
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
     ) as proc:
         try:
             out, err = proc.communicate(timeout=timeout)
@@ -181,18 +201,18 @@ def popen_with_timeout(cmd: list[str], timeout: float = 30) -> str:
                 raise subprocess.CalledProcessError(proc.returncode, cmd, out, err)
             return out
         except subprocess.TimeoutExpired:
-            proc.kill()                  # 发 SIGKILL（强制终止）
-            proc.communicate()           # 必须再 communicate 回收僵尸
+            proc.kill()  # 发 SIGKILL（强制终止）
+            proc.communicate()  # 必须再 communicate 回收僵尸
             raise
 
 
 def graceful_terminate(proc: subprocess.Popen, grace: float = 5) -> int:
     """优雅终止：SIGTERM → 等待 grace 秒 → SIGKILL 回退（SIGTERM 允许子进程清理资源）。"""
-    proc.terminate()                         # 等价 SIGTERM
+    proc.terminate()  # 等价 SIGTERM
     try:
         proc.wait(timeout=grace)
     except subprocess.TimeoutExpired:
-        proc.kill()                          # SIGKILL，强制
+        proc.kill()  # SIGKILL，强制
         proc.wait()
     return proc.returncode if proc.returncode is not None else -1
 ```
@@ -214,16 +234,22 @@ import subprocess
 def pipeline_two_stage(stage1: list[str], stage2: list[str]) -> str:
     """两阶段管道：等价 `cmd1 | cmd2`。"""
     p1 = subprocess.Popen(
-        stage1, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, encoding="utf-8",
+        stage1,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
     )
     assert p1.stdout is not None
     p2 = subprocess.Popen(
-        stage2, stdin=p1.stdout,           # p1 的 stdout 作为 p2 的 stdin
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, encoding="utf-8",
+        stage2,
+        stdin=p1.stdout,  # p1 的 stdout 作为 p2 的 stdin
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
     )
-    p1.stdout.close()                       # 允许 p1 在 stdout 关闭时收到 SIGPIPE
+    p1.stdout.close()  # 允许 p1 在 stdout 关闭时收到 SIGPIPE
     out, err = p2.communicate()
     p1.wait()
     if p1.returncode != 0:
@@ -252,10 +278,14 @@ from typing import Mapping
 
 def run_with_custom_env(cmd: list[str], extra_env: Mapping[str, str]) -> str:
     """运行命令并附加环境变量（env={**os.environ, ...} 不污染原 os.environ）。"""
-    env = {**os.environ, **extra_env}        # 合并，不修改原 os.environ
+    env = {**os.environ, **extra_env}  # 合并，不修改原 os.environ
     r = subprocess.run(
-        cmd, check=True, capture_output=True, text=True,
-        encoding="utf-8", env=env,
+        cmd,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=env,
     )
     return r.stdout
 
@@ -265,8 +295,12 @@ def git_with_config(cmd: list[str], configs: dict[str, str]) -> str:
     params = " ".join(f"'{k}={v}'" for k, v in configs.items())
     env = {**os.environ, "GIT_CONFIG_PARAMETERS": params}
     r = subprocess.run(
-        cmd, check=True, capture_output=True, text=True,
-        encoding="utf-8", env=env,
+        cmd,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=env,
     )
     return r.stdout
 
@@ -275,8 +309,11 @@ def git_status(repo: Path) -> str:
     """在指定目录下执行 git status（cwd 参数指定子进程工作目录）。"""
     r = subprocess.run(
         ["git", "status", "--porcelain"],
-        cwd=repo,                           # str 或 Path
-        check=True, capture_output=True, text=True, encoding="utf-8",
+        cwd=repo,  # str 或 Path
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
     )
     return r.stdout
 ```
@@ -308,8 +345,11 @@ from pathlib import Path
 def safe_ls(directory: str) -> list[str]:
     """安全列目录：list[str] 形式天然防注入。"""
     r = subprocess.run(
-        ["ls", directory], check=True, capture_output=True,
-        text=True, encoding="utf-8",
+        ["ls", directory],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
     )
     return r.stdout.splitlines()
 
@@ -335,8 +375,11 @@ def call_api_with_token(endpoint: str, token: str) -> str:
     env = {**os.environ, "API_TOKEN": token}
     r = subprocess.run(
         ["curl", "-s", "-H", "Authorization: Bearer $API_TOKEN", endpoint],
-        check=True, capture_output=True, text=True,
-        encoding="utf-8", env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=env,
     )
     return r.stdout
 ```
@@ -363,8 +406,8 @@ from PySide6.QtCore import QObject, QThread, Signal
 class CommandWorker(QObject):
     """在 QThread 中运行子进程，逐行通过信号转发输出到主线程。"""
 
-    output_line = Signal(str)       # 每行 stdout 触发
-    finished = Signal(int)          # 进程结束，参数为退出码
+    output_line = Signal(str)  # 每行 stdout 触发
+    finished = Signal(int)  # 进程结束，参数为退出码
 
     def __init__(self, cmd: list[str], cwd: Optional[str] = None) -> None:
         super().__init__()
@@ -377,12 +420,16 @@ class CommandWorker(QObject):
         """线程入口：启动子进程并实时转发输出。"""
         try:
             self._proc = subprocess.Popen(
-                self._cmd, cwd=self._cwd,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, encoding="utf-8", bufsize=1,  # 行缓冲
+                self._cmd,
+                cwd=self._cwd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                bufsize=1,  # 行缓冲
             )
             assert self._proc.stdout is not None
-            for line in self._proc.stdout:       # 实时逐行读
+            for line in self._proc.stdout:  # 实时逐行读
                 if self._cancelled:
                     break
                 self.output_line.emit(line.rstrip("\n"))
@@ -396,12 +443,14 @@ class CommandWorker(QObject):
         """取消执行：设置标志并终止子进程。"""
         self._cancelled = True
         if self._proc and self._proc.poll() is None:
-            self._proc.terminate()               # 优雅 SIGTERM
+            self._proc.terminate()  # 优雅 SIGTERM
             try:
                 self._proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                self._proc.kill()                # 强制 SIGKILL
+                self._proc.kill()  # 强制 SIGKILL
                 self._proc.wait()
+
+
 # 主线程使用：worker.moveToThread(thread); thread.started.connect(worker.run)
 # worker.output_line.connect(ui.append_output); worker.finished.connect(thread.quit)
 ```
@@ -418,6 +467,7 @@ class CommandWorker(QObject):
 
 ```python
 """rdbase 子进程测试."""
+
 from __future__ import annotations
 
 import subprocess
@@ -428,18 +478,21 @@ import pytest
 
 
 def test_git_branches_parses_output(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """git_branches 应正确解析分支名列表。"""
     from rdbase.vcs import git_branches
 
     fake_completed = subprocess.CompletedProcess(
-        args=["git", "branch"], returncode=0,
-        stdout="main\ndevelop\nfeature/x\n", stderr="",
+        args=["git", "branch"],
+        returncode=0,
+        stdout="main\ndevelop\nfeature/x\n",
+        stderr="",
     )
 
     def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
-        assert cmd[:2] == ["git", "branch"]       # 校验调用参数
+        assert cmd[:2] == ["git", "branch"]  # 校验调用参数
         assert kwargs.get("check") is True
         assert kwargs.get("encoding") == "utf-8"
         return fake_completed
@@ -452,7 +505,7 @@ class FakePopen:
     """伪造 Popen，支持 stdout 迭代与 wait()。"""
 
     def __init__(self, lines: list[str], returncode: int = 0) -> None:
-        self.stdout = iter(lines)               # 支持逐行迭代
+        self.stdout = iter(lines)  # 支持逐行迭代
         self.stderr = iter([""])
         self.returncode = returncode
 
@@ -460,13 +513,16 @@ class FakePopen:
         return self.returncode
 
     def terminate(self) -> None:
-        self.returncode = -15                   # SIGTERM
+        self.returncode = -15  # SIGTERM
 
     def kill(self) -> None:
-        self.returncode = -9                    # SIGKILL
+        self.returncode = -9  # SIGKILL
 
-    def __enter__(self) -> "FakePopen": return self
-    def __exit__(self, *args: Any) -> None: pass
+    def __enter__(self) -> "FakePopen":
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        pass
 
 
 def test_stream_lines_yields_output(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -474,7 +530,8 @@ def test_stream_lines_yields_output(monkeypatch: pytest.MonkeyPatch) -> None:
     from rdbase.runner import stream_lines
 
     monkeypatch.setattr(
-        subprocess, "Popen",
+        subprocess,
+        "Popen",
         lambda cmd, **kw: FakePopen(["line1", "line2", "line3"], returncode=0),
     )
     assert list(stream_lines(["echo", "test"])) == ["line1", "line2", "line3"]

@@ -259,7 +259,7 @@ self.current_item_label.setVisible(is_running)
 ```python
 splitter.setStretchFactor(0, 0)  # 子部件 0 不伸缩
 splitter.setStretchFactor(1, 1)  # 子部件 1 伸缩
-splitter.setSizes([220, 1060])   # 初始尺寸
+splitter.setSizes([220, 1060])  # 初始尺寸
 ```
 
 `handleWidth` 设为 4px（拖拽手柄宽度），过窄难以点击。

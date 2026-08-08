@@ -34,35 +34,35 @@ output_dir = Path("output") / "reports"
 
 # --- 路径属性 ---
 path = Path("/data/config/settings.json")
-path.name          # "settings.json"  文件名（含扩展名）
-path.stem          # "settings"       文件名（不含扩展名）
-path.suffix        # ".json"          扩展名
-path.parent        # Path("/data/config")  父目录
-path.parents[0]    # Path("/data/config")
-path.parents[1]    # Path("/data")
-path.parts         # ('/', 'data', 'config', 'settings.json')
+path.name  # "settings.json"  文件名（含扩展名）
+path.stem  # "settings"       文件名（不含扩展名）
+path.suffix  # ".json"          扩展名
+path.parent  # Path("/data/config")  父目录
+path.parents[0]  # Path("/data/config")
+path.parents[1]  # Path("/data")
+path.parts  # ('/', 'data', 'config', 'settings.json')
 
 # --- 存在性与类型 ---
-path.exists()      # bool
-path.is_file()     # bool
-path.is_dir()      # bool
+path.exists()  # bool
+path.is_file()  # bool
+path.is_dir()  # bool
 path.is_symlink()  # bool
 
 # --- 创建/删除 ---
 Path("output/logs").mkdir(parents=True, exist_ok=True)  # 递归创建，已存在不报错
-path.touch()       # 创建空文件（已存在则更新时间戳）
-path.unlink()      # 删除文件（不存在抛 FileNotFoundError；missing_ok=True 不抛）
+path.touch()  # 创建空文件（已存在则更新时间戳）
+path.unlink()  # 删除文件（不存在抛 FileNotFoundError；missing_ok=True 不抛）
 path.unlink(missing_ok=True)  # 3.8+，不存在不报错
-Path("old_dir").rmdir()       # 删除空目录
+Path("old_dir").rmdir()  # 删除空目录
 
 # --- 遍历目录 ---
-for entry in Path("src").iterdir():       # 一级直接子项
+for entry in Path("src").iterdir():  # 一级直接子项
     print(entry.name)
 
-for py_file in Path("src").rglob("*.py"): # 递归匹配
+for py_file in Path("src").rglob("*.py"):  # 递归匹配
     print(py_file)
 
-for match in Path(".").glob("**/*.test"): # ** 需递归
+for match in Path(".").glob("**/*.test"):  # ** 需递归
     print(match)
 ```
 
@@ -272,6 +272,7 @@ def get_temp_path(prefix: str = "app_") -> Path:
     """获取临时文件路径（需手动清理）。"""
     fd, name = tempfile.mkstemp(prefix=prefix, suffix=".tmp")
     import os
+
     os.close(fd)  # mkstemp 返回的 fd 需手动关闭
     return Path(name)
 ```
@@ -314,6 +315,7 @@ class CustomEncoder(json.JSONEncoder):
         """转换不支持的类型为可序列化值。"""
         from datetime import datetime
         from pathlib import Path
+
         if isinstance(o, Path):
             return str(o)
         if isinstance(o, datetime):
@@ -422,6 +424,7 @@ def atomic_write(path: Path, mode: str = "w", encoding: str = "utf-8"):
 def save_config_safely(path: Path, config: dict) -> None:
     """安全保存配置（原子写入）。"""
     import json
+
     with atomic_write(path) as f:
         json.dump(config, f, ensure_ascii=False, indent=2)
 ```

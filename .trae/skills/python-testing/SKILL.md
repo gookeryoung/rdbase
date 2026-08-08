@@ -219,7 +219,7 @@ import pytest
 def config_file(tmp_workspace: Path) -> Path:
     """写入测试配置文件（依赖 tmp_workspace fixture 自动触发清理）。"""
     path = tmp_workspace / "config.toml"
-    path.write_text('timeout = 30\n', encoding="utf-8")
+    path.write_text("timeout = 30\n", encoding="utf-8")
     return path
 
 

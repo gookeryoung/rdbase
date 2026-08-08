@@ -167,15 +167,36 @@ tests/
 from __future__ import annotations
 
 __all__ = [
-    "COLOR_PRIMARY", "COLOR_PRIMARY_DARK", "COLOR_ACCENT",
-    "COLOR_TEXT_ON_PRIMARY", "COLOR_TEXT_PRIMARY", "COLOR_TEXT_SECONDARY",
-    "COLOR_BG_APP", "COLOR_BG_MUTED", "COLOR_BORDER",
-    "COLOR_DANGER", "COLOR_WARNING", "COLOR_SUCCESS",
-    "FONT_TITLE", "FONT_HEADING", "FONT_BODY", "FONT_CAPTION", "FONT_FAMILY",
-    "SPACING_XS", "SPACING_SM", "SPACING_MD", "SPACING_LG", "SPACING_XL",
-    "RADIUS_SM", "RADIUS_MD",
-    "CONTROL_HEIGHT", "CONTROL_HEIGHT_SM",
-    "SIDEBAR_WIDTH", "HEADER_HEIGHT", "TOOLBAR_HEIGHT", "STATUSBAR_HEIGHT",
+    "COLOR_PRIMARY",
+    "COLOR_PRIMARY_DARK",
+    "COLOR_ACCENT",
+    "COLOR_TEXT_ON_PRIMARY",
+    "COLOR_TEXT_PRIMARY",
+    "COLOR_TEXT_SECONDARY",
+    "COLOR_BG_APP",
+    "COLOR_BG_MUTED",
+    "COLOR_BORDER",
+    "COLOR_DANGER",
+    "COLOR_WARNING",
+    "COLOR_SUCCESS",
+    "FONT_TITLE",
+    "FONT_HEADING",
+    "FONT_BODY",
+    "FONT_CAPTION",
+    "FONT_FAMILY",
+    "SPACING_XS",
+    "SPACING_SM",
+    "SPACING_MD",
+    "SPACING_LG",
+    "SPACING_XL",
+    "RADIUS_SM",
+    "RADIUS_MD",
+    "CONTROL_HEIGHT",
+    "CONTROL_HEIGHT_SM",
+    "SIDEBAR_WIDTH",
+    "HEADER_HEIGHT",
+    "TOOLBAR_HEIGHT",
+    "STATUSBAR_HEIGHT",
     "QSS_TOKENS",
 ]
 
@@ -416,14 +437,28 @@ from __future__ import annotations
 try:
     from PySide2.QtCore import Qt
     from PySide2.QtWidgets import (
-        QFrame, QHBoxLayout, QLabel, QListWidget, QMainWindow,
-        QSplitter, QStackedWidget, QVBoxLayout, QWidget,
+        QFrame,
+        QHBoxLayout,
+        QLabel,
+        QListWidget,
+        QMainWindow,
+        QSplitter,
+        QStackedWidget,
+        QVBoxLayout,
+        QWidget,
     )
 except ImportError:
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import (
-        QFrame, QHBoxLayout, QLabel, QListWidget, QMainWindow,
-        QSplitter, QStackedWidget, QVBoxLayout, QWidget,
+        QFrame,
+        QHBoxLayout,
+        QLabel,
+        QListWidget,
+        QMainWindow,
+        QSplitter,
+        QStackedWidget,
+        QVBoxLayout,
+        QWidget,
     )
 
 from rdbase import theme
@@ -516,14 +551,24 @@ from typing import List
 try:
     from PySide2.QtCore import Signal
     from PySide2.QtWidgets import (
-        QButtonGroup, QFrame, QHBoxLayout, QPushButton, QSpacerItem,
-        QSizePolicy, QWidget,
+        QButtonGroup,
+        QFrame,
+        QHBoxLayout,
+        QPushButton,
+        QSpacerItem,
+        QSizePolicy,
+        QWidget,
     )
 except ImportError:
     from PySide6.QtCore import Signal
     from PySide6.QtWidgets import (
-        QButtonGroup, QFrame, QHBoxLayout, QPushButton, QSpacerItem,
-        QSizePolicy, QWidget,
+        QButtonGroup,
+        QFrame,
+        QHBoxLayout,
+        QPushButton,
+        QSpacerItem,
+        QSizePolicy,
+        QWidget,
     )
 
 from rdbase import theme
@@ -657,9 +702,9 @@ __all__ = ["TaskWorker", "WorkerController"]
 class TaskWorker(QObject):
     """后台任务执行器。禁止在此操作 GUI 部件，只发信号。"""
 
-    progress = Signal(int)       # 进度 0-100
-    finished_ok = Signal(str)    # 成功结果
-    failed = Signal(str)         # 错误信息
+    progress = Signal(int)  # 进度 0-100
+    finished_ok = Signal(str)  # 成功结果
+    failed = Signal(str)  # 错误信息
 
     def __init__(self, payload: str) -> None:
         """初始化并保存任务入参。"""
@@ -721,13 +766,25 @@ from __future__ import annotations
 
 try:
     from PySide2.QtWidgets import (
-        QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLineEdit,
-        QSpinBox, QVBoxLayout, QWidget,
+        QDialog,
+        QDialogButtonBox,
+        QFormLayout,
+        QHBoxLayout,
+        QLineEdit,
+        QSpinBox,
+        QVBoxLayout,
+        QWidget,
     )
 except ImportError:
     from PySide6.QtWidgets import (
-        QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLineEdit,
-        QSpinBox, QVBoxLayout, QWidget,
+        QDialog,
+        QDialogButtonBox,
+        QFormLayout,
+        QHBoxLayout,
+        QLineEdit,
+        QSpinBox,
+        QVBoxLayout,
+        QWidget,
     )
 
 from rdbase import theme
@@ -748,9 +805,7 @@ class SettingsDialog(QDialog):
     def _build_ui(self) -> None:
         """构建表单字段 + 确认/取消按钮。"""
         root = QVBoxLayout(self)
-        root.setContentsMargins(
-            theme.SPACING_LG, theme.SPACING_LG, theme.SPACING_LG, theme.SPACING_LG
-        )
+        root.setContentsMargins(theme.SPACING_LG, theme.SPACING_LG, theme.SPACING_LG, theme.SPACING_LG)
 
         form = QFormLayout()
         form.setSpacing(theme.SPACING_MD)

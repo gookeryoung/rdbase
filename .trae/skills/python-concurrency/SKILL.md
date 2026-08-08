@@ -200,6 +200,7 @@ from typing import List
 def fetch(url: str) -> str:
     """模拟网络请求，返回结果。"""
     import time
+
     time.sleep(0.3)
     return f"resp: {url}"
 
@@ -304,7 +305,7 @@ import multiprocessing
 
 def process_item(x: int) -> int:
     """处理单个数据项。"""
-    return x ** 2
+    return x**2
 
 
 def parallel_map(data: list) -> list:

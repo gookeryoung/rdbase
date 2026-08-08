@@ -29,6 +29,10 @@ dependencies = [
     # ASGI/WSGI 服务器
     "uvicorn[standard]>=0.30",
     "gunicorn>=23.0",
+    "scrapy>=2.17.0",
+    "selectolax>=0.4.11",
+    "feedparser>=6.0.14",
+    "jsonpath-ng>=1.8.0",
 ]
 description = "通用数据库管理平台（django-ninja + React）."
 license = { text = "MIT" }

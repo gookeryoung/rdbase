@@ -427,6 +427,7 @@ copyright = "2026, 作者名"
 
 try:
     from my_package import __version__  # type: ignore[import-not-found]
+
     release = __version__
     version = __version__
 except ImportError:
@@ -434,11 +435,11 @@ except ImportError:
     version = "0.1.0"
 
 extensions = [
-    "sphinx.ext.autodoc",       # 自动从 docstring 生成 API 文档
-    "sphinx.ext.napoleon",      # Google/NumPy docstring 兼容
-    "sphinx.ext.viewcode",      # 添加"[源码]"链接
-    "sphinx.ext.intersphinx",   # 跨项目链接（如 Python 标准库）
-    "myst_parser",              # Markdown 支持
+    "sphinx.ext.autodoc",  # 自动从 docstring 生成 API 文档
+    "sphinx.ext.napoleon",  # Google/NumPy docstring 兼容
+    "sphinx.ext.viewcode",  # 添加"[源码]"链接
+    "sphinx.ext.intersphinx",  # 跨项目链接（如 Python 标准库）
+    "myst_parser",  # Markdown 支持
 ]
 
 html_theme = "sphinx_rtd_theme"

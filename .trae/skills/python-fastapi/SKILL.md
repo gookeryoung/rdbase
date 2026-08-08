@@ -86,6 +86,7 @@ from __future__ import annotations
 def main() -> None:  # pragma: no cover
     """启动 uvicorn 服务器。"""
     import uvicorn
+
     uvicorn.run("rdbase.app:app", host="0.0.0.0", port=8000, reload=True)
 
 
@@ -196,11 +197,13 @@ class UserBase(BaseModel):
 
 class UserCreate(UserBase):
     """创建用户请求体。"""
+
     password: str = Field(..., min_length=8, description="密码（明文，传输层须 HTTPS）")
 
 
 class UserUpdate(BaseModel):
     """更新用户请求体（所有字段可选）。"""
+
     name: str | None = Field(None, min_length=1, max_length=50)
     email: EmailStr | None = None
 
@@ -229,6 +232,7 @@ T = TypeVar("T")
 
 class Pagination(BaseModel):
     """分页信息。"""
+
     skip: int = Field(0, ge=0)
     limit: int = Field(20, ge=1, le=100)
     total: int = Field(0, ge=0)
@@ -236,12 +240,14 @@ class Pagination(BaseModel):
 
 class PaginatedResponse(BaseModel, Generic[T]):
     """分页响应包装。"""
+
     items: list[T]
     pagination: Pagination
 
 
 class OrderItem(BaseModel):
     """订单项。"""
+
     product_id: int = Field(..., ge=1)
     quantity: int = Field(..., ge=1, le=999)
 
@@ -256,6 +262,7 @@ class OrderItem(BaseModel):
 
 class Order(BaseModel):
     """订单（嵌套模型）。"""
+
     order_id: str
     items: list[OrderItem] = Field(..., min_length=1)
 ```
@@ -411,7 +418,10 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         elapsed_ms = (time.perf_counter() - start) * 1000
         logger.info(
             "%s %s -> %d (%.1fms)",
-            request.method, request.url.path, response.status_code, elapsed_ms,
+            request.method,
+            request.url.path,
+            response.status_code,
+            elapsed_ms,
         )
         return response
 

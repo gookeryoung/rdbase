@@ -32,7 +32,10 @@ from typing import Any
 
 # 1. 默认值（代码内常量）
 DEFAULTS: dict[str, Any] = {
-    "host": "127.0.0.1", "port": 8000, "debug": False, "log_level": "INFO",
+    "host": "127.0.0.1",
+    "port": 8000,
+    "debug": False,
+    "log_level": "INFO",
 }
 
 
@@ -41,14 +44,16 @@ def build_config() -> dict[str, Any]:
 
     load_toml / load_env / parse_args 的实现见后续各节。
     """
-    config: dict[str, Any] = DEFAULTS.copy()                      # 1. 默认值
+    config: dict[str, Any] = DEFAULTS.copy()  # 1. 默认值
     config_path = Path("config.toml")
     if config_path.exists():
-        config.update(read_toml(config_path))                     # 2. 配置文件（见 TOML 节）
-    config.update({                                                # 3. 环境变量（APP_ 前缀）
-        k[4:].lower(): v for k, v in os.environ.items() if k.startswith("APP_")
-    })
-    parser = argparse.ArgumentParser()                             # 4. 命令行参数
+        config.update(read_toml(config_path))  # 2. 配置文件（见 TOML 节）
+    config.update(
+        {  # 3. 环境变量（APP_ 前缀）
+            k[4:].lower(): v for k, v in os.environ.items() if k.startswith("APP_")
+        }
+    )
+    parser = argparse.ArgumentParser()  # 4. 命令行参数
     parser.add_argument("--host", default=None)
     parser.add_argument("--port", type=int, default=None)
     args = parser.parse_args()
@@ -129,11 +134,7 @@ def load_prefixed(prefix: str = "APP_") -> dict[str, str]:
 
     示例：APP_HOST=0.0.0.0 → {"host": "0.0.0.0"}
     """
-    return {
-        k[len(prefix):].lower(): v
-        for k, v in os.environ.items()
-        if k.startswith(prefix)
-    }
+    return {k[len(prefix) :].lower(): v for k, v in os.environ.items() if k.startswith(prefix)}
 ```
 
 要点：
@@ -157,6 +158,7 @@ def load_env_file(path: Path | None = None, override: bool = False) -> None:
     path 为 None 时自动查找；override=True 时覆盖已存在环境变量。
     """
     from dotenv import load_dotenv
+
     load_dotenv(dotenv_path=path, override=override)
 ```
 
@@ -302,9 +304,7 @@ class ConfigError(Exception):
     """配置错误（聚合所有缺失/非法字段）。"""
 
 
-def validate_or_raise(
-    data: dict[str, Any], schema: dict[str, dict[str, Any]]
-) -> dict[str, Any]:
+def validate_or_raise(data: dict[str, Any], schema: dict[str, dict[str, Any]]) -> dict[str, Any]:
     """按 schema 校验配置，聚合所有错误一次性抛出。
 
     schema: {"port": {"type": int, "required": True, "min": 1, "max": 65535}, ...}
@@ -373,9 +373,7 @@ class HotReloadConfig:
         mgr.on_change(on_reload)    # 注册变更回调
     """
 
-    def __init__(
-        self, path: Path, loader: Callable[[Path], dict[str, Any]]
-    ) -> None:
+    def __init__(self, path: Path, loader: Callable[[Path], dict[str, Any]]) -> None:
         self._path = path
         self._loader = loader
         self._lock = threading.Lock()

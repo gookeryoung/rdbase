@@ -132,6 +132,7 @@ from typing import Optional
 import click
 import typer
 
+
 # --- Typer：类型注解驱动 ---
 @app.command()
 def deploy(
@@ -139,9 +140,7 @@ def deploy(
     env: str = typer.Option("dev", "--env", "-e", help="环境名称", envvar="DEPLOY_ENV"),
     replicas: int = typer.Option(3, "--replicas", "-r", min=1, max=10, help="副本数"),
     dry_run: bool = typer.Option(False, "--dry-run", help="仅模拟不实际执行"),
-    config: Optional[Path] = typer.Option(
-        None, "--config", "-c", help="配置文件路径", exists=True, dir_okay=False
-    ),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="配置文件路径", exists=True, dir_okay=False),
     tags: list[str] = typer.Option([], "--tag", "-t", help="标签（可多次指定）"),
 ) -> None:
     """部署服务到指定目标."""
@@ -155,7 +154,8 @@ def deploy(
 @click.option("--replicas", "-r", type=click.IntRange(1, 10), default=3, help="副本数")
 @click.option("--dry-run", is_flag=True, default=False, help="仅模拟不实际执行")
 @click.option(
-    "--config", "-c",
+    "--config",
+    "-c",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     default=None,
     help="配置文件路径",
@@ -475,7 +475,9 @@ def merge_config(
 
 @click.group()
 @click.option(
-    "--config", "-c", "config_path",
+    "--config",
+    "-c",
+    "config_path",
     type=click.Path(path_type=Path),
     default=Path("config.toml"),
     help="配置文件路径",

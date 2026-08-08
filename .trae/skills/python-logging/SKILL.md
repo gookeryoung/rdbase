@@ -68,14 +68,19 @@ _THIRD_PARTY = {"urllib3": {"level": "WARNING"}, "asyncio": {"level": "WARNING"}
 
 # 开发配置：控制台 + DEBUG + 简单格式
 DEV_CONFIG: dict[str, Any] = {
-    "version": 1, "disable_existing_loggers": False,
+    "version": 1,
+    "disable_existing_loggers": False,
     "formatters": {
         "simple": {"format": _SIMPLE_FMT},
         "verbose": {"format": "%(asctime)s [%(levelname)s] %(name)s:%(lineno)d %(funcName)s: %(message)s"},
     },
     "handlers": {
-        "console": {"class": "logging.StreamHandler", "level": "DEBUG",
-                     "formatter": "simple", "stream": "ext://sys.stderr"},
+        "console": {
+            "class": "logging.StreamHandler",
+            "level": "DEBUG",
+            "formatter": "simple",
+            "stream": "ext://sys.stderr",
+        },
     },
     "loggers": _THIRD_PARTY,
     "root": {"level": "DEBUG", "handlers": ["console"]},
@@ -83,17 +88,28 @@ DEV_CONFIG: dict[str, Any] = {
 
 # 生产配置：控制台 + 文件 + INFO + JSON（文件用 RotatingFileHandler 轮转）
 PROD_CONFIG: dict[str, Any] = {
-    "version": 1, "disable_existing_loggers": False,
+    "version": 1,
+    "disable_existing_loggers": False,
     "formatters": {
         "json": {"()": "rdbase.logging_config.JsonFormatter"},
         "simple": {"format": _SIMPLE_FMT},
     },
     "handlers": {
-        "console": {"class": "logging.StreamHandler", "level": "INFO",
-                     "formatter": "simple", "stream": "ext://sys.stderr"},
-        "file": {"class": "logging.handlers.RotatingFileHandler", "level": "INFO",
-                  "formatter": "json", "filename": "logs/rdbase.log",
-                  "maxBytes": 10485760, "backupCount": 5, "encoding": "utf-8"},  # 10 MB
+        "console": {
+            "class": "logging.StreamHandler",
+            "level": "INFO",
+            "formatter": "simple",
+            "stream": "ext://sys.stderr",
+        },
+        "file": {
+            "class": "logging.handlers.RotatingFileHandler",
+            "level": "INFO",
+            "formatter": "json",
+            "filename": "logs/rdbase.log",
+            "maxBytes": 10485760,
+            "backupCount": 5,
+            "encoding": "utf-8",
+        },  # 10 MB
     },
     "loggers": _THIRD_PARTY,
     "root": {"level": "INFO", "handlers": ["console", "file"]},
@@ -126,23 +142,34 @@ import logging.handlers
 from pathlib import Path
 
 
-def make_size_handler(path: Path, max_bytes: int = 10 * 1024 * 1024, backup_count: int = 5) -> logging.handlers.RotatingFileHandler:
+def make_size_handler(
+    path: Path, max_bytes: int = 10 * 1024 * 1024, backup_count: int = 5
+) -> logging.handlers.RotatingFileHandler:
     """按大小轮转：达到 max_bytes 后切分，保留 backup_count 个备份.
 
     命名：rdbase.log / .1 / .2 / ... / .5（最旧，超出删除）
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     return logging.handlers.RotatingFileHandler(
-        filename=path, maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8",
+        filename=path,
+        maxBytes=max_bytes,
+        backupCount=backup_count,
+        encoding="utf-8",
     )
 
 
-def make_time_handler(path: Path, when: str = "midnight", interval: int = 1, backup_count: int = 14) -> logging.handlers.TimedRotatingFileHandler:
+def make_time_handler(
+    path: Path, when: str = "midnight", interval: int = 1, backup_count: int = 14
+) -> logging.handlers.TimedRotatingFileHandler:
     """按时间轮转：when（'S'秒/'M'分/'H'时/'D'天/'midnight'午夜/'W0'周一）+ interval 切分."""
     path.parent.mkdir(parents=True, exist_ok=True)
     return logging.handlers.TimedRotatingFileHandler(
-        filename=path, when=when, interval=interval, backupCount=backup_count,
-        encoding="utf-8", utc=False,  # 本地时区；跨时区服务设 True
+        filename=path,
+        when=when,
+        interval=interval,
+        backupCount=backup_count,
+        encoding="utf-8",
+        utc=False,  # 本地时区；跨时区服务设 True
     )
 ```
 
@@ -175,6 +202,8 @@ class LocalTimeFormatter(logging.Formatter):
         if datefmt:
             return time.strftime(datefmt, ct)
         return f"{time.strftime('%Y-%m-%d %H:%M:%S', ct)},{int(record.msecs):03d}"
+
+
 # 使用：LocalTimeFormatter(fmt=VERBOSE_FORMAT, datefmt="%Y-%m-%d %H:%M:%S")
 ```
 
@@ -196,9 +225,17 @@ import logging
 from typing import Any
 
 # LogRecord 标准属性集合（用于过滤出 extra 字段）
-_STANDARD_ATTRS = set(logging.LogRecord(
-    name="", level=0, pathname="", lineno=0, msg="", args=(), exc_info=None,
-).__dict__.keys())
+_STANDARD_ATTRS = set(
+    logging.LogRecord(
+        name="",
+        level=0,
+        pathname="",
+        lineno=0,
+        msg="",
+        args=(),
+        exc_info=None,
+    ).__dict__.keys()
+)
 
 
 class JsonFormatter(logging.Formatter):
@@ -208,9 +245,12 @@ class JsonFormatter(logging.Formatter):
         """将 LogRecord 序列化为 JSON 字符串."""
         log_entry: dict[str, Any] = {
             "timestamp": self.formatTime(record, "%Y-%m-%dT%H:%M:%S.%f"),
-            "level": record.levelname, "logger": record.name,
-            "message": record.getMessage(), "module": record.module,
-            "function": record.funcName, "line": record.lineno,
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+            "module": record.module,
+            "function": record.funcName,
+            "line": record.lineno,
         }
         if record.exc_info:
             log_entry["exception"] = self.formatException(record.exc_info)
@@ -299,8 +339,11 @@ except ImportError:
     from PySide6.QtWidgets import QTextEdit, QWidget
 
 LEVEL_COLORS: dict[str, str] = {  # 令牌驱动，见 gui-pyside theme
-    "DEBUG": "#6c757d", "INFO": "#212529", "WARNING": "#fd7e14",
-    "ERROR": "#dc3545", "CRITICAL": "#b71c1c",
+    "DEBUG": "#6c757d",
+    "INFO": "#212529",
+    "WARNING": "#fd7e14",
+    "ERROR": "#dc3545",
+    "CRITICAL": "#b71c1c",
 }
 
 
@@ -356,6 +399,7 @@ class LogPanel(QTextEdit):
             self._line_count -= 500
         self.moveCursor(QTextCursor.End)
 
+
 # 接线：bridge=LogBridge(); handler=QtLogHandler(bridge); bridge.log_signal.connect(panel.append_log)
 # handler.setFormatter(logging.Formatter("%(name)s: %(message)s")); logger.addHandler(handler)
 ```
@@ -405,6 +449,7 @@ def setup_cli_logging(verbose: int, quiet: bool) -> None:
 def cli(verbose: int, quiet: bool) -> None:
     """rdbase 命令行工具."""
     setup_cli_logging(verbose, quiet)
+
 
 # 日志默认到 stderr，不污染 stdout 管道；错误转 ClickException + logger.error(exc_info=True)
 ```
@@ -466,13 +511,14 @@ def mask_token(token: str, keep: int = 4) -> str:
 def mask_password(password: str) -> str:
     """密码一律不记录原文，仅返回长度提示."""
     return f"<password len={len(password)}>"
+
+
 # 手机号：re.fullmatch(r'\d{11}', p) 时返回 f'{p[:3]}****{p[-4:]}'
 
 
 def login(username: str, password: str, token: str) -> None:
     """登录示例：敏感字段脱敏后记录."""
-    logger.info("用户登录: username=%s, password=%s, token=%s",
-                username, mask_password(password), mask_token(token))
+    logger.info("用户登录: username=%s, password=%s, token=%s", username, mask_password(password), mask_token(token))
     # 输出：用户登录: username=alice, password=<password len=12>, token=abcd****wxyz
 ```
 

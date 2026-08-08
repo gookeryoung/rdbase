@@ -42,6 +42,7 @@ INSTALLED_APPS = [
     "apps.audit",
     "apps.settings",
     "apps.sync",
+    "apps.ingest",
 ]
 
 # 自定义用户模型（须在首次 migrate 前设置）
