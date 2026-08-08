@@ -234,6 +234,8 @@ const Manager = () => {
   const [tablesBySchema, setTablesBySchema] = useState<
     Record<string, TableBrief[]>
   >({});
+  // 受控的树展开 keys：切换数据源时重置，避免旧 schema 节点残留展开状态
+  const [expandedKeys, setExpandedKeys] = useState<React.Key[]>([]);
 
   const [selectedTable, setSelectedTable] = useState<{
     name: string;
@@ -327,6 +329,8 @@ const Manager = () => {
       const data = await listSchemas(dsId);
       setSchemas(data);
       setTablesBySchema({});
+      // 自动展开第一个 schema，触发其下表/对象的懒加载
+      setExpandedKeys(data.length > 0 ? [`schema:${data[0].name}`] : []);
     } catch (err) {
       message.error(errMsg(err, "加载 Schema 失败"));
     }
@@ -506,8 +510,15 @@ const Manager = () => {
     });
   }, [schemas, tablesBySchema, viewsBySchema, routinesBySchema, triggersBySchema]);
 
-  // 树展开事件：懒加载表与对象
-  const handleTreeExpand = (expandedKeys: React.Key[]) => {
+  // 树展开事件：仅同步受控展开状态，懒加载由下方 useEffect 统一处理
+  const handleTreeExpand = (keys: React.Key[]) => {
+    setExpandedKeys(keys);
+  };
+
+  // expandedKeys 变化时懒加载表与对象
+  // 用户手动展开、loadSchemas 自动展开首项都会更新 expandedKeys，
+  // 在此统一触发懒加载，避免 onExpand 不触发 setExpandedKeys 的盲区。
+  useEffect(() => {
     if (selectedDsId == null) return;
     expandedKeys.forEach((key) => {
       const k = String(key);
@@ -521,7 +532,8 @@ const Manager = () => {
         }
       }
     });
-  };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expandedKeys, selectedDsId]);
 
   // 选中表/对象
   const handleTreeSelect = (keys: React.Key[]) => {
@@ -1181,12 +1193,21 @@ const Manager = () => {
             placeholder="选择数据源"
             value={selectedDsId ?? undefined}
             onChange={(v) => {
-              // 切换数据源时同步清空选中表/对象，避免与下方 loadRows useEffect
-              // 的闭包错位（旧表名 + 新数据源 ID）触发后端 404 报错。
-              // React 18 会将事件处理器内的 setState 批量合并到同一次渲染，
-              // 因此 loadRows 在下一次渲染时看到 selectedTable=null 即短路返回。
+              // 切换数据源时同步清空选中表/对象与表树状态：
+              // 1. 避免与下方 loadRows useEffect 的闭包错位
+              //    （旧表名 + 新数据源 ID）触发后端 404 报错；
+              // 2. 避免旧 schema/表/对象残留显示，新 schemas 由
+              //    loadSchemas 加载完成后通过受控 expandedKeys 自动展开首项。
+              // React 18 会将事件处理器内的 setState 批量合并到同一次渲染。
               setSelectedTable(null);
               setSelectedObject(null);
+              setSchemas([]);
+              setTablesBySchema({});
+              setViewsBySchema({});
+              setRoutinesBySchema({});
+              setTriggersBySchema({});
+              setObjectsLoadedSchema(new Set());
+              setExpandedKeys([]);
               setSelectedDsId(v);
             }}
             style={{ width: "100%" }}
@@ -1204,9 +1225,7 @@ const Manager = () => {
             onExpand={handleTreeExpand}
             onSelect={handleTreeSelect}
             showLine
-            defaultExpandedKeys={
-              schemas.length > 0 ? [`schema:${schemas[0].name}`] : []
-            }
+            expandedKeys={expandedKeys}
           />
         )}
       </Sider>
