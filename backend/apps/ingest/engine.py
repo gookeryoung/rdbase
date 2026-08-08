@@ -6,6 +6,9 @@
 - :func:`execute_task`：子进程内（``run_ingest`` 命令调用）按 source_type 分派 spider，
   用 :class:`scrapy.crawler.CrawlerProcess` 运行 Scrapy，收集统计并写 IngestLog。
 
+FieldMappingPipeline 在 Scrapy 内完成字段映射与目标表写入，统计通过
+crawler.stats 回传（ingest_rows_written/ingest_rows_skipped）。
+
 失败达最大重试时通过 :class:`IngestAlert` 产生告警。
 """
 
@@ -27,6 +30,7 @@ from apps.ingest.models import (
     IngestTask,
     SourceType,
 )
+from apps.ingest.spiders.api_spider import ApiIngestSpider
 from apps.ingest.spiders.base import BaseIngestSpider
 
 logger = logging.getLogger(__name__)
@@ -78,6 +82,8 @@ def execute_task(task: IngestTask) -> IngestLog:
     按 source_type 分派 spider，运行 Scrapy CrawlerProcess，收集统计并写日志。
     失败时累加任务 retry_count，达 max_retries 产生告警。
 
+    PARTIAL 判定：rows_skipped > 0 时视为部分成功。
+
     Args:
         task: 爬取任务配置实例。
 
@@ -92,8 +98,10 @@ def execute_task(task: IngestTask) -> IngestLog:
         log.rows_read = stats.rows_read
         log.rows_written = stats.rows_written
         log.rows_skipped = stats.rows_skipped
-        # iter-31 骨架阶段：正常完成即视为成功；iter-32+ 接入 pipeline 后细化 PARTIAL 判定
-        log.status = IngestLogStatus.SUCCESS
+        if stats.rows_skipped > 0 and stats.rows_written > 0:
+            log.status = IngestLogStatus.PARTIAL
+        else:
+            log.status = IngestLogStatus.SUCCESS
     except IngestError as exc:
         log.status = IngestLogStatus.FAILED
         log.error_message = str(exc)
@@ -112,7 +120,7 @@ def execute_task(task: IngestTask) -> IngestLog:
 def _apply_task_status(task: IngestTask, log: IngestLog) -> None:
     """根据执行日志更新任务的运行时间与重试计数."""
     task.last_run_at = log.finished_at
-    if log.status == IngestLogStatus.SUCCESS:
+    if log.status in (IngestLogStatus.SUCCESS, IngestLogStatus.PARTIAL):
         task.last_sync_at = log.finished_at
         task.retry_count = 0
     else:
@@ -123,8 +131,8 @@ def _apply_task_status(task: IngestTask, log: IngestLog) -> None:
 def _run_spider(task: IngestTask) -> SpiderStats:
     """按 source_type 分派 spider 并运行 Scrapy，返回统计.
 
-    iter-31: 仅 BaseIngestSpider 占位（不发请求，rows_read=0），验证引擎可启停。
-    iter-32+ 实现各源类型专用 spider 与 pipeline 后填充真实统计。
+    从 task 提取完整配置（含字段映射）注入 spider 与 pipeline，
+    pipeline 通过 spider 属性读取写入配置。
 
     Raises:
         IngestError: Scrapy 启动或运行过程中发生预期异常时包装抛出。
@@ -133,14 +141,11 @@ def _run_spider(task: IngestTask) -> SpiderStats:
 
     spider_cls = _resolve_spider(task.source_type)
     settings = _build_scrapy_settings(task)
+    spider_kwargs = _build_spider_kwargs(task)
 
     process = CrawlerProcess(settings, install_root_handler=False)
     crawler = process.create_crawler(spider_cls)
-    process.crawl(
-        crawler,
-        source_url=task.source_url,
-        parse_config=cast(dict[str, Any], task.parse_config or {}),
-    )
+    process.crawl(crawler, **spider_kwargs)
     try:
         process.start()
     except (OSError, RuntimeError, ValueError, KeyError, AttributeError) as exc:
@@ -148,24 +153,48 @@ def _run_spider(task: IngestTask) -> SpiderStats:
 
     stats = crawler.stats
     rows_read = int(stats.get_value("item_scraped_count", 0) or 0)
-    # iter-31 无 pipeline，rows_written/rows_skipped 在 iter-32 接入 pipeline 后从 stats 读取
-    return SpiderStats(rows_read=rows_read, rows_written=0, rows_skipped=0)
+    rows_written = int(stats.get_value("ingest_rows_written", 0) or 0)
+    rows_skipped = int(stats.get_value("ingest_rows_skipped", 0) or 0)
+    return SpiderStats(rows_read=rows_read, rows_written=rows_written, rows_skipped=rows_skipped)
 
 
 def _resolve_spider(source_type: str) -> type[BaseIngestSpider]:
-    """按源类型解析 Spider 类.
+    """按源类型解析 Spider 类."""
+    if source_type == SourceType.API:
+        return ApiIngestSpider
+    if source_type in dict(SourceType.choices):
+        logger.warning("源类型 %s 的专用 spider 尚未实现，使用 BaseIngestSpider 占位", source_type)
+        return BaseIngestSpider
+    raise IngestError(f"不支持的源类型: {source_type!r}")
 
-    iter-31 全部源类型返回 BaseIngestSpider 占位并记录警告；
-    iter-32+ 实现专用 spider 后替换为具体映射。
-    """
-    if source_type not in dict(SourceType.choices):
-        raise IngestError(f"不支持的源类型: {source_type!r}")
-    logger.warning("源类型 %s 的专用 spider 尚未实现，使用 BaseIngestSpider 占位", source_type)
-    return BaseIngestSpider
+
+def _build_spider_kwargs(task: IngestTask) -> dict[str, Any]:
+    """从 IngestTask 构造 spider 初始化参数（含字段映射与写入配置）."""
+    mappings = [
+        {
+            "source_field": m.source_field,
+            "target_field": m.target_field,
+            "mapping_type": m.mapping_type,
+            "fixed_value": m.fixed_value,
+            "is_pk": m.is_pk,
+        }
+        for m in task.field_mappings.all()
+    ]
+    return {
+        "source_url": task.source_url,
+        "parse_config": cast(dict[str, Any], task.parse_config or {}),
+        "headers": task.get_headers(),
+        "request_config": cast(dict[str, Any], task.request_config or {}),
+        "mappings": mappings,
+        "target_datasource_id": task.target_datasource_id,
+        "target_table": task.target_table,
+        "conflict_strategy": task.conflict_strategy,
+        "batch_size": task.batch_size,
+    }
 
 
 def _build_scrapy_settings(task: IngestTask) -> dict[str, Any]:
-    """按任务配置构造 Scrapy settings 字典."""
+    """按任务配置构造 Scrapy settings 字典（含 pipeline 注册）."""
     request_config = task.request_config or {}
     return {
         "LOG_ENABLED": False,
@@ -176,6 +205,7 @@ def _build_scrapy_settings(task: IngestTask) -> dict[str, Any]:
         "USER_AGENT": request_config.get("user_agent", "rdbase-ingest/1.0"),
         "TELNETCONSOLE_ENABLED": False,
         "COOKIES_ENABLED": bool(request_config.get("cookies_enabled", False)),
+        "ITEM_PIPELINES": {"apps.ingest.pipelines.FieldMappingPipeline": 300},
     }
 
 

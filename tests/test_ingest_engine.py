@@ -10,11 +10,20 @@ from apps.ingest.engine import (
     IngestError,
     SpiderStats,
     _build_scrapy_settings,
+    _build_spider_kwargs,
     _resolve_spider,
     execute_task,
     spawn_ingest,
 )
-from apps.ingest.models import IngestAlert, IngestLogStatus, IngestTask, SourceType
+from apps.ingest.models import (
+    ConflictStrategy,
+    IngestAlert,
+    IngestFieldMapping,
+    IngestLogStatus,
+    IngestTask,
+    SourceType,
+)
+from apps.ingest.spiders.api_spider import ApiIngestSpider
 from apps.ingest.spiders.base import BaseIngestSpider
 
 
@@ -93,7 +102,7 @@ class TestExecuteTask:
 
     def test_success_writes_log_and_updates_task(self, monkeypatch: pytest.MonkeyPatch, task: IngestTask) -> None:
         def fake_run(_task: IngestTask) -> SpiderStats:
-            return SpiderStats(rows_read=10, rows_written=8, rows_skipped=2)
+            return SpiderStats(rows_read=10, rows_written=10, rows_skipped=0)
 
         monkeypatch.setattr("apps.ingest.engine._run_spider", fake_run)
 
@@ -101,12 +110,27 @@ class TestExecuteTask:
 
         assert log.status == IngestLogStatus.SUCCESS
         assert log.rows_read == 10
-        assert log.rows_written == 8
-        assert log.rows_skipped == 2
+        assert log.rows_written == 10
+        assert log.rows_skipped == 0
         assert log.finished_at is not None
         assert log.duration_ms >= 0
         task.refresh_from_db()
         assert task.last_sync_at is not None
+        assert task.retry_count == 0
+
+    def test_partial_when_rows_skipped(self, monkeypatch: pytest.MonkeyPatch, task: IngestTask) -> None:
+        """rows_skipped > 0 且 rows_written > 0 时应为 PARTIAL."""
+
+        def fake_run(_task: IngestTask) -> SpiderStats:
+            return SpiderStats(rows_read=10, rows_written=8, rows_skipped=2)
+
+        monkeypatch.setattr("apps.ingest.engine._run_spider", fake_run)
+        log = execute_task(task)
+        assert log.status == IngestLogStatus.PARTIAL
+        assert log.rows_written == 8
+        assert log.rows_skipped == 2
+        # PARTIAL 也应重置 retry_count
+        task.refresh_from_db()
         assert task.retry_count == 0
 
     def test_failure_writes_failed_log(self, monkeypatch: pytest.MonkeyPatch, task: IngestTask) -> None:
@@ -143,14 +167,62 @@ class TestExecuteTask:
 class TestResolveSpider:
     """_resolve_spider 分派测试."""
 
-    def test_returns_base_placeholder_with_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+    def test_api_returns_api_spider(self) -> None:
+        """API 源类型应分派到 ApiIngestSpider."""
+        assert _resolve_spider(SourceType.API.value) is ApiIngestSpider
+
+    def test_non_api_returns_base_placeholder(self, caplog: pytest.LogCaptureFixture) -> None:
+        """非 API 源类型应回退到 BaseIngestSpider 并记录警告."""
         for st in SourceType:
-            spider_cls = _resolve_spider(st.value)
+            if st == SourceType.API:
+                continue
+            with caplog.at_level("WARNING"):
+                spider_cls = _resolve_spider(st.value)
             assert spider_cls is BaseIngestSpider
 
     def test_invalid_source_type_raises(self) -> None:
         with pytest.raises(IngestError, match="不支持的源类型"):
             _resolve_spider("unknown")
+
+
+class TestBuildSpiderKwargs:
+    """_build_spider_kwargs 配置构造测试."""
+
+    def test_includes_all_config(self, task: IngestTask) -> None:
+        """应包含 source_url/parse_config/headers/mappings 等全部配置."""
+        IngestFieldMapping.objects.create(
+            task=task,
+            source_field="sid",
+            target_field="tid",
+            is_pk=True,
+        )
+        IngestFieldMapping.objects.create(
+            task=task,
+            source_field="sname",
+            target_field="tname",
+        )
+        task.parse_config = {"items_path": "$.data[*]"}
+        task.request_config = {"method": "POST"}
+        task.conflict_strategy = ConflictStrategy.SKIP
+        task.batch_size = 100
+        task.save()
+
+        kwargs = _build_spider_kwargs(task)
+        assert kwargs["source_url"] == task.source_url
+        assert kwargs["parse_config"] == {"items_path": "$.data[*]"}
+        assert kwargs["request_config"] == {"method": "POST"}
+        assert kwargs["target_datasource_id"] == task.target_datasource_id
+        assert kwargs["target_table"] == "out"
+        assert kwargs["conflict_strategy"] == ConflictStrategy.SKIP
+        assert kwargs["batch_size"] == 100
+        assert len(kwargs["mappings"]) == 2
+        assert kwargs["mappings"][0]["source_field"] == "sid"
+        assert kwargs["mappings"][0]["is_pk"] is True
+
+    def test_empty_mappings(self, task: IngestTask) -> None:
+        """无字段映射时 mappings 为空列表."""
+        kwargs = _build_spider_kwargs(task)
+        assert kwargs["mappings"] == []
 
 
 class TestBuildScrapySettings:
@@ -162,6 +234,7 @@ class TestBuildScrapySettings:
         assert settings["LOG_ENABLED"] is False
         assert settings["CONCURRENT_REQUESTS"] == 8
         assert settings["DOWNLOAD_TIMEOUT"] == 30
+        assert "apps.ingest.pipelines.FieldMappingPipeline" in settings["ITEM_PIPELINES"]
 
     def test_from_request_config(self, task: IngestTask) -> None:
         task.request_config = {
