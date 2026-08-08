@@ -36,6 +36,10 @@ def test_audit_action_choices() -> None:
     assert AuditAction.SQL_EXECUTE == "sql.execute"
     assert AuditAction.OBJ_ALTER == "obj.alter"
     assert AuditAction.OBJ_DROP == "obj.drop"
+    assert AuditAction.BACKUP_CREATE == "backup.create"
+    assert AuditAction.BACKUP_RESTORE == "backup.restore"
+    assert AuditAction.AUDIT_VERIFY == "audit.verify"
+    assert AuditAction.DATASOURCE_SCAN == "datasource.scan"
 
 
 def test_audit_source_choices() -> None:
@@ -51,8 +55,8 @@ def test_audit_status_choices() -> None:
 
 
 def test_audit_action_choices_count() -> None:
-    """AuditAction 共 19 个枚举值."""
-    assert len(AuditAction.choices) == 19
+    """AuditAction 共 22 个枚举值."""
+    assert len(AuditAction.choices) == 22
 
 
 def test_audit_log_meta_ordering() -> None:

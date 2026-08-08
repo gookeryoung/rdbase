@@ -17,7 +17,7 @@
 - [x] 36 深度健康检查 + 连接池监控：/health/live（轻量存活）与 /health/ready（DB 连通性/连接池状态/磁盘空间/Redis 连通性）分离 + /api/v1/system/pool-stats（暴露所有 SQLAlchemy 引擎池状态：size/checkedin/checkedout/overflow）+ 连接泄露检测（长事务告警）+ 前端系统状态面板
 - [x] 37 熔断与重试：外部数据源连接失败的指数退避重试（max_retries 可配，复用 SyncConfig/IngestTask 现有字段）+ 熔断器（连续失败 N 次短路 M 秒，半开探测）+ 熔断状态暴露 API + sync/ingest 服务接入熔断
 - [x] 38 幂等保护 + 分布式锁：sync/ingest 触发接口支持 Idempotency-Key 请求头（Redis 缓存结果 24h，重复请求返回缓存结果；幂等 key 以「认证主体维度」抽象设计，user_id 与后续 API Token 均可作 key 主体，为 P9 铺路）+ Redis 分布式锁防同一任务并发执行（锁超时 30s 自动释放，获取失败返回 409）+ 锁状态暴露 API
-- [ ] 39 备份恢复 API + 审计防篡改：POST /api/v1/system/backup（admin 触发，复用 scripts/backup.py 逻辑，异步执行+任务状态查询）+ GET /api/v1/system/backups（列表+下载）+ POST /api/v1/system/restore（admin 触发，需二次确认）+ 审计日志哈希链（每条 AuditLog 记录含 prev_hash 与自身 hash，篡改可检测）+ 哈希校验 API
+- [x] 39 备份恢复 API + 审计防篡改：POST /api/v1/system/backup（admin 触发，复用 scripts/backup.py 逻辑，异步执行+任务状态查询）+ GET /api/v1/system/backups（列表+下载）+ POST /api/v1/system/restore（admin 触发，需二次确认）+ 审计日志哈希链（每条 AuditLog 记录含 prev_hash 与自身 hash，篡改可检测）+ 哈希校验 API
 - [ ] 40 P8 测试与文档：健壮性模块端到端测试（健康检查/熔断/锁/幂等/备份恢复/哈希链）+ 压力测试（并发触发/限流边界/熔断短路）+ README 更新运维监控章节 + 部署文档补充 Redis 与健康检查配置
 
 ### P9 数据中心对外 API（里程碑：外部应用可通过 API Token 全功能访问平台数据与调度）

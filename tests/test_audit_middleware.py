@@ -232,22 +232,22 @@ def test_middleware_exception_does_not_block_response() -> None:
     request.method = "POST"
     request.path = "/api/v1/test"
     request.META = {"REMOTE_ADDR": "127.0.0.1", "HTTP_USER_AGENT": "test"}  # type: ignore[assignment]
-    # monkeypatch AuditLog.objects.create 抛异常
+    # monkeypatch AuditLog.objects.create_with_hash 抛异常
     import apps.audit.middleware as mw_module
 
-    original_create = mw_module.AuditLog.objects.create
+    original_create = mw_module.AuditLog.objects.create_with_hash
 
     def boom(*_args: object, **_kwargs: object) -> AuditLog:
         raise RuntimeError("db down")
 
-    mw_module.AuditLog.objects.create = boom  # type: ignore[assignment]
+    mw_module.AuditLog.objects.create_with_hash = boom  # type: ignore[assignment]
     try:
         resp = mw(request)
         assert resp.status_code == 200
         assert resp.content == b"ok"
         captured.append("ok")
     finally:
-        mw_module.AuditLog.objects.create = original_create  # type: ignore[assignment]
+        mw_module.AuditLog.objects.create_with_hash = original_create  # type: ignore[assignment]
     assert captured == ["ok"]
 
 
@@ -324,24 +324,24 @@ def test_log_audit_truncates_long_sql() -> None:
 
 @pytest.mark.django_db
 def test_log_audit_exception_returns_none() -> None:
-    """log_audit 在 AuditLog.objects.create 失败时应返回 None（不抛异常）."""
+    """log_audit 在 AuditLog.objects.create_with_hash 失败时应返回 None（不抛异常）."""
     req = HttpRequest()
     req.method = "POST"
     req.path = "/api/v1/test"
     req.META = {}  # type: ignore[assignment]
     import apps.audit.audit as audit_module
 
-    original_create = audit_module.AuditLog.objects.create
+    original_create = audit_module.AuditLog.objects.create_with_hash
 
     def boom(*_args: object, **_kwargs: object) -> AuditLog:
         raise RuntimeError("db down")
 
-    audit_module.AuditLog.objects.create = boom  # type: ignore[assignment]
+    audit_module.AuditLog.objects.create_with_hash = boom  # type: ignore[assignment]
     try:
         result = log_audit(req, action=AuditAction.WRITE)
         assert result is None
     finally:
-        audit_module.AuditLog.objects.create = original_create  # type: ignore[assignment]
+        audit_module.AuditLog.objects.create_with_hash = original_create  # type: ignore[assignment]
 
 
 @pytest.mark.django_db

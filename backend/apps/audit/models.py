@@ -9,13 +9,21 @@
   数据源 ID、资源类型/ID 等业务上下文。
 
 两类记录都通过 ``AuditLog`` 模型统一存储，通过 ``source`` 字段区分来源。
+
+哈希链防篡改：每条记录含 ``prev_hash``（上一条记录的 ``record_hash``）与
+``record_hash``（sha256(prev_hash + 规范化 JSON 负载)），形成链式结构。
+通过 :func:`~apps.audit.hashchain.verify_chain` 可检测任何篡改。
 """
 
 from __future__ import annotations
 
-from django.db import models
+from typing import Any
+
+from django.db import models, transaction
 
 from apps.accounts.models import User
+
+from .hashchain import compute_record_hash
 
 
 class AuditAction(models.TextChoices):
@@ -46,6 +54,10 @@ class AuditAction(models.TextChoices):
     # 对象管理
     OBJ_ALTER = "obj.alter", "编辑对象"
     OBJ_DROP = "obj.drop", "删除对象"
+    # 系统运维
+    BACKUP_CREATE = "backup.create", "创建备份"
+    BACKUP_RESTORE = "backup.restore", "恢复备份"
+    AUDIT_VERIFY = "audit.verify", "审计校验"
 
 
 class AuditSource(models.TextChoices):
@@ -62,6 +74,32 @@ class AuditStatus(models.TextChoices):
     FAILURE = "failure", "失败"
 
 
+class AuditLogManager(models.Manager["AuditLog"]):
+    """审计日志 manager，提供带哈希链的创建方法."""
+
+    def create_with_hash(self, **kwargs: Any) -> AuditLog:
+        """创建审计记录并计算哈希链.
+
+        在事务内 ``select_for_update`` 锁定最后一条记录取 ``prev_hash``，先 ``create``
+        获得 id/created_at，再 ``compute_record_hash`` 并 ``update`` 回写。
+        事务 + 行锁保证并发写入串行化，prev_hash 不会错乱。
+
+        Args:
+            **kwargs: 与 ``Manager.create`` 相同的字段参数。
+
+        Returns:
+            创建的 :class:`AuditLog` 实例（含 prev_hash/record_hash）。
+        """
+        with transaction.atomic():
+            last = self.select_for_update().order_by("-id").first()
+            prev_hash = last.record_hash if last else ""
+            record = self.create(**kwargs)
+            record.prev_hash = prev_hash
+            record.record_hash = compute_record_hash(record, prev_hash)
+            record.save(update_fields=["prev_hash", "record_hash"])
+            return record
+
+
 class AuditLog(models.Model):
     """审计日志条目.
 
@@ -69,8 +107,7 @@ class AuditLog(models.Model):
     通过 ``source`` 字段区分。业务层记录会补充 ``sql``/``row_count``/``resource_type`` 等字段。
     """
 
-    # 显式声明 manager 供类型检查识别
-    objects: models.Manager[AuditLog]
+    objects = AuditLogManager()
 
     user = models.ForeignKey(
         User,
@@ -117,6 +154,9 @@ class AuditLog(models.Model):
     # 额外扩展字段（如导入文件名、对象类型等）
     extra = models.JSONField(default=dict, blank=True, verbose_name="扩展信息")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="操作时间")
+    # 哈希链字段：prev_hash = 上一条记录的 record_hash（首条为空），record_hash = sha256(prev_hash + 规范化 JSON)
+    prev_hash = models.CharField(max_length=64, blank=True, default="", verbose_name="前一条记录哈希")
+    record_hash = models.CharField(max_length=64, blank=True, default="", verbose_name="本条记录哈希")
 
     class Meta:
         verbose_name = "审计日志"
@@ -139,6 +179,7 @@ class AuditLog(models.Model):
 __all__ = [
     "AuditAction",
     "AuditLog",
+    "AuditLogManager",
     "AuditSource",
     "AuditStatus",
 ]

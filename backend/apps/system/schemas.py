@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from ninja import Schema
 
 
@@ -79,13 +81,88 @@ class LockListOut(Schema):
     total: int
 
 
+class BackupFileInfoOut(Schema):
+    """单个备份归档文件信息."""
+
+    filename: str
+    size: int
+    modified_at: datetime
+
+
+class BackupListOut(Schema):
+    """备份归档列表响应."""
+
+    items: list[BackupFileInfoOut]
+    total: int
+
+
+class BackupTaskOut(Schema):
+    """备份任务状态响应."""
+
+    id: int
+    action: str
+    status: str
+    archive_name: str
+    archive_size: int | None = None
+    engine: str
+    error_message: str
+    created_at: datetime
+    completed_at: datetime | None = None
+
+
+class BackupTriggerOut(Schema):
+    """备份/恢复触发响应."""
+
+    task_id: int
+    status: str
+    message: str
+
+
+class RestoreTriggerIn(Schema):
+    """恢复触发请求体."""
+
+    archive_name: str
+    confirm: bool = False
+
+
+class ChainBreakOut(Schema):
+    """哈希链断点信息."""
+
+    record_id: int
+    expected_hash: str
+    actual_hash: str
+    prev_hash: str
+
+
+class AuditVerifyOut(Schema):
+    """审计哈希链校验结果."""
+
+    valid: bool
+    total_records: int
+    breaks: list[ChainBreakOut]
+
+
+class MessageOut(Schema):
+    """通用消息响应."""
+
+    detail: str
+
+
 __all__ = [
+    "AuditVerifyOut",
+    "BackupFileInfoOut",
+    "BackupListOut",
+    "BackupTaskOut",
+    "BackupTriggerOut",
+    "ChainBreakOut",
     "CircuitStateOut",
     "CircuitStatesOut",
     "ComponentStatusOut",
     "HealthOut",
     "LockInfoOut",
     "LockListOut",
+    "MessageOut",
     "PoolStatOut",
     "PoolStatsOut",
+    "RestoreTriggerIn",
 ]

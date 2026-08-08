@@ -94,7 +94,7 @@ def log_audit(  # noqa: PLR0913
         ua = request.META.get("HTTP_USER_AGENT", "")[:512]
         sql_text = sql[:_MAX_SQL_LENGTH] if sql else ""
 
-        return AuditLog.objects.create(
+        return AuditLog.objects.create_with_hash(
             user=user_obj,
             username=username,
             action=action,

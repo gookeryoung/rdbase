@@ -97,7 +97,7 @@ def _record_middleware_audit(request: HttpRequest, response: HttpResponse, elaps
 
     # 从请求体无法可靠提取 SQL 文本（已被 ninja 解析消费），中间件层不记录 sql 字段，
     # 业务层在 view 内显式补充。
-    AuditLog.objects.create(
+    AuditLog.objects.create_with_hash(
         user=user_obj,
         username=username,
         action=AuditAction.WRITE,
