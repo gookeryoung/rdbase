@@ -875,7 +875,6 @@ const Manager = () => {
       initialValues[col] = null;
     });
     setModalState({ open: true, mode: "create", pk: null, initialValues });
-    form.setFieldsValue(initialValues as never);
   };
 
   // 打开编辑 Modal
@@ -893,8 +892,16 @@ const Manager = () => {
       }
     });
     setModalState({ open: true, mode: "edit", pk, initialValues });
-    form.setFieldsValue(initialValues as never);
   };
+
+  // Modal 打开后填充表单值。
+  // Modal 配了 destroyOnClose，Form 在 Modal 打开时才挂载；事件处理器内同步
+  // setFieldsValue 会因 Form 未挂载而丢失，须在 useEffect 中于渲染完成后调用。
+  useEffect(() => {
+    if (modalState.open) {
+      form.setFieldsValue(modalState.initialValues as never);
+    }
+  }, [modalState.open, modalState.initialValues, form]);
 
   // Modal 提交
   const handleModalSubmit = async () => {
