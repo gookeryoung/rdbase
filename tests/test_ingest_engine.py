@@ -24,9 +24,9 @@ from apps.ingest.models import (
     SourceType,
 )
 from apps.ingest.spiders.api_spider import ApiIngestSpider
-from apps.ingest.spiders.base import BaseIngestSpider
 from apps.ingest.spiders.file_spider import FileIngestSpider
 from apps.ingest.spiders.html_spider import HtmlIngestSpider
+from apps.ingest.spiders.rss_spider import RssIngestSpider
 
 
 @pytest.fixture
@@ -181,11 +181,9 @@ class TestResolveSpider:
         """FILE 源类型应分派到 FileIngestSpider."""
         assert _resolve_spider(SourceType.FILE.value) is FileIngestSpider
 
-    def test_rss_returns_base_placeholder(self, caplog: pytest.LogCaptureFixture) -> None:
-        """RSS 源类型尚未实现，应回退到 BaseIngestSpider 并记录警告."""
-        with caplog.at_level("WARNING"):
-            spider_cls = _resolve_spider(SourceType.RSS.value)
-        assert spider_cls is BaseIngestSpider
+    def test_rss_returns_rss_spider(self) -> None:
+        """RSS 源类型应分派到 RssIngestSpider."""
+        assert _resolve_spider(SourceType.RSS.value) is RssIngestSpider
 
     def test_invalid_source_type_raises(self) -> None:
         with pytest.raises(IngestError, match="不支持的源类型"):

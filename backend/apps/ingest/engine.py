@@ -34,6 +34,7 @@ from apps.ingest.spiders.api_spider import ApiIngestSpider
 from apps.ingest.spiders.base import BaseIngestSpider
 from apps.ingest.spiders.file_spider import FileIngestSpider
 from apps.ingest.spiders.html_spider import HtmlIngestSpider
+from apps.ingest.spiders.rss_spider import RssIngestSpider
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +169,8 @@ def _resolve_spider(source_type: str) -> type[BaseIngestSpider]:
         return HtmlIngestSpider
     if source_type == SourceType.FILE:
         return FileIngestSpider
+    if source_type == SourceType.RSS:
+        return RssIngestSpider
     if source_type in dict(SourceType.choices):
         logger.warning("源类型 %s 的专用 spider 尚未实现，使用 BaseIngestSpider 占位", source_type)
         return BaseIngestSpider
