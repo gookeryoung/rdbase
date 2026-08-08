@@ -11,6 +11,7 @@ import AuditLogs from "@/pages/AuditLogs";
 import Settings from "@/pages/Settings";
 import Sync from "@/pages/Sync";
 import Ingest from "@/pages/Ingest";
+import SystemStatus from "@/pages/SystemStatus";
 import MainLayout from "@/layouts/MainLayout";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import RoleRoute from "@/components/RoleRoute";
@@ -64,6 +65,11 @@ export const routes: RouteObject[] = [
             path: "ingest",
             element: <RoleRoute allowedRoles={[Role.ADMIN]} />,
             children: [{ index: true, element: <Ingest /> }],
+          },
+          {
+            path: "system-status",
+            element: <RoleRoute allowedRoles={[Role.ADMIN]} />,
+            children: [{ index: true, element: <SystemStatus /> }],
           },
           { path: "profile", element: <Profile /> },
         ],

@@ -13,6 +13,7 @@ import {
   SettingOutlined,
   SyncOutlined,
   CloudDownloadOutlined,
+  MonitorOutlined,
 } from "@ant-design/icons";
 import { Outlet, useNavigate, useLocation } from "react-router-dom";
 import { useAuthStore } from "@/store/auth";
@@ -71,6 +72,12 @@ const menuItems: MenuItem[] = [
     key: "/ingest",
     icon: <CloudDownloadOutlined />,
     label: "数据爬取",
+    roles: [Role.ADMIN],
+  },
+  {
+    key: "/system-status",
+    icon: <MonitorOutlined />,
+    label: "系统状态",
     roles: [Role.ADMIN],
   },
   { key: "/profile", icon: <UserOutlined />, label: "个人中心" },

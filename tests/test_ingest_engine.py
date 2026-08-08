@@ -165,6 +165,58 @@ class TestExecuteTask:
         assert alerts.count() == 1
         assert "致命错误" in str(alerts.first().message)
 
+    def test_failure_drives_breaker_on_failure(self, monkeypatch: pytest.MonkeyPatch, task: IngestTask) -> None:
+        """execute_task 失败应驱动熔断器 on_failure."""
+        from apps.system.circuit_breaker import get_breaker, reset_backend
+
+        reset_backend()
+
+        def fake_run(_task: IngestTask) -> SpiderStats:
+            raise IngestError("连接失败")
+
+        monkeypatch.setattr("apps.ingest.engine._run_spider", fake_run)
+        execute_task(task)
+        breaker = get_breaker(f"ingest:task:{task.pk}")
+        assert breaker.failure_count >= 1
+
+    def test_success_drives_breaker_on_success(self, monkeypatch: pytest.MonkeyPatch, task: IngestTask) -> None:
+        """execute_task 成功应驱动熔断器 on_success（重置失败计数）."""
+        from apps.system.circuit_breaker import get_breaker, reset_backend
+
+        reset_backend()
+
+        def fake_run(_task: IngestTask) -> SpiderStats:
+            return SpiderStats(rows_read=5, rows_written=5, rows_skipped=0)
+
+        monkeypatch.setattr("apps.ingest.engine._run_spider", fake_run)
+        execute_task(task)
+        breaker = get_breaker(f"ingest:task:{task.pk}")
+        assert breaker.failure_count == 0
+
+    def test_rejected_when_breaker_open(self, monkeypatch: pytest.MonkeyPatch, task: IngestTask) -> None:
+        """熔断器 OPEN 时 execute_task 直接记失败日志，不启动 Scrapy."""
+        from apps.system.circuit_breaker import (
+            CircuitBreakerConfig,
+            get_breaker,
+            reset_backend,
+        )
+
+        reset_backend()
+        breaker = get_breaker(
+            f"ingest:task:{task.pk}",
+            CircuitBreakerConfig(failure_threshold=1, open_seconds=60),
+        )
+        breaker.on_failure()  # 触发 OPEN
+
+        # 即便 _run_spider 会抛错，也应被跳过（不会调用到）
+        def fake_run(_task: IngestTask) -> SpiderStats:
+            raise AssertionError("不应被调用")
+
+        monkeypatch.setattr("apps.ingest.engine._run_spider", fake_run)
+        log = execute_task(task)
+        assert log.status == IngestLogStatus.FAILED
+        assert "熔断器" in str(log.error_message)
+
 
 class TestResolveSpider:
     """_resolve_spider 分派测试."""

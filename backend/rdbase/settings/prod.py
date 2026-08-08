@@ -31,3 +31,6 @@ CORS_ALLOWED_ORIGINS = [o for o in os.environ.get("CORS_ALLOWED_ORIGINS", "").sp
 
 # CSRF 信任来源（Django 4.0+ 需显式配置，否则 POST 会被拒绝）
 CSRF_TRUSTED_ORIGINS = [o for o in os.environ.get("CSRF_TRUSTED_ORIGINS", "").split(",") if o]
+
+# Redis（从环境变量读取，未配置时降级为无 Redis 模式）
+REDIS_URL = os.environ.get("REDIS_URL", "")

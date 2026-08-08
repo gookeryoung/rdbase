@@ -33,6 +33,8 @@ dependencies = [
     "selectolax>=0.4.11",
     "feedparser>=6.0.14",
     "jsonpath-ng>=1.8.0",
+    # 缓存与会话后端
+    "redis>=5.0",
 ]
 description = "通用数据库管理平台（django-ninja + React）."
 license = { text = "MIT" }
@@ -61,6 +63,7 @@ dev = [
     "pytest-html>=4.1.1",
     "pytest-xdist>=3.6.1",
     "prek>=0.4.5",
+    "fakeredis>=2.20",
 ]
 
 [tool.uv]

@@ -8,10 +8,10 @@ from django.http import HttpResponse
 from django.test import Client
 
 
-def test_health_check_returns_ok() -> None:
-    """GET /health/ 应返回 200 与 ok 状态."""
+def test_health_live_returns_ok() -> None:
+    """GET /health/live 应返回 200 与 ok 状态（轻量探针，不查 DB）."""
     client = Client()
-    response = client.get("/health/")
+    response = client.get("/health/live")
     assert isinstance(response, HttpResponse)
     assert response.status_code == 200
     body = json.loads(response.content)

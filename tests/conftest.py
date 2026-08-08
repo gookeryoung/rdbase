@@ -9,7 +9,54 @@ import pytest
 from apps.accounts.jwt import create_access_token
 from apps.accounts.models import Role, User
 from apps.datasources.models import DataSource, EngineType
+from apps.system import circuit_breaker, distributed_lock, idempotency, redis_client
 from django.test import Client
+
+
+@pytest.fixture(autouse=True)
+def _reset_circuit_breaker() -> Any:
+    """每个测试前后重置熔断器后端与 breaker 缓存，避免跨测试失败计数污染.
+
+    同时重置 Redis 客户端单例，使 breaker 后端按当前 settings 重新解析
+    （测试可能用 override_settings 切换 REDIS_FAKE）。
+    fakeredis 同 URL 跨实例共享 server 数据，``reset_redis_client`` 仅清单例
+    不清 server 数据，故需显式 ``flush_redis`` 避免跨测试残留污染。
+    """
+    redis_client.flush_redis()
+    redis_client.reset_redis_client()
+    circuit_breaker.reset_backend()
+    yield
+    redis_client.flush_redis()
+    redis_client.reset_redis_client()
+    circuit_breaker.reset_backend()
+
+
+@pytest.fixture(autouse=True)
+def _reset_idempotency_and_lock() -> Any:
+    """每个测试前后重置幂等存储与分布式锁后端单例.
+
+    与 _reset_circuit_breaker 协同：先重置 redis_client，再重置依赖它的
+    idempotency/lock 后端，确保跨测试不残留缓存与锁占用。
+    """
+    idempotency.reset_store()
+    idempotency.reset_manager()
+    distributed_lock.reset_backend()
+    yield
+    idempotency.reset_store()
+    idempotency.reset_manager()
+    distributed_lock.reset_backend()
+
+
+@pytest.fixture(autouse=True)
+def _noop_backoff_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """将 sync_service 的退避 sleep 替换为空操作，避免重试测试真实等待."""
+
+    def _noop(_delay: float) -> None:
+        return None
+
+    from apps.sync import sync_service
+
+    monkeypatch.setattr(sync_service, "_backoff_sleep", _noop)
 
 
 @pytest.fixture

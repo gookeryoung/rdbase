@@ -197,6 +197,105 @@ class TestRunAndLogs:
         assert logs[0]["status"] == "success"
 
 
+class TestRunIdempotencyAndLock:
+    """爬取触发接口的幂等保护与分布式锁集成测试."""
+
+    def test_idempotency_returns_cached_on_second_call(
+        self,
+        db: Any,
+        client: Client,
+        admin_user: Any,
+        datasource: DataSource,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """相同 Idempotency-Key 的二次请求返回缓存结果，spawn_ingest 仅执行一次."""
+        h = _auth(admin_user)
+        h["HTTP_IDEMPOTENCY_KEY"] = "idem-ingest-1"
+        create = _post(client, "/api/v1/ingest/tasks", _payload(datasource.pk), h)
+        tid = create.json()["id"]
+
+        call_count = {"n": 0}
+
+        class FakeResult:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def fake_spawn(_task_id: int) -> Any:
+            call_count["n"] += 1
+            task = IngestTask.objects.get(pk=tid)
+            IngestLog.objects.create(
+                task=task,
+                status=IngestLogStatus.SUCCESS,
+                rows_read=2,
+                rows_written=2,
+                started_at=timezone.now(),
+                duration_ms=8,
+            )
+            return FakeResult()
+
+        monkeypatch.setattr("apps.ingest.api.spawn_ingest", fake_spawn)
+        resp1 = client.post(f"/api/v1/ingest/tasks/{tid}/run", **h)
+        assert resp1.status_code == 200
+        assert call_count["n"] == 1
+        # 二次请求：命中缓存，spawn_ingest 不再调用
+        resp2 = client.post(f"/api/v1/ingest/tasks/{tid}/run", **h)
+        assert resp2.status_code == 200
+        assert call_count["n"] == 1
+        assert json.loads(resp1.content) == json.loads(resp2.content)
+
+    def test_lock_contention_returns_409(
+        self,
+        db: Any,
+        client: Client,
+        admin_user: Any,
+        datasource: DataSource,
+    ) -> None:
+        """锁被占用时触发返回 409."""
+        from apps.system.distributed_lock import DistributedLock
+
+        h = _auth(admin_user)
+        create = _post(client, "/api/v1/ingest/tasks", _payload(datasource.pk), h)
+        tid = create.json()["id"]
+
+        holder = DistributedLock(f"ingest:task:{tid}")
+        assert holder.acquire() is True
+        try:
+            resp = client.post(f"/api/v1/ingest/tasks/{tid}/run", **h)
+            assert resp.status_code == 409
+        finally:
+            holder.release()
+
+    def test_no_idempotency_key_runs_each_time(
+        self,
+        db: Any,
+        client: Client,
+        admin_user: Any,
+        datasource: DataSource,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """无 Idempotency-Key 时每次都执行（不缓存）."""
+        h = _auth(admin_user)  # 无 HTTP_IDEMPOTENCY_KEY
+        create = _post(client, "/api/v1/ingest/tasks", _payload(datasource.pk), h)
+        tid = create.json()["id"]
+
+        call_count = {"n": 0}
+
+        class FakeResult:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def fake_spawn(_task_id: int) -> Any:
+            call_count["n"] += 1
+            return FakeResult()
+
+        monkeypatch.setattr("apps.ingest.api.spawn_ingest", fake_spawn)
+        client.post(f"/api/v1/ingest/tasks/{tid}/run", **h)
+        client.post(f"/api/v1/ingest/tasks/{tid}/run", **h)
+        assert call_count["n"] == 2
+
+
 class TestAlertsAndStats:
     """告警与统计测试."""
 

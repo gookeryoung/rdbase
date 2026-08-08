@@ -35,6 +35,7 @@ from apps.ingest.spiders.base import BaseIngestSpider
 from apps.ingest.spiders.file_spider import FileIngestSpider
 from apps.ingest.spiders.html_spider import HtmlIngestSpider
 from apps.ingest.spiders.rss_spider import RssIngestSpider
+from apps.system.circuit_breaker import CircuitOpenError, get_breaker
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,10 @@ def execute_task(task: IngestTask) -> IngestLog:
     按 source_type 分派 spider，运行 Scrapy CrawlerProcess，收集统计并写日志。
     失败时累加任务 retry_count，达 max_retries 产生告警。
 
+    调用前后驱动熔断器（``ingest:task:{id}``）：调用前判断是否放行，成功重置
+    失败计数，失败累加。熔断器 OPEN 时直接记为失败日志，不启动 Scrapy 子进程。
+    多 worker 部署时熔断状态经 Redis 共享，单 worker 降级为本地内存。
+
     PARTIAL 判定：rows_skipped > 0 时视为部分成功。
 
     Args:
@@ -95,6 +100,20 @@ def execute_task(task: IngestTask) -> IngestLog:
     """
     started_at = timezone.now()
     log = IngestLog(task=task, status=IngestLogStatus.SUCCESS, started_at=started_at)
+    breaker = get_breaker(f"ingest:task:{task.pk}")
+
+    try:
+        breaker.before_call()
+    except CircuitOpenError as exc:
+        # 熔断打开：不启动 Scrapy，直接记失败日志。
+        log.status = IngestLogStatus.FAILED
+        log.error_message = f"熔断器打开，跳过爬取: {exc}"
+        log.finished_at = timezone.now()
+        log.duration_ms = int((log.finished_at - started_at).total_seconds() * 1000)
+        log.save()
+        _apply_task_status(task, log)
+        logger.warning("爬取任务 %s 被熔断器拒绝", task.name)
+        return log
 
     try:
         stats = _run_spider(task)
@@ -105,10 +124,12 @@ def execute_task(task: IngestTask) -> IngestLog:
             log.status = IngestLogStatus.PARTIAL
         else:
             log.status = IngestLogStatus.SUCCESS
+        breaker.on_success()
     except IngestError as exc:
         log.status = IngestLogStatus.FAILED
         log.error_message = str(exc)
         logger.warning("爬取任务 %s 执行失败: %s", task.name, exc)
+        breaker.on_failure()
         if task.retry_count + 1 >= task.max_retries:
             IngestAlert.raise_alert(task, f"爬取失败（已达最大重试 {task.max_retries} 次）: {exc}")
     finally:

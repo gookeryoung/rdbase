@@ -43,6 +43,7 @@ INSTALLED_APPS = [
     "apps.settings",
     "apps.sync",
     "apps.ingest",
+    "apps.system",
 ]
 
 # 自定义用户模型（须在首次 migrate 前设置）
@@ -89,6 +90,12 @@ DATABASES = {
         "NAME": DATA_DIR / "db.sqlite3",
     }
 }
+
+# Redis（缓存与会话后端，子配置覆盖）
+# - REDIS_URL 为空时系统降级为无 Redis 模式
+# - REDIS_FAKE=True 时使用 fakeredis（仅开发/测试）
+REDIS_URL: str = ""
+REDIS_FAKE: bool = False
 
 # 密码验证
 AUTH_PASSWORD_VALIDATORS = [

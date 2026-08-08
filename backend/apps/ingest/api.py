@@ -18,6 +18,7 @@ ingest 专用审计枚举与显式业务上下文记录在 iter-35 补全。
 
 from __future__ import annotations
 
+import subprocess
 from typing import Any, cast
 
 from django.http import HttpRequest, HttpResponse, JsonResponse
@@ -49,6 +50,12 @@ from apps.ingest.schemas import (
     MessageOut,
 )
 from apps.sync.scheduling import CronError, validate_cron
+from apps.system.distributed_lock import get_lock
+from apps.system.idempotency import (
+    check_idempotency,
+    release_idempotency,
+    store_idempotency_result,
+)
 
 router = Router(tags=["ingest"], auth=JWTAuth())
 
@@ -296,11 +303,32 @@ def run_task(request: HttpRequest, task_id: int) -> HttpResponse:
     """手动触发爬取任务执行（仅管理员）.
 
     以子进程启动 ``run_ingest`` 命令运行 Scrapy，同步等待返回。
-    大型爬取任务可能耗时较长，后续 iter-35 可改为异步。
+    支持 Idempotency-Key 请求头（24h 内重复请求返回缓存结果）；
+    通过分布式锁防止同一任务并发执行（获取失败返回 409）。
     """
     require_admin(request)
     task = _get_task_or_404(task_id)
-    result = spawn_ingest(task.pk)
+
+    # 幂等检查：命中已完成缓存则直接回放，命中 in_progress 返回 409。
+    cached = check_idempotency(request)
+    if cached is not None:
+        return cached
+
+    # 分布式锁：防同一任务并发执行。
+    lock = get_lock(f"ingest:task:{task.pk}")
+    if not lock.acquire():
+        release_idempotency(request)
+        info = lock.info()
+        raise HttpError(409, f"爬取任务 {task.pk} 正在执行中（锁剩余 {info.ttl}s）")
+
+    try:
+        result = spawn_ingest(task.pk)
+    except (OSError, subprocess.SubprocessError) as exc:
+        release_idempotency(request)
+        raise HttpError(500, f"爬取任务执行失败: {exc}") from exc
+    finally:
+        lock.release()
+
     log = task.logs.order_by("-started_at").first()
     body = IngestRunOut(
         task_id=task.pk,
@@ -308,6 +336,7 @@ def run_task(request: HttpRequest, task_id: int) -> HttpResponse:
         log=_log_to_out(log) if log else None,
         stderr=result.stderr,
     ).model_dump(mode="json")
+    store_idempotency_result(request, 200, body)
     return JsonResponse(body)
 
 

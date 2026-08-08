@@ -1520,3 +1520,82 @@ class TestSyncServiceBatchConcurrent:
         assert result.total == 2
         # 首个失败后停止，仅计一次失败
         assert result.failed == 1
+
+
+class TestSyncServiceCircuitBreaker:
+    """SyncService.run 熔断器接入测试."""
+
+    def test_run_failure_records_breaker_failure(
+        self,
+        sync_config_for_service: SyncConfig,
+    ) -> None:
+        """run 失败应驱动熔断器 on_failure."""
+        from apps.system.circuit_breaker import get_breaker, reset_backend
+
+        reset_backend()
+        service = SyncService(sync_config_for_service)
+        with suppress(SyncError):
+            service.run(max_retries=0)
+        breaker = get_breaker(f"sync:config:{sync_config_for_service.pk}")
+        assert breaker.failure_count >= 1
+
+    def test_run_success_resets_breaker(
+        self,
+        sync_config_for_service: SyncConfig,
+    ) -> None:
+        """run 成功应驱动熔断器 on_success（重置失败计数）."""
+        from apps.system.circuit_breaker import get_breaker, reset_backend
+
+        reset_backend()
+        SyncFieldMapping.objects.create(
+            config=sync_config_for_service,
+            source_field="id",
+            target_field="ext_id",
+            is_pk=True,
+        )
+        service = SyncService(sync_config_for_service)
+        # mock 源数据为空，走成功早返回（rows_read=0）
+        with patch.object(service, "_read_source_data", return_value=[]):
+            service.run(max_retries=0)
+        breaker = get_breaker(f"sync:config:{sync_config_for_service.pk}")
+        assert breaker.failure_count == 0
+
+    def test_run_rejected_when_breaker_open(
+        self,
+        sync_config_with_mappings_for_service: SyncConfig,
+    ) -> None:
+        """熔断器 OPEN 时 run 抛 SyncError 含'熔断器'."""
+        from apps.system.circuit_breaker import (
+            CircuitBreakerConfig,
+            get_breaker,
+            reset_backend,
+        )
+
+        reset_backend()
+        breaker = get_breaker(
+            f"sync:config:{sync_config_with_mappings_for_service.pk}",
+            CircuitBreakerConfig(failure_threshold=1, open_seconds=60),
+        )
+        breaker.on_failure()  # 触发 OPEN
+        service = SyncService(sync_config_with_mappings_for_service)
+        with pytest.raises(SyncError, match="熔断器"):
+            service.run(max_retries=0)
+
+    def test_run_uses_exponential_backoff_sleep(
+        self,
+        sync_config_for_service: SyncConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """重试时应调用 _backoff_sleep（被 conftest 替换为空操作）."""
+        from apps.sync import sync_service
+
+        sleeps: list[float] = []
+        monkeypatch.setattr(sync_service, "_backoff_sleep", sleeps.append)
+        service = SyncService(sync_config_for_service)
+        with suppress(SyncError):
+            service.run(max_retries=2)
+        # max_retries=2 共尝试 3 次，2 次重试间应有 2 次 sleep
+        assert len(sleeps) == 2
+        # 指数退避：第二次 sleep 应大于第一次（base_delay=1.0, base=2.0, jitter=0.1）
+        # jitter 可能扰动，仅断言均为正
+        assert all(d > 0 for d in sleeps)

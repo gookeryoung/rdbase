@@ -18,6 +18,8 @@
 from __future__ import annotations
 
 import logging
+import time
+from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -30,6 +32,8 @@ from sqlalchemy.engine import Engine
 
 from apps.datasources.engine import get_engine as get_ds_engine
 from apps.datasources.models import EngineType
+from apps.system.circuit_breaker import CircuitOpenError, get_breaker
+from apps.system.retry import RetryConfig, compute_backoff
 
 from .models import (
     AlertLevel,
@@ -45,6 +49,9 @@ from .models import (
 from .scheduling import compute_next_run, is_valid_cron
 
 logger = logging.getLogger(__name__)
+
+# 退避 sleep 钩子：默认 time.sleep，测试可 monkeypatch 为空操作避免真实等待。
+_backoff_sleep: Callable[[float], None] = time.sleep
 
 
 class SyncError(ValueError):
@@ -94,6 +101,10 @@ class SyncService:
     def run(self, *, force_full: bool = False, max_retries: int | None = None) -> SyncLog:
         """执行同步.
 
+        在调用前后驱动熔断器（``sync:config:{id}``）：调用前判断是否放行，
+        成功重置失败计数，失败累加并在达阈值时熔断。重试采用指数退避
+        （``base_delay`` 起步，每次翻倍，上限 ``max_delay``）。
+
         Args:
             force_full: 强制全量同步（忽略配置的 sync_mode）。
             max_retries: 最大重试次数，None 则使用配置中的值。
@@ -102,28 +113,44 @@ class SyncService:
             SyncLog: 同步执行日志。
 
         Raises:
-            SyncError: 配置无效、源表不存在、目标不可达等。
+            SyncError: 配置无效、源表不存在、目标不可达、熔断器打开等。
         """
         config = self.config
         max_attempts = max_retries if max_retries is not None else config.max_retries
+        breaker = get_breaker(f"sync:config:{config.pk}")
+        retry_cfg = RetryConfig(max_retries=max_attempts)
         last_exception: Exception | None = None
 
         for attempt in range(max_attempts + 1):
+            # 熔断器检查：OPEN 时直接拒绝，不进入重试（下游不可用，重试无意义）。
             try:
-                return self._do_run(force_full=force_full)
+                breaker.before_call()
+            except CircuitOpenError as exc:
+                state = breaker.state
+                logger.warning("同步被熔断器拒绝: config=%s, state=%s", config.name, state.value)
+                raise SyncError(f"熔断器处于 {state.value} 状态，跳过同步: {exc}") from exc
+
+            try:
+                log = self._do_run(force_full=force_full)
+                breaker.on_success()
+                return log
             except SyncError as exc:
+                breaker.on_failure()
                 last_exception = exc
                 config.retry_count = attempt + 1
                 config.save(update_fields=["retry_count"])
 
                 if attempt < max_attempts:
+                    delay = compute_backoff(attempt, retry_cfg)
                     logger.warning(
-                        "同步失败，第 %d/%d 次重试: config=%s, error=%s",
+                        "同步失败，第 %d/%d 次重试（等待 %.2fs）: config=%s, error=%s",
                         attempt + 1,
                         max_attempts,
+                        delay,
                         config.name,
                         exc,
                     )
+                    _backoff_sleep(delay)
                 else:
                     logger.error(
                         "同步失败（已达最大重试次数）: config=%s, error=%s",

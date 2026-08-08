@@ -489,6 +489,144 @@ class TestSyncTriggerAPI:
         assert data["rows_written"] == 8
 
 
+class TestSyncTriggerIdempotencyAndLock:
+    """同步触发接口的幂等保护与分布式锁集成测试."""
+
+    def test_idempotency_returns_cached_on_second_call(self, admin_user: User, sync_config_for_api: SyncConfig) -> None:
+        """相同 Idempotency-Key 的二次请求返回缓存结果，SyncService 仅执行一次."""
+        from unittest.mock import MagicMock, patch
+
+        from apps.sync.api import trigger_sync
+        from apps.sync.schemas import SyncTriggerIn
+
+        request = MagicMock()
+        request.auth = admin_user
+        request.user = admin_user
+        request.headers = {"Idempotency-Key": "idem-sync-1"}
+
+        fake_log = MagicMock()
+        fake_log.pk = 111
+        fake_log.status = "success"
+        fake_log.mode = "full"
+        fake_log.rows_read = 5
+        fake_log.rows_written = 5
+        fake_log.rows_skipped = 0
+        fake_log.error_message = ""
+        fake_log.duration_ms = 50
+
+        with patch("apps.sync.api.SyncService") as mock_service_cls:
+            mock_service_cls.return_value.run.return_value = fake_log
+            # 首次请求：执行业务并缓存
+            resp1 = trigger_sync(request, sync_config_for_api.pk, SyncTriggerIn(confirm=True))
+            assert resp1.status_code == 200
+            assert mock_service_cls.return_value.run.call_count == 1
+            # 二次请求：命中缓存，SyncService.run 不再被调用
+            resp2 = trigger_sync(request, sync_config_for_api.pk, SyncTriggerIn(confirm=True))
+            assert resp2.status_code == 200
+            assert mock_service_cls.return_value.run.call_count == 1
+            # 两次响应体一致
+            assert json.loads(resp1.content) == json.loads(resp2.content)
+
+    def test_idempotency_in_progress_raises_409(self, admin_user: User, sync_config_for_api: SyncConfig) -> None:
+        """未完成时相同 key 的并发请求抛 409."""
+        from unittest.mock import MagicMock
+
+        from apps.sync.api import trigger_sync
+        from apps.sync.schemas import SyncTriggerIn
+        from apps.system.idempotency import get_manager
+        from ninja.errors import HttpError
+
+        request = MagicMock()
+        request.auth = admin_user
+        request.user = admin_user
+        request.headers = {"Idempotency-Key": "idem-sync-2"}
+
+        # 预先占用 in_progress 槽位（模拟并发首请求正在执行）
+        manager = get_manager()
+        manager.acquire("user:" + str(admin_user.pk), "idem-sync-2")
+
+        with pytest.raises(HttpError) as exc_info:
+            trigger_sync(request, sync_config_for_api.pk, SyncTriggerIn(confirm=True))
+        assert exc_info.value.status_code == 409
+
+    def test_lock_contention_returns_409(
+        self, admin_user: User, sync_config_for_api: SyncConfig, client: Client
+    ) -> None:
+        """锁被占用时触发返回 409."""
+        from apps.system.distributed_lock import DistributedLock
+
+        # 预先持有锁（模拟另一进程正在执行该配置的同步）
+        holder = DistributedLock(f"sync:config:{sync_config_for_api.pk}")
+        assert holder.acquire() is True
+        try:
+            response = _post(
+                client,
+                f"/api/v1/sync/configs/{sync_config_for_api.pk}/trigger",
+                {"confirm": True},
+                _auth(admin_user),
+            )
+            assert response.status_code == 409
+        finally:
+            holder.release()
+
+    def test_no_idempotency_key_runs_each_time(self, admin_user: User, sync_config_for_api: SyncConfig) -> None:
+        """无 Idempotency-Key 时每次都执行业务（不缓存）."""
+        from unittest.mock import MagicMock, patch
+
+        from apps.sync.api import trigger_sync
+        from apps.sync.schemas import SyncTriggerIn
+
+        request = MagicMock()
+        request.auth = admin_user
+        request.user = admin_user
+        request.headers = {}  # 无 Idempotency-Key
+
+        fake_log = MagicMock()
+        fake_log.pk = 222
+        fake_log.status = "success"
+        fake_log.mode = "full"
+        fake_log.rows_read = 1
+        fake_log.rows_written = 1
+        fake_log.rows_skipped = 0
+        fake_log.error_message = ""
+        fake_log.duration_ms = 10
+
+        with patch("apps.sync.api.SyncService") as mock_service_cls:
+            mock_service_cls.return_value.run.return_value = fake_log
+            trigger_sync(request, sync_config_for_api.pk, SyncTriggerIn(confirm=True))
+            trigger_sync(request, sync_config_for_api.pk, SyncTriggerIn(confirm=True))
+            # 无 key 时两次都执行业务
+            assert mock_service_cls.return_value.run.call_count == 2
+
+    def test_failure_releases_idempotency_slot(self, admin_user: User, sync_config_for_api: SyncConfig) -> None:
+        """业务失败时释放幂等槽位，允许后续重试."""
+        from unittest.mock import MagicMock, patch
+
+        from apps.sync.api import trigger_sync
+        from apps.sync.schemas import SyncTriggerIn
+        from apps.sync.sync_service import SyncError
+        from apps.system.idempotency import get_manager
+
+        request = MagicMock()
+        request.auth = admin_user
+        request.user = admin_user
+        request.headers = {"Idempotency-Key": "idem-sync-fail"}
+
+        with patch("apps.sync.api.SyncService") as mock_service_cls:
+            mock_service_cls.return_value.run.side_effect = SyncError("boom")
+            # 首次失败
+            with pytest.raises(Exception) as exc_info:
+                trigger_sync(request, sync_config_for_api.pk, SyncTriggerIn(confirm=True))
+            assert exc_info.value.__cause__ is not None or "boom" in str(exc_info.value)
+
+        # 槽位应已释放，可再次 acquire
+        manager = get_manager()
+        subject = "user:" + str(admin_user.pk)
+        record, should_run = manager.acquire(subject, "idem-sync-fail")
+        assert should_run is True
+        assert record is None
+
+
 class TestSyncPreviewAPI:
     """同步预览 API 测试."""
 

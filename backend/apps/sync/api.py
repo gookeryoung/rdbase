@@ -26,6 +26,12 @@ from apps.accounts.auth import JWTAuth
 from apps.accounts.permissions import require_admin
 from apps.datasources.engine import get_engine as get_ds_engine
 from apps.datasources.models import DataSource
+from apps.system.distributed_lock import get_lock
+from apps.system.idempotency import (
+    check_idempotency,
+    release_idempotency,
+    store_idempotency_result,
+)
 
 from .models import AlertLevel, ConflictStrategy, SyncAlert, SyncConfig, SyncFieldMapping, SyncLog
 from .scheduling import CronError, validate_cron
@@ -340,7 +346,11 @@ def trigger_sync(
     config_id: int,
     payload: SyncTriggerIn,
 ) -> HttpResponse:
-    """手动触发同步执行."""
+    """手动触发同步执行.
+
+    支持 Idempotency-Key 请求头（24h 内重复请求返回缓存结果）；
+    通过分布式锁防止同一配置并发执行（获取失败返回 409）。
+    """
     require_admin(request)
     if not payload.confirm:
         raise HttpError(400, "须确认操作（confirm=true）")
@@ -353,11 +363,26 @@ def trigger_sync(
     if not config.is_active:
         raise HttpError(400, "同步配置已暂停，请先启用")
 
+    # 幂等检查：命中已完成缓存则直接回放，命中 in_progress 返回 409。
+    cached = check_idempotency(request)
+    if cached is not None:
+        return cached
+
+    # 分布式锁：防同一配置并发执行。
+    lock = get_lock(f"sync:config:{config.pk}")
+    if not lock.acquire():
+        release_idempotency(request)
+        info = lock.info()
+        raise HttpError(409, f"同步配置 {config.pk} 正在执行中（锁剩余 {info.ttl}s）")
+
     try:
         service = SyncService(config)
         log = service.run(force_full=payload.force_full)
     except SyncError as exc:
+        release_idempotency(request)
         raise HttpError(500, str(exc)) from exc
+    finally:
+        lock.release()
 
     body = SyncResultOut(
         log_id=log.pk,
@@ -369,6 +394,7 @@ def trigger_sync(
         error_message=log.error_message,
         duration_ms=log.duration_ms,
     ).model_dump()
+    store_idempotency_result(request, 200, body)
     return JsonResponse(body)
 
 

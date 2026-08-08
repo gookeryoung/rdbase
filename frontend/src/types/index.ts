@@ -870,3 +870,42 @@ export interface IngestStats {
   total_rows_written: number;
   total_rows_skipped: number;
 }
+
+// ----------------- 系统运维（P8） -----------------
+
+// 健康状态
+export type HealthStatus = "healthy" | "degraded" | "unhealthy";
+
+// 组件健康检查结果
+export interface ComponentStatus {
+  name: string;
+  status: HealthStatus;
+  latency_ms: number;
+  detail: string;
+}
+
+// 整体健康检查响应
+export interface HealthSummary {
+  status: HealthStatus;
+  project: string;
+  components: ComponentStatus[];
+}
+
+// 连接池状态
+export interface PoolStat {
+  datasource_id: number;
+  datasource_name: string | null;
+  status_text: string;
+  pool_size: number | null;
+  checked_in: number | null;
+  checked_out: number | null;
+  overflow: number | null;
+  leak_alert: boolean;
+  leak_detail: string;
+}
+
+// 连接池状态聚合
+export interface PoolStatsList {
+  items: PoolStat[];
+  total: number;
+}
