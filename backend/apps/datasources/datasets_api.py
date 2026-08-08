@@ -1,0 +1,476 @@
+"""数据集（Dataset）Router：对外稳定契约 + 管理面 CRUD.
+
+设计要点：
+
+- **管理端点**（``GET/POST/PATCH/DELETE``、``GET /{slug}/preview``）：``JWTAuth`` 认证 +
+  ``require_admin`` 校验，复用 ``log_audit`` 记录 ``DATASET_*`` 审计动作。
+- **公开查询端点**（``GET /{slug}/rows``）：``ApiTokenAuth`` 认证 + ``datasets:read``
+  scope 校验，供外部应用按 slug 查询数据。
+- **行级过滤**：``Dataset.filter_expression`` 与查询时 ``filters`` 参数 AND 组合；
+  同名列以 Dataset 配置为准，防止调用方绕过。
+- **列级权限**：``Dataset.fields_whitelist`` 非空时，请求 ``columns`` 必须是其子集，
+  否则 400；``columns`` 未指定时返回白名单列（或全部列）。
+- **is_active=False 不可查询**：公开端点对未启用数据集返回 404；管理端点仍可访问。
+- **version 自增**：每次 PATCH 自动 ``increment_version``，调用方可据此检测契约变化。
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any, cast
+
+from django.http import HttpRequest, HttpResponse, JsonResponse
+from ninja import Router
+from ninja.errors import HttpError
+from sqlalchemy.exc import SQLAlchemyError
+
+from apps.accounts.auth import ApiTokenAuth, JWTAuth
+from apps.accounts.models import ApiToken, User
+from apps.accounts.permissions import require_admin
+from apps.audit.audit import log_audit
+from apps.audit.models import AuditAction
+from apps.manager.query import QueryError, get_column_names, query_table_rows
+
+from .engine import get_engine
+from .models import Dataset, DataSource
+from .schemas import (
+    DatasetCreateIn,
+    DatasetListOut,
+    DatasetOut,
+    DatasetRowsOut,
+    DatasetUpdateIn,
+    MessageOut,
+)
+
+# 管理端 Router：默认 JWT 认证，公开端点通过路由级 auth 覆盖
+router = Router(tags=["datasets"], auth=JWTAuth())
+
+
+# ============================================================
+# 辅助函数
+# ============================================================
+
+
+def _dataset_to_dict(ds: Dataset) -> dict[str, Any]:
+    """构造 Dataset 响应字典."""
+    return {
+        "id": ds.pk,
+        "slug": ds.slug,
+        "name": ds.name,
+        "description": ds.description,
+        "datasource_id": ds.datasource_id,
+        "table_name": ds.table_name,
+        "schema_name": ds.schema_name,
+        "fields_whitelist": list(cast("list[str]", ds.fields_whitelist)),
+        "filter_expression": dict(cast("dict[str, Any]", ds.filter_expression)),
+        "aggregations": dict(cast("dict[str, Any]", ds.aggregations)),
+        "owner_id": ds.owner_id,
+        "is_active": ds.is_active,
+        "version": ds.version,
+        "created_at": ds.created_at.isoformat(),  # type: ignore[missing-attribute]
+        "updated_at": ds.updated_at.isoformat(),  # type: ignore[missing-attribute]
+    }
+
+
+def _get_dataset_or_404(slug: str, *, active_only: bool = False) -> Dataset:
+    """按 slug 获取数据集，不存在抛 404.
+
+    Args:
+        slug: 数据集 slug。
+        active_only: True 时 ``is_active=False`` 也抛 404（用于公开查询端点）。
+    """
+    try:
+        ds = Dataset.objects.get(slug=slug)
+    except Dataset.DoesNotExist:  # type: ignore[missing-attribute]
+        raise HttpError(404, f"数据集 {slug} 不存在") from None
+    if active_only and not ds.is_active:
+        raise HttpError(404, f"数据集 {slug} 不存在")
+    return ds
+
+
+def _require_scope(request: HttpRequest, scope: str) -> ApiToken:
+    """校验请求携带 ApiToken 且拥有指定 scope，否则抛 403.
+
+    ApiTokenAuth 已校验 Token 有效性并挂载到 ``request.api_token``；此处仅校验 scope。
+    无 ApiToken（如 JWT 访问公开端点）也拒绝，强制走 Token 路径。
+    """
+    token = getattr(request, "api_token", None)
+    if not isinstance(token, ApiToken):
+        raise HttpError(403, "此端点须使用 API Token 访问")
+    if not token.has_scope(scope):
+        raise HttpError(403, f"Token 缺少 scope: {scope}")
+    return token
+
+
+def _normalize_filter_expr(raw: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """规范化 filter_expression 为 ``{列名: {"op":..., "val":...}}`` 结构.
+
+    简写形式 ``{"col": val}`` 转换为 ``{"col": {"op": "eq", "val": val}}``；
+    已是 ``{"op","val"}`` 结构的原样保留；非 dict 值视为简写 eq。
+
+    Args:
+        raw: 原始 filter_expression dict。
+
+    Returns:
+        规范化后的 filters dict，与 ``query_table_rows`` 入参格式一致。
+    """
+    normalized: dict[str, dict[str, Any]] = {}
+    for col, cond in raw.items():
+        if isinstance(cond, dict) and "op" in cond and "val" in cond:
+            normalized[col] = {"op": cond["op"], "val": cond["val"]}
+        else:
+            # 简写：值即 eq 比较的右值
+            normalized[col] = {"op": "eq", "val": cond}
+    return normalized
+
+
+def _merge_filters(
+    dataset_filters: dict[str, dict[str, Any]],
+    user_filters: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """合并 Dataset 行级过滤与用户 filters，AND 组合.
+
+    同名列以 dataset_filters 为准（防绕过）；不同列合并保留。
+    """
+    merged = dict(dataset_filters)
+    for col, cond in user_filters.items():
+        if col not in merged:
+            merged[col] = cond
+    return merged
+
+
+def _resolve_columns(
+    whitelist: list[str],
+    user_columns: list[str] | None,
+) -> list[str] | None:
+    """根据白名单与用户请求列计算实际 SELECT 列.
+
+    Args:
+        whitelist: Dataset.fields_whitelist；空列表表示允许全部列。
+        user_columns: 用户请求的 columns；None 表示未指定。
+
+    Returns:
+        实际查询的列名列表；None 表示查询全部列。
+
+    Raises:
+        HttpError: 白名单非空且 user_columns 非其子集时 400。
+    """
+    if not whitelist:
+        # 无白名单：原样返回用户请求（None 或具体列表）
+        return user_columns
+    if user_columns is None:
+        # 有白名单但用户未指定：返回白名单
+        return list(whitelist)
+    # 用户请求列必须是白名单子集
+    whitelist_set = set(whitelist)
+    invalid = [c for c in user_columns if c not in whitelist_set]
+    if invalid:
+        raise HttpError(400, f"请求列不在白名单内: {invalid}")
+    return user_columns
+
+
+def _parse_filters_param(filters_param: str | None) -> dict[str, dict[str, Any]]:
+    """解析 filters JSON 字符串参数为 dict（与 manager.api._parse_filters 同语义）."""
+    if not filters_param:
+        return {}
+    try:
+        parsed = json.loads(filters_param)
+    except json.JSONDecodeError as exc:
+        raise HttpError(400, f"filters 参数非法 JSON: {exc}") from None
+    if not isinstance(parsed, dict):
+        raise HttpError(400, "filters 须为 JSON 对象")
+    return cast("dict[str, dict[str, Any]]", parsed)
+
+
+def _parse_columns_param(columns_param: str | None) -> list[str] | None:
+    """解析 columns 逗号分隔字符串为列表（None 表示查询所有列）."""
+    if not columns_param:
+        return None
+    cols = [c.strip() for c in columns_param.split(",") if c.strip()]
+    return cols or None
+
+
+def _query_dataset_rows(  # noqa: PLR0913
+    dataset: Dataset,
+    *,
+    page: int,
+    page_size: int,
+    order_by: str | None,
+    order_dir: str,
+    columns_param: str | None,
+    filters_param: str | None,
+) -> tuple[list[dict[str, Any]], int, list[str]]:
+    """执行数据集行查询的通用逻辑（供公开 /rows 与管理 /preview 复用）.
+
+    返回 ``(rows, total, returned_columns)``。
+
+    流程：
+
+    1. 解析并规范化 filters（用户 filters + Dataset.filter_expression 合并，同名列以
+       Dataset 为准防绕过）。
+    2. 解析 columns（白名单裁剪：用户列必须是白名单子集，否则 400）。
+    3. 调用 ``query_table_rows`` 执行查询。
+    4. 计算 ``returned_columns``：显式列 → 反射列 → 空列表。
+    """
+    ds: DataSource = dataset.datasource
+    if not ds.is_active:
+        raise HttpError(404, "数据源已停用")
+
+    user_filters = _parse_filters_param(filters_param)
+    user_columns = _parse_columns_param(columns_param)
+
+    dataset_filters = _normalize_filter_expr(dict(cast("dict[str, Any]", dataset.filter_expression)))
+    merged_filters = _merge_filters(dataset_filters, user_filters)
+
+    selected_columns = _resolve_columns(list(cast("list[str]", dataset.fields_whitelist)), user_columns)
+
+    engine = get_engine(ds)
+    schema = dataset.schema_name or None
+    try:
+        rows, total = query_table_rows(
+            engine,
+            table_name=dataset.table_name,
+            schema=schema,
+            columns=selected_columns,
+            page=page,
+            page_size=page_size,
+            order_by=order_by,
+            order_dir=order_dir,
+            filters=merged_filters,
+        )
+    except QueryError as exc:
+        raise HttpError(400, str(exc)) from None
+    except SQLAlchemyError as exc:
+        raise HttpError(400, f"查询失败: {exc}") from None
+
+    returned_columns: list[str]
+    if selected_columns:
+        returned_columns = selected_columns
+    elif rows:
+        returned_columns = list(rows[0].keys())
+    else:
+        try:
+            returned_columns = get_column_names(engine, dataset.table_name, schema)
+        except QueryError:
+            returned_columns = []
+
+    return rows, total, returned_columns
+
+
+# ============================================================
+# 管理端点：CRUD
+# ============================================================
+
+
+@router.get("", response={200: DatasetListOut})
+def list_datasets(request: HttpRequest) -> HttpResponse:
+    """列出全部数据集（仅管理员）."""
+    require_admin(request)
+    qs = Dataset.objects.all().order_by("-id")
+    items = [_dataset_to_dict(d) for d in qs]
+    body = DatasetListOut(items=items, total=len(items)).model_dump()
+    return JsonResponse(body)
+
+
+@router.post("", response={201: DatasetOut})
+def create_dataset(request: HttpRequest, payload: DatasetCreateIn) -> HttpResponse:
+    """创建数据集（仅管理员）.
+
+    slug 唯一；datasource_id 必须指向已存在的数据源。
+    """
+    require_admin(request)
+    if Dataset.objects.filter(slug=payload.slug).exists():
+        raise HttpError(400, "slug 已存在")
+    if not DataSource.objects.filter(pk=payload.datasource_id).exists():
+        raise HttpError(400, "数据源不存在")
+    user = cast(User, getattr(request, "auth", None))
+    ds = Dataset(
+        slug=payload.slug,
+        name=payload.name,
+        description=payload.description,
+        datasource_id=payload.datasource_id,
+        table_name=payload.table_name,
+        schema_name=payload.schema_name,
+        fields_whitelist=list(payload.fields_whitelist),
+        filter_expression=dict(payload.filter_expression),
+        aggregations=dict(payload.aggregations),
+        owner=user,
+        is_active=payload.is_active,
+    )
+    ds.save()
+    log_audit(
+        request,
+        action=AuditAction.DATASET_CREATE,
+        resource_type="dataset",
+        resource_id=str(ds.pk),
+        extra={"slug": ds.slug, "name": ds.name, "datasource_id": ds.datasource_id},
+    )
+    body = _dataset_to_dict(ds)
+    return JsonResponse(body, status=201)
+
+
+@router.get("/{slug}", response={200: DatasetOut})
+def retrieve_dataset(request: HttpRequest, slug: str) -> HttpResponse:
+    """获取数据集详情（仅管理员；含 is_active=False 的）."""
+    require_admin(request)
+    ds = _get_dataset_or_404(slug)
+    return JsonResponse(_dataset_to_dict(ds))
+
+
+@router.patch("/{slug}", response={200: DatasetOut})
+def update_dataset(request: HttpRequest, slug: str, payload: DatasetUpdateIn) -> HttpResponse:
+    """更新数据集（仅管理员）.
+
+    slug 修改后重名返回 400；datasource_id 修改后须指向已存在数据源；
+    每次更新 version 自增。
+    """
+    require_admin(request)
+    ds = _get_dataset_or_404(slug)
+    data = payload.model_dump(exclude_unset=True)
+
+    if "slug" in data and data["slug"] != ds.slug and Dataset.objects.filter(slug=data["slug"]).exists():
+        raise HttpError(400, "slug 已存在")
+    if "datasource_id" in data and not DataSource.objects.filter(pk=data["datasource_id"]).exists():
+        raise HttpError(400, "数据源不存在")
+
+    # 白名单类字段强制复制为 list/dict，避免共享引用
+    if "fields_whitelist" in data and data["fields_whitelist"] is not None:
+        data["fields_whitelist"] = list(data["fields_whitelist"])
+    if "filter_expression" in data and data["filter_expression"] is not None:
+        data["filter_expression"] = dict(data["filter_expression"])
+    if "aggregations" in data and data["aggregations"] is not None:
+        data["aggregations"] = dict(data["aggregations"])
+
+    for field, value in data.items():
+        setattr(ds, field, value)
+    ds.increment_version()
+    ds.save()
+    log_audit(
+        request,
+        action=AuditAction.DATASET_UPDATE,
+        resource_type="dataset",
+        resource_id=str(ds.pk),
+        extra={"slug": ds.slug, "version": ds.version},
+    )
+    return JsonResponse(_dataset_to_dict(ds))
+
+
+@router.delete("/{slug}", response={200: MessageOut})
+def delete_dataset(request: HttpRequest, slug: str) -> HttpResponse:
+    """删除数据集（仅管理员）."""
+    require_admin(request)
+    ds = _get_dataset_or_404(slug)
+    ds_id = ds.pk
+    ds_slug = ds.slug
+    ds.delete()
+    log_audit(
+        request,
+        action=AuditAction.DATASET_DELETE,
+        resource_type="dataset",
+        resource_id=str(ds_id),
+        extra={"slug": ds_slug},
+    )
+    return JsonResponse(MessageOut(detail=f"数据集 {ds_slug} 已删除").model_dump())
+
+
+# ============================================================
+# 管理端点：预览
+# ============================================================
+
+
+@router.get("/{slug}/preview", response={200: DatasetRowsOut})
+def preview_rows(  # noqa: PLR0913, PLR0917
+    request: HttpRequest,
+    slug: str,
+    page: int = 1,
+    page_size: int = 20,
+    order_by: str | None = None,
+    order_dir: str = "asc",
+    columns: str | None = None,
+    filters: str | None = None,
+) -> HttpResponse:
+    """管理员预览数据集行（不走 scope 校验；用于诊断/调试）.
+
+    与公开 ``/{slug}/rows`` 的差异：使用 JWTAuth + require_admin，不做 scope 校验；
+    允许预览 ``is_active=False`` 的数据集（仍校验数据源 is_active）。
+    """
+    require_admin(request)
+    del request  # 已用 require_admin 校验
+    ds = _get_dataset_or_404(slug)
+    rows, total, returned_columns = _query_dataset_rows(
+        ds,
+        page=page,
+        page_size=page_size,
+        order_by=order_by,
+        order_dir=order_dir,
+        columns_param=columns,
+        filters_param=filters,
+    )
+    body = DatasetRowsOut(
+        items=rows,
+        total=total,
+        page=page,
+        page_size=page_size,
+        columns=returned_columns,
+    ).model_dump()
+    return JsonResponse(body)
+
+
+# ============================================================
+# 公开查询端点：/rows
+# ============================================================
+
+
+@router.get("/{slug}/rows", response={200: DatasetRowsOut}, auth=ApiTokenAuth())
+def query_rows(  # noqa: PLR0913, PLR0917
+    request: HttpRequest,
+    slug: str,
+    page: int = 1,
+    page_size: int = 20,
+    order_by: str | None = None,
+    order_dir: str = "asc",
+    columns: str | None = None,
+    filters: str | None = None,
+) -> HttpResponse:
+    """外部应用按 slug 查询数据集行（API Token + datasets:read scope）.
+
+    Query 参数：
+
+        page: 页码，从 1 开始，默认 1。
+        page_size: 每页行数，默认 20。
+        order_by: 排序字段（须为表内列名）。
+        order_dir: 排序方向，``asc`` 或 ``desc``，默认 ``asc``。
+        columns: 逗号分隔的列名列表；为空时按白名单或全部列返回。
+        filters: JSON 字符串，格式 ``{"列名":{"op":"eq/ne/...","val":...}}``。
+                 与 Dataset.filter_expression AND 组合，同名列以 Dataset 为准。
+
+    行为：
+
+    - ``is_active=False`` 的数据集返回 404；
+    - 数据源 ``is_active=False`` 返回 404；
+    - 字段白名单非空时，请求列必须是其子集，否则 400；
+    - ``filter_expression`` 强制行级过滤，外部无法绕过。
+    """
+    _require_scope(request, "datasets:read")
+    del request  # 已用 _require_scope 校验
+    ds = _get_dataset_or_404(slug, active_only=True)
+    rows, total, returned_columns = _query_dataset_rows(
+        ds,
+        page=page,
+        page_size=page_size,
+        order_by=order_by,
+        order_dir=order_dir,
+        columns_param=columns,
+        filters_param=filters,
+    )
+    body = DatasetRowsOut(
+        items=rows,
+        total=total,
+        page=page,
+        page_size=page_size,
+        columns=returned_columns,
+    ).model_dump()
+    return JsonResponse(body)
+
+
+__all__ = ["router"]

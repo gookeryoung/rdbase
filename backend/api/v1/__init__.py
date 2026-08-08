@@ -10,6 +10,7 @@ from apps.accounts.tokens_api import router as tokens_router
 from apps.accounts.users import router as users_router
 from apps.audit.api import router as audit_router
 from apps.datasources.api import router as datasources_router
+from apps.datasources.datasets_api import router as datasets_router
 from apps.designer.api import router as designer_router
 from apps.ingest.api import router as ingest_router
 from apps.manager.api import router as manager_router
@@ -28,6 +29,7 @@ api.add_router("/auth", accounts_router)
 api.add_router("/users", users_router)
 api.add_router("/tokens", tokens_router)
 api.add_router("/datasources", datasources_router)
+api.add_router("/datasets", datasets_router)
 api.add_router("/designer", designer_router)
 api.add_router("/manager", manager_router)
 api.add_router("/audit", audit_router)

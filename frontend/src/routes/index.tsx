@@ -4,6 +4,7 @@ import Dashboard from "@/pages/Dashboard";
 import Users from "@/pages/Users";
 import Profile from "@/pages/Profile";
 import Datasources from "@/pages/Datasources";
+import Datasets from "@/pages/Datasets";
 import Designer from "@/pages/Designer";
 import Manager from "@/pages/Manager";
 import SqlConsole from "@/pages/SqlConsole";
@@ -34,6 +35,11 @@ export const routes: RouteObject[] = [
         children: [
           { index: true, element: <Dashboard /> },
           { path: "datasources", element: <Datasources /> },
+          {
+            path: "datasets",
+            element: <RoleRoute allowedRoles={[Role.ADMIN]} />,
+            children: [{ index: true, element: <Datasets /> }],
+          },
           {
             path: "designer",
             element: <RoleRoute allowedRoles={[Role.ADMIN, Role.DESIGNER]} />,

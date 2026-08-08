@@ -39,6 +39,10 @@ class AuditAction(models.TextChoices):
     DATASOURCE_UPDATE = "datasource.update", "更新数据源"
     DATASOURCE_DELETE = "datasource.delete", "删除数据源"
     DATASOURCE_SCAN = "datasource.scan", "扫描数据源"
+    # 数据集管理
+    DATASET_CREATE = "dataset.create", "创建数据集"
+    DATASET_UPDATE = "dataset.update", "更新数据集"
+    DATASET_DELETE = "dataset.delete", "删除数据集"
     # 设计器
     DRAFT_CREATE = "draft.create", "创建草稿"
     DRAFT_UPDATE = "draft.update", "更新草稿"

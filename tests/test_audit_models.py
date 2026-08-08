@@ -40,6 +40,9 @@ def test_audit_action_choices() -> None:
     assert AuditAction.BACKUP_RESTORE == "backup.restore"
     assert AuditAction.AUDIT_VERIFY == "audit.verify"
     assert AuditAction.DATASOURCE_SCAN == "datasource.scan"
+    assert AuditAction.DATASET_CREATE == "dataset.create"
+    assert AuditAction.DATASET_UPDATE == "dataset.update"
+    assert AuditAction.DATASET_DELETE == "dataset.delete"
     assert AuditAction.TOKEN_CREATE == "token.create"
     assert AuditAction.TOKEN_REVOKE == "token.revoke"
     assert AuditAction.TOKEN_ROTATE == "token.rotate"
@@ -58,8 +61,8 @@ def test_audit_status_choices() -> None:
 
 
 def test_audit_action_choices_count() -> None:
-    """AuditAction 共 25 个枚举值."""
-    assert len(AuditAction.choices) == 25
+    """AuditAction 共 28 个枚举值."""
+    assert len(AuditAction.choices) == 28
 
 
 def test_audit_log_meta_ordering() -> None:

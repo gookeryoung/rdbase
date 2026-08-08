@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from ninja import Schema
 
 
@@ -82,3 +84,75 @@ class ScanResultOut(Schema):
     scanned: int
     created: list[DataSourceOut]
     skipped: list[str]
+
+
+# ============================================================
+# 数据集（Dataset）相关 Schema
+# ============================================================
+
+
+class DatasetCreateIn(Schema):
+    """数据集创建请求."""
+
+    slug: str
+    name: str
+    description: str = ""
+    datasource_id: int
+    table_name: str
+    schema_name: str = ""
+    fields_whitelist: list[str] = []
+    filter_expression: dict[str, Any] = {}
+    aggregations: dict[str, Any] = {}
+    is_active: bool = True
+
+
+class DatasetUpdateIn(Schema):
+    """数据集更新请求（所有字段可选；更新时 version 自增）."""
+
+    slug: str | None = None
+    name: str | None = None
+    description: str | None = None
+    datasource_id: int | None = None
+    table_name: str | None = None
+    schema_name: str | None = None
+    fields_whitelist: list[str] | None = None
+    filter_expression: dict[str, Any] | None = None
+    aggregations: dict[str, Any] | None = None
+    is_active: bool | None = None
+
+
+class DatasetOut(Schema):
+    """数据集响应."""
+
+    id: int
+    slug: str
+    name: str
+    description: str
+    datasource_id: int
+    table_name: str
+    schema_name: str
+    fields_whitelist: list[str]
+    filter_expression: dict[str, Any]
+    aggregations: dict[str, Any]
+    owner_id: int | None
+    is_active: bool
+    version: int
+    created_at: str
+    updated_at: str
+
+
+class DatasetListOut(Schema):
+    """数据集列表响应."""
+
+    items: list[DatasetOut]
+    total: int
+
+
+class DatasetRowsOut(Schema):
+    """数据集行查询响应（与 manager RowListOut 同构）."""
+
+    items: list[dict[str, Any]]
+    total: int
+    page: int
+    page_size: int
+    columns: list[str]

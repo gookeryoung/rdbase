@@ -94,6 +94,70 @@ export interface TestConnectionResult {
   detail: string;
 }
 
+// ----------------- 数据集（P9） -----------------
+
+// 数据集响应
+export interface Dataset {
+  id: number;
+  slug: string;
+  name: string;
+  description: string;
+  datasource_id: number;
+  table_name: string;
+  schema_name: string;
+  fields_whitelist: string[];
+  filter_expression: Record<string, unknown>;
+  aggregations: Record<string, unknown>;
+  owner_id: number | null;
+  is_active: boolean;
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+// 数据集创建请求
+export interface DatasetCreate {
+  slug: string;
+  name: string;
+  description?: string;
+  datasource_id: number;
+  table_name: string;
+  schema_name?: string;
+  fields_whitelist?: string[];
+  filter_expression?: Record<string, unknown>;
+  aggregations?: Record<string, unknown>;
+  is_active?: boolean;
+}
+
+// 数据集更新请求（所有字段可选；更新时 version 自增）
+export interface DatasetUpdate {
+  slug?: string;
+  name?: string;
+  description?: string;
+  datasource_id?: number;
+  table_name?: string;
+  schema_name?: string;
+  fields_whitelist?: string[];
+  filter_expression?: Record<string, unknown>;
+  aggregations?: Record<string, unknown>;
+  is_active?: boolean;
+}
+
+// 数据集列表响应
+export interface DatasetList {
+  items: Dataset[];
+  total: number;
+}
+
+// 数据集行查询响应（与 RowListResponse 同构）
+export interface DatasetRows {
+  items: Record<string, unknown>[];
+  total: number;
+  page: number;
+  page_size: number;
+  columns: string[];
+}
+
 // ----------------- 数据库设计（P3） -----------------
 
 // 草稿状态
@@ -422,6 +486,10 @@ export type AuditAction =
   | "datasource.create"
   | "datasource.update"
   | "datasource.delete"
+  | "datasource.scan"
+  | "dataset.create"
+  | "dataset.update"
+  | "dataset.delete"
   | "draft.create"
   | "draft.update"
   | "draft.delete"

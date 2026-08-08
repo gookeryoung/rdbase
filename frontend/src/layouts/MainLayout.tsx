@@ -14,6 +14,7 @@ import {
   SyncOutlined,
   CloudDownloadOutlined,
   MonitorOutlined,
+  AppstoreOutlined,
 } from "@ant-design/icons";
 import { Outlet, useNavigate, useLocation } from "react-router-dom";
 import { useAuthStore } from "@/store/auth";
@@ -36,6 +37,12 @@ interface MenuItem {
 const menuItems: MenuItem[] = [
   { key: "/", icon: <DashboardOutlined />, label: "仪表盘" },
   { key: "/datasources", icon: <DatabaseOutlined />, label: "数据源" },
+  {
+    key: "/datasets",
+    icon: <AppstoreOutlined />,
+    label: "数据集",
+    roles: [Role.ADMIN],
+  },
   {
     key: "/designer",
     icon: <ApartmentOutlined />,
