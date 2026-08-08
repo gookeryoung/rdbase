@@ -23,9 +23,10 @@ import type {
   ViewDetail,
 } from "@/types";
 
-// 主键序列化为 JSON 字符串并 URL 编码（用于 query 参数）
-const encodePk = (pk: Record<string, unknown>): string =>
-  encodeURIComponent(JSON.stringify(pk));
+// 主键序列化为 JSON 字符串（用于 query 参数）。
+// 不手动 encodeURIComponent：axios 发送 params 时会自动编码，
+// 手动编码会导致双重编码，后端 json.loads 收到仍为编码态的字符串而失败。
+const encodePk = (pk: Record<string, unknown>): string => JSON.stringify(pk);
 
 // 查询表行数据（所有登录用户可读）
 // filters 通过 JSON 字符串参数传递，columns 通过逗号分隔字符串传递
