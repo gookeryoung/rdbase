@@ -58,6 +58,10 @@ class AuditAction(models.TextChoices):
     BACKUP_CREATE = "backup.create", "创建备份"
     BACKUP_RESTORE = "backup.restore", "恢复备份"
     AUDIT_VERIFY = "audit.verify", "审计校验"
+    # API Token 管理
+    TOKEN_CREATE = "token.create", "创建 Token"
+    TOKEN_REVOKE = "token.revoke", "吊销 Token"
+    TOKEN_ROTATE = "token.rotate", "轮换 Token"
 
 
 class AuditSource(models.TextChoices):

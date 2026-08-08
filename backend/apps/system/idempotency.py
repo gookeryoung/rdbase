@@ -86,12 +86,25 @@ class IdempotencyRecord:
 def get_idempotent_subject(request: HttpRequest) -> str | None:
     """获取幂等主体标识.
 
-    当前从 ``request.auth`` 取 user_id（JWT 场景）；P9 API Token 落地后
-    此函数切为返回 token prefix，调用方无需改动。req-03 关键决策第 2 条。
+    按认证方式区分主体：
+
+    - **API Token 认证**（P9 落地）：``request.api_token`` 由 ``ApiTokenAuth``
+      设置，返回 ``token:{prefix}``，使不同 Token 的幂等 key 隔离，
+      同一 Token 的重复请求命中缓存。req-03 关键决策第 2 条。
+    - **JWT 认证**（Web 前端会话）：从 ``request.auth`` 取 user_id，
+      返回 ``user:{pk}``。
+    - 未认证返回 None。
 
     Returns:
-        主体标识字符串（如 ``user:1``）；未认证返回 None。
+        主体标识字符串（如 ``user:1`` 或 ``token:aB3xK9pQ``）；未认证返回 None。
     """
+    token = getattr(request, "api_token", None)
+    if token is not None:
+        # 仅 ApiToken 实例作为幂等主体（避免 MagicMock 等测试替身误判）
+        from apps.accounts.models import ApiToken
+
+        if isinstance(token, ApiToken):
+            return f"token:{token.prefix}"
     user = getattr(request, "auth", None)
     pk = getattr(user, "pk", None)
     if pk is None:

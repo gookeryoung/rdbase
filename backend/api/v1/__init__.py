@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from apps.accounts.api import router as accounts_router
+from apps.accounts.tokens_api import router as tokens_router
 from apps.accounts.users import router as users_router
 from apps.audit.api import router as audit_router
 from apps.datasources.api import router as datasources_router
@@ -25,6 +26,7 @@ api = NinjaAPI(
 
 api.add_router("/auth", accounts_router)
 api.add_router("/users", users_router)
+api.add_router("/tokens", tokens_router)
 api.add_router("/datasources", datasources_router)
 api.add_router("/designer", designer_router)
 api.add_router("/manager", manager_router)

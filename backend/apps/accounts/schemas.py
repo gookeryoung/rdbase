@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from ninja import Schema
 
 
@@ -66,3 +68,60 @@ class RoleUpdateIn(Schema):
     """修改用户角色请求."""
 
     role: str
+
+
+# ================================================================
+# API Token 相关 Schema
+# ================================================================
+
+
+class ApiTokenCreateIn(Schema):
+    """创建 API Token 请求."""
+
+    name: str
+    scopes: list[str] = []
+    expires_at: datetime | None = None
+
+
+class ApiTokenOut(Schema):
+    """创建/轮换 API Token 响应（含明文，仅此一次返回）."""
+
+    id: int
+    name: str
+    token: str
+    prefix: str
+    scopes: list[str]
+    expires_at: datetime | None
+    is_active: bool
+    created_at: datetime
+
+
+class ApiTokenListItemOut(Schema):
+    """API Token 列表项（不含明文，仅展示前缀）."""
+
+    id: int
+    name: str
+    prefix: str
+    scopes: list[str]
+    expires_at: datetime | None
+    last_used_at: datetime | None
+    is_active: bool
+    created_by_id: int
+    created_at: datetime
+
+
+class ApiTokenListOut(Schema):
+    """API Token 列表响应."""
+
+    items: list[ApiTokenListItemOut]
+    total: int
+
+
+class ApiTokenRotateOut(Schema):
+    """轮换 API Token 响应（含新明文，仅此一次返回）."""
+
+    id: int
+    name: str
+    token: str
+    prefix: str
+    is_active: bool

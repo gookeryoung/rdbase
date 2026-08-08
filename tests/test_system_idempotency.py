@@ -91,6 +91,22 @@ class TestSubjectAndKey:
         request.headers = {"Idempotency-Key": "   "}
         assert get_idempotency_key(request) is None
 
+    def test_subject_ignores_non_apitoken_attribute(self) -> None:
+        """request.api_token 非 ApiToken 实例时回退到 user:{pk}.
+
+        MagicMock 任意属性访问返回 MagicMock，但 ``isinstance(_, ApiToken)``
+        为 False，应回退到 JWT 主体路径，不误判为 token 主体。
+        """
+        request = _make_request(user_pk=7)
+        # MagicMock 自动返回 api_token 属性（非 ApiToken 实例）
+        assert get_idempotent_subject(request) == "user:7"
+
+    def test_subject_with_api_token_none_falls_back_to_user(self) -> None:
+        """request.api_token 显式为 None 时回退到 user:{pk}."""
+        request = _make_request(user_pk=9)
+        request.api_token = None
+        assert get_idempotent_subject(request) == "user:9"
+
 
 # ---------- 本地内存后端 ----------
 
