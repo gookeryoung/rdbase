@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 真实感中文技术博客 RSS 2.0 mock 源，供 test_ingest_rss_live.py 真实解析与写入验证 -->
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>示例技术博客</title>
+    <link>https://blog.example.com/</link>
+    <description>分享后端、数据库与爬虫实战经验</description>
+    <language>zh-cn</language>
+    <lastBuildDate>Fri, 02 Aug 2024 08:00:00 GMT</lastBuildDate>
+    <atom:link href="https://blog.example.com/feed.xml" rel="self" type="application/rss+xml"/>
+
+    <item>
+      <title>Scrapy 爬虫实战：分页与字段映射</title>
+      <link>https://blog.example.com/posts/1-scrapy-pagination</link>
+      <guid isPermaLink="false">tag:blog.example.com,2024:1</guid>
+      <description>介绍 Scrapy 翻页策略与 pipeline 字段映射的最佳实践。</description>
+      <pubDate>Mon, 29 Jul 2024 10:00:00 GMT</pubDate>
+      <author>alice@example.com (张三)</author>
+      <category>scrapy</category>
+      <category>爬虫</category>
+    </item>
+
+    <item>
+      <title>SQLAlchemy 批量 UPSERT 方言对比</title>
+      <link>https://blog.example.com/posts/2-sqlalchemy-upsert</link>
+      <guid isPermaLink="false">tag:blog.example.com,2024:2</guid>
+      <description>对比 MySQL ON DUPLICATE KEY UPDATE、PostgreSQL ON CONFLICT、SQLite ON CONFLICT 三种 UPSERT 方言。</description>
+      <pubDate>Wed, 31 Jul 2024 14:30:00 GMT</pubDate>
+      <author>bob@example.com (李四)</author>
+      <category>sqlalchemy</category>
+      <category>数据库</category>
+    </item>
+
+    <item>
+      <title>RSS 与 Atom 订阅源解析：feedparser 实战</title>
+      <link>https://blog.example.com/posts/3-feedparser-rss-atom</link>
+      <guid isPermaLink="false">tag:blog.example.com,2024:3</guid>
+      <description>使用 feedparser 统一解析 RSS 2.0 与 Atom 1.0，处理 content/tags/日期等复杂类型。</description>
+      <pubDate>Thu, 01 Aug 2024 09:15:00 GMT</pubDate>
+      <author>alice@example.com (张三)</author>
+      <category>feedparser</category>
+      <category>rss</category>
+    </item>
+
+    <item>
+      <title>Django 与 Scrapy 集成：子进程启动器模式</title>
+      <link>https://blog.example.com/posts/4-django-scrapy-subprocess</link>
+      <guid isPermaLink="false">tag:blog.example.com,2024:4</guid>
+      <description>通过 subprocess 启动 Scrapy 避免 reactor 单例冲突，实现 Django 后台触发爬取。</description>
+      <pubDate>Thu, 01 Aug 2024 16:45:00 GMT</pubDate>
+      <author>carol@example.com (王五)</author>
+      <category>django</category>
+      <category>scrapy</category>
+    </item>
+
+    <item>
+      <title>数据爬取任务调度：Cron 与重试策略</title>
+      <link>https://blog.example.com/posts/5-ingest-scheduling</link>
+      <guid isPermaLink="false">tag:blog.example.com,2024:5</guid>
+      <description>爬取任务的定时调度、失败重试与告警机制设计，保证数据同步可靠性。</description>
+      <pubDate>Fri, 02 Aug 2024 08:00:00 GMT</pubDate>
+      <author>bob@example.com (李四)</author>
+      <category>调度</category>
+      <category>可靠性</category>
+    </item>
+
+  </channel>
+</rss>
