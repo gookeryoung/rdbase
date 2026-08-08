@@ -100,7 +100,7 @@ make migrate
 make run-be
 ```
 
-健康检查：`GET http://localhost:8000/health/`
+健康检查：`GET http://localhost:8000/health/live`（轻量存活）、`GET http://localhost:8000/health/ready`（就绪探针）
 API 文档：`GET http://localhost:8000/api/v1/docs`（django-ninja Swagger UI）
 
 ### 前端
@@ -162,7 +162,7 @@ docker-compose ps
 # 4. 访问
 #   前端：http://localhost
 #   后端 API：http://localhost:8000/api/v1/docs
-#   健康检查：http://localhost:8000/health/
+#   健康检查：http://localhost:8000/health/live（存活）、/health/ready（就绪）
 ```
 
 服务编排：
@@ -170,10 +170,78 @@ docker-compose ps
 | 服务 | 端口 | 说明 |
 |------|------|------|
 | postgres | 5432 | PostgreSQL 16，平台元数据存储 |
+| redis | 6379 | Redis 7，限流/分布式锁/幂等缓存/熔断共享状态 |
 | backend | 8000 | Django + gunicorn（4 worker，uvicorn worker-class） |
 | frontend | 80 | nginx 托管前端静态文件，反代 /api 到 backend |
 
 可配置环境变量见 `.env.example`。
+
+## 运维监控
+
+P8 健壮性增强提供生产级可观测、可自愈、可恢复能力，全部运维端点需管理员权限。
+
+### 健康检查
+
+| 端点 | 用途 | 说明 |
+|------|------|------|
+| `GET /health/live` | 存活探针 | 轻量，仅返回 200（进程存活），供负载均衡探活 |
+| `GET /health/ready` | 就绪探针 | 检查 DB/磁盘/Redis/连接池，任一不健康返回 503 |
+| `GET /api/v1/system/health` | 详细状态 | 管理员查看各组件健康详情与延迟 |
+| `GET /api/v1/system/pool-stats` | 连接池状态 | 暴露所有 SQLAlchemy 引擎池状态（size/checkedin/checkedout/overflow）+ 占用率泄露告警 |
+
+### 熔断与重试
+
+外部数据源调用失败时自动熔断，避免级联雪崩：
+
+| 端点 | 用途 |
+|------|------|
+| `GET /api/v1/system/circuit-states` | 查看所有熔断器状态（CLOSED/OPEN/HALF_OPEN） |
+
+熔断器配置：连续失败 5 次短路 60 秒，半开探测 3 次。sync/ingest 服务已接入熔断，OPEN 状态下请求直接拒绝不启动下游调用。
+
+### 分布式锁与幂等
+
+| 端点 | 用途 |
+|------|------|
+| `GET /api/v1/system/locks` | 查看当前持有的分布式锁 |
+
+- **分布式锁**：sync/ingest 触发端点加锁防并发执行，锁超时 30 秒自动释放，获取失败返回 409。
+- **幂等保护**：请求携带 `Idempotency-Key` 头时，24 小时内重复请求返回首次结果缓存。
+
+### 备份恢复
+
+| 端点 | 用途 |
+|------|------|
+| `POST /api/v1/system/backup` | 触发数据库备份（异步，返回 task_id） |
+| `GET /api/v1/system/backups` | 列出备份归档文件 |
+| `GET /api/v1/system/backups/{filename}` | 下载备份归档 |
+| `GET /api/v1/system/backup-tasks/{task_id}` | 查询备份/恢复任务状态 |
+| `POST /api/v1/system/restore` | 触发恢复（需 `confirm=true` 二次确认，自动创建 pre-restore 快照） |
+
+备份复用 `scripts/backup.py` 逻辑，后台线程异步执行。恢复前自动创建当前数据库快照作为安全网。
+
+### 审计防篡改
+
+| 端点 | 用途 |
+|------|------|
+| `GET /api/v1/system/audit/verify` | 校验审计日志哈希链完整性 |
+
+每条审计记录含 `prev_hash`（上一条记录哈希）与 `record_hash`（自身哈希），形成链式结构。任何篡改均可通过校验 API 定位断点。校验操作本身也会写入审计记录。
+
+### Redis 配置
+
+Redis 是健壮性模块的基础设施，用于：
+
+- 分布式锁（跨 worker 互斥）
+- 幂等结果缓存（24 小时 TTL）
+- 熔断器共享状态（多 worker 一致）
+
+| 环境变量 | 说明 |
+|----------|------|
+| `REDIS_URL` | Redis 连接地址，如 `redis://redis:6379/0` |
+| `REDIS_FAKE` | 开发环境用 fakeredis 模拟（生产环境必须留空） |
+
+开发环境未配置 `REDIS_URL` 时自动降级为本地内存（fakeredis 兜底），不阻断业务。生产环境建议配置 `REDIS_URL` 启用跨进程共享。
 
 ## 离线内网部署
 
