@@ -12,6 +12,7 @@ import {
   FileSearchOutlined,
   SettingOutlined,
   SyncOutlined,
+  CloudDownloadOutlined,
 } from "@ant-design/icons";
 import { Outlet, useNavigate, useLocation } from "react-router-dom";
 import { useAuthStore } from "@/store/auth";
@@ -64,6 +65,12 @@ const menuItems: MenuItem[] = [
     key: "/sync",
     icon: <SyncOutlined />,
     label: "数据同步",
+    roles: [Role.ADMIN],
+  },
+  {
+    key: "/ingest",
+    icon: <CloudDownloadOutlined />,
+    label: "数据爬取",
     roles: [Role.ADMIN],
   },
   { key: "/profile", icon: <UserOutlined />, label: "个人中心" },

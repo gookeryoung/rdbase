@@ -14,9 +14,9 @@
 
 - [x] 31 模块骨架与 Scrapy/Django 集成：ingest app 注册、4 个数据模型（IngestTask/IngestFieldMapping/IngestLog/IngestAlert）+ migration、Scrapy 子进程启动器（engine.py）、base spider、run_ingest 管理命令跑通空 Spider
 - [x] 32 REST/JSON API 爬取器 + 字段映射 + 写入目标：api_spider + JSONPath 解析、pipelines 字段映射与 SQLAlchemy 批量写入（复用 ConflictStrategy 与 sync_service 方言 UPSERT）、手动执行 API、集成测试
-- [ ] 33 网页 HTML + 文件下载爬取器：html_spider（CSS/XPath，selectolax）、file_spider（CSV/Excel/JSON 流式下载解析）、分页/翻页规则、测试
-- [ ] 34 RSS/Atom 爬取器 + 鉴权 + robots 合规：rss_spider（feedparser）、请求头/API Key/Cookie 鉴权（加密存储）、robots.txt 开关与审计、增量去重、测试
-- [ ] 35 定时调度 + 日志告警 + 前端管理界面 + 文档：复用 cron 调度、IngestLog/IngestAlert + 监控接口、前端任务管理页、测试补全覆盖率≥95%、README/手册更新
+- [x] 33 网页 HTML + 文件下载爬取器：html_spider（CSS/XPath，selectolax）、file_spider（CSV/Excel/JSON 流式下载解析）、分页/翻页规则、测试
+- [x] 34 RSS/Atom 爬取器 + 鉴权 + robots 合规：rss_spider（feedparser）、请求头/API Key/Cookie 鉴权（加密存储）、robots.txt 开关与审计、增量去重、测试
+- [x] 35 定时调度 + 日志告警 + 前端管理界面 + 文档：复用 cron 调度、IngestLog/IngestAlert + 监控接口、前端任务管理页、测试补全覆盖率≥95%、README/手册更新
 
 ## 关键架构决策
 

@@ -741,3 +741,132 @@ export interface TargetColumnInfo {
   nullable: boolean;
   pk: boolean;
 }
+
+// ----------------- 数据爬取（P7） -----------------
+
+// 爬取源类型
+export type IngestSourceType = "api" | "html" | "file" | "rss";
+
+// 爬取任务状态
+export type IngestStatus = "active" | "paused" | "error";
+
+// 爬取日志状态
+export type IngestLogStatus = "success" | "partial" | "failed";
+
+// 主键冲突策略
+export type IngestConflictStrategy = "upsert" | "skip" | "error";
+
+// 鉴权类型
+export type IngestAuthType = "none" | "api_key" | "bearer" | "basic" | "custom";
+
+// 爬取字段映射
+export interface IngestFieldMapping {
+  id?: number;
+  task_id?: number;
+  source_field: string;
+  target_field: string;
+  mapping_type: FieldMappingType;
+  fixed_value: string;
+  is_pk: boolean;
+}
+
+// 爬取任务
+export interface IngestTask {
+  id: number;
+  name: string;
+  description: string;
+  source_type: IngestSourceType;
+  source_url: string;
+  parse_config: Record<string, unknown>;
+  request_config: Record<string, unknown>;
+  has_headers: boolean;
+  auth_type: IngestAuthType;
+  target_datasource_id: number;
+  target_table: string;
+  conflict_strategy: IngestConflictStrategy;
+  batch_size: number;
+  obey_robots: boolean;
+  scheduler_enabled: boolean;
+  cron_expression: string;
+  next_run_at: string | null;
+  last_run_at: string | null;
+  last_sync_at: string | null;
+  retry_count: number;
+  max_retries: number;
+  status: IngestStatus;
+  created_by_id: number | null;
+  created_at: string;
+  updated_at: string;
+  field_mappings: IngestFieldMapping[];
+}
+
+// 创建爬取任务请求
+export interface IngestTaskCreate {
+  name: string;
+  description?: string;
+  source_type: IngestSourceType;
+  source_url: string;
+  parse_config: Record<string, unknown>;
+  request_config: Record<string, unknown>;
+  headers?: Record<string, string>;
+  auth_type?: IngestAuthType;
+  target_datasource_id: number;
+  target_table: string;
+  conflict_strategy?: IngestConflictStrategy;
+  batch_size?: number;
+  obey_robots?: boolean;
+  scheduler_enabled?: boolean;
+  cron_expression?: string;
+  field_mappings: IngestFieldMapping[];
+}
+
+// 更新爬取任务请求（全量更新，所有字段可选；headers 显式传入则覆盖）
+export interface IngestTaskUpdate extends Partial<IngestTaskCreate> {
+  status?: IngestStatus;
+}
+
+// 爬取日志
+export interface IngestLog {
+  id: number;
+  task_id: number;
+  status: IngestLogStatus;
+  rows_read: number;
+  rows_written: number;
+  rows_skipped: number;
+  error_message: string;
+  started_at: string;
+  finished_at: string | null;
+  duration_ms: number;
+}
+
+// 爬取告警
+export interface IngestAlert {
+  id: number;
+  task_id: number;
+  level: AlertLevel;
+  message: string;
+  acknowledged: boolean;
+  acknowledged_at: string | null;
+  created_at: string;
+}
+
+// 爬取执行结果（含子进程 returncode 与 stderr）
+export interface IngestRunResult {
+  task_id: number;
+  returncode: number;
+  log: IngestLog | null;
+  stderr: string;
+}
+
+// 爬取统计
+export interface IngestStats {
+  total: number;
+  succeeded: number;
+  partial: number;
+  failed: number;
+  success_rate: number;
+  avg_duration_ms: number;
+  total_rows_read: number;
+  total_rows_written: number;
+  total_rows_skipped: number;
+}

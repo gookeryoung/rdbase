@@ -10,6 +10,7 @@ import SqlConsole from "@/pages/SqlConsole";
 import AuditLogs from "@/pages/AuditLogs";
 import Settings from "@/pages/Settings";
 import Sync from "@/pages/Sync";
+import Ingest from "@/pages/Ingest";
 import MainLayout from "@/layouts/MainLayout";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import RoleRoute from "@/components/RoleRoute";
@@ -58,6 +59,11 @@ export const routes: RouteObject[] = [
             path: "sync",
             element: <RoleRoute allowedRoles={[Role.ADMIN]} />,
             children: [{ index: true, element: <Sync /> }],
+          },
+          {
+            path: "ingest",
+            element: <RoleRoute allowedRoles={[Role.ADMIN]} />,
+            children: [{ index: true, element: <Ingest /> }],
           },
           { path: "profile", element: <Profile /> },
         ],
