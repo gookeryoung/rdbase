@@ -32,6 +32,8 @@ from apps.ingest.models import (
 )
 from apps.ingest.spiders.api_spider import ApiIngestSpider
 from apps.ingest.spiders.base import BaseIngestSpider
+from apps.ingest.spiders.file_spider import FileIngestSpider
+from apps.ingest.spiders.html_spider import HtmlIngestSpider
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +164,10 @@ def _resolve_spider(source_type: str) -> type[BaseIngestSpider]:
     """按源类型解析 Spider 类."""
     if source_type == SourceType.API:
         return ApiIngestSpider
+    if source_type == SourceType.HTML:
+        return HtmlIngestSpider
+    if source_type == SourceType.FILE:
+        return FileIngestSpider
     if source_type in dict(SourceType.choices):
         logger.warning("源类型 %s 的专用 spider 尚未实现，使用 BaseIngestSpider 占位", source_type)
         return BaseIngestSpider

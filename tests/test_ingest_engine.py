@@ -25,6 +25,8 @@ from apps.ingest.models import (
 )
 from apps.ingest.spiders.api_spider import ApiIngestSpider
 from apps.ingest.spiders.base import BaseIngestSpider
+from apps.ingest.spiders.file_spider import FileIngestSpider
+from apps.ingest.spiders.html_spider import HtmlIngestSpider
 
 
 @pytest.fixture
@@ -171,14 +173,19 @@ class TestResolveSpider:
         """API 源类型应分派到 ApiIngestSpider."""
         assert _resolve_spider(SourceType.API.value) is ApiIngestSpider
 
-    def test_non_api_returns_base_placeholder(self, caplog: pytest.LogCaptureFixture) -> None:
-        """非 API 源类型应回退到 BaseIngestSpider 并记录警告."""
-        for st in SourceType:
-            if st == SourceType.API:
-                continue
-            with caplog.at_level("WARNING"):
-                spider_cls = _resolve_spider(st.value)
-            assert spider_cls is BaseIngestSpider
+    def test_html_returns_html_spider(self) -> None:
+        """HTML 源类型应分派到 HtmlIngestSpider."""
+        assert _resolve_spider(SourceType.HTML.value) is HtmlIngestSpider
+
+    def test_file_returns_file_spider(self) -> None:
+        """FILE 源类型应分派到 FileIngestSpider."""
+        assert _resolve_spider(SourceType.FILE.value) is FileIngestSpider
+
+    def test_rss_returns_base_placeholder(self, caplog: pytest.LogCaptureFixture) -> None:
+        """RSS 源类型尚未实现，应回退到 BaseIngestSpider 并记录警告."""
+        with caplog.at_level("WARNING"):
+            spider_cls = _resolve_spider(SourceType.RSS.value)
+        assert spider_cls is BaseIngestSpider
 
     def test_invalid_source_type_raises(self) -> None:
         with pytest.raises(IngestError, match="不支持的源类型"):
