@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -36,9 +37,8 @@ _IS_WINDOWS = sys.platform == "win32"
 # 中文、本脚本的中文提示）时抛出 UnicodeDecodeError/UnicodeEncodeError。
 _OUTPUT_ENCODING = "utf-8"
 
-# Windows 上 npm 需要通过 npm.cmd 调用
+# Windows 上 npm 需要通过 npm.cmd 调用；作为 PATH 解析失败时的兜底命令名
 NPM = "npm.cmd" if _IS_WINDOWS else "npm"
-BUN = "bun.cmd" if _IS_WINDOWS else "bun"
 
 
 def _log(message: str) -> None:
@@ -54,6 +54,26 @@ def _log(message: str) -> None:
         sys.stdout.flush()
 
 
+def _resolve_frontend() -> tuple[str, list[str]]:
+    """返回前端启动命令，优先使用 bun，未安装时回退到 npm。
+
+    用 shutil.which 解析可执行文件全路径，避免 Windows 上 bun.exe 与 npm.cmd
+    后缀差异导致 subprocess.Popen 找不到可执行文件。bun 启动更快且自带运行时，
+    但非必需；npm 随 Node.js 自带，作为兜底保证仅装了 Node 的环境也能运行。
+    """
+    bun_path = shutil.which("bun")
+    if bun_path:
+        return "bun", [bun_path, "run", "dev"]
+    npm_path = shutil.which("npm")
+    if npm_path:
+        return "npm", [npm_path, "run", "dev"]
+    # PATH 解析失败时退回原始命令名，让子进程报错便于排查
+    return "npm", [NPM, "run", "dev"]
+
+
+# 前端包管理器解析在模块加载时一次性完成（运行期间环境不变）
+_FRONTEND_RUNNER, _FRONTEND_CMD = _resolve_frontend()
+
 # 各服务的启动命令与工作目录
 SERVICES: list[tuple[str, list[str], Path]] = [
     (
@@ -63,7 +83,7 @@ SERVICES: list[tuple[str, list[str], Path]] = [
     ),
     (
         "frontend",
-        [NPM, "run", "dev"],
+        _FRONTEND_CMD,
         FRONTEND_DIR,
     ),
 ]
@@ -249,7 +269,7 @@ def main() -> int:
         threads.append(thread)
         _log(f"[dev_run] 已启动 {name}（pid={proc.pid}）\n")
 
-    _log("[dev_run] 前后端已并行启动，按 Ctrl+C 停止全部服务。\n")
+    _log(f"[dev_run] 前后端已并行启动（前端运行器：{_FRONTEND_RUNNER}），按 Ctrl+C 停止全部服务。\n")
 
     exit_code = 0
     try:
