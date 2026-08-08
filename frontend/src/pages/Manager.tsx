@@ -1180,7 +1180,15 @@ const Manager = () => {
           <Select
             placeholder="选择数据源"
             value={selectedDsId ?? undefined}
-            onChange={(v) => setSelectedDsId(v)}
+            onChange={(v) => {
+              // 切换数据源时同步清空选中表/对象，避免与下方 loadRows useEffect
+              // 的闭包错位（旧表名 + 新数据源 ID）触发后端 404 报错。
+              // React 18 会将事件处理器内的 setState 批量合并到同一次渲染，
+              // 因此 loadRows 在下一次渲染时看到 selectedTable=null 即短路返回。
+              setSelectedTable(null);
+              setSelectedObject(null);
+              setSelectedDsId(v);
+            }}
             style={{ width: "100%" }}
             options={datasources.map((d) => ({
               value: d.id,
