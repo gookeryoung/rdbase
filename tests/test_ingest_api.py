@@ -49,7 +49,7 @@ def _payload(ds_id: int, **overrides: Any) -> dict[str, Any]:
 
 
 def _post(client: Client, url: str, body: dict[str, Any], h: dict[str, str]) -> HttpResponse:
-    return client.post(url, data=json.dumps(body), content_type="application/json", **h)
+    return cast(HttpResponse, client.post(url, data=json.dumps(body), content_type="application/json", **h))
 
 
 class TestTaskCRUD:
