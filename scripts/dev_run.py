@@ -38,6 +38,7 @@ _OUTPUT_ENCODING = "utf-8"
 
 # Windows 上 npm 需要通过 npm.cmd 调用
 NPM = "npm.cmd" if _IS_WINDOWS else "npm"
+BUN = "bun.cmd" if _IS_WINDOWS else "bun"
 
 
 def _log(message: str) -> None:

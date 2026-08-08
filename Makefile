@@ -15,7 +15,7 @@ sync: ## 安装后端开发依赖
 
 dev: ## 安装前后端全部依赖
 	uv sync --group dev
-	cd $(FRONTEND_DIR) && npm install
+	cd $(FRONTEND_DIR) && bun install
 
 test: ## 运行测试（不含覆盖率）
 	uv run pytest -m "not slow"
@@ -42,7 +42,7 @@ run-be: ## 启动后端开发服务器 (0.0.0.0:8000)
 	cd $(BACKEND_DIR) && uv run python manage.py runserver 0.0.0.0:8000
 
 run-fe: ## 启动前端开发服务器
-	cd $(FRONTEND_DIR) && npm run dev
+	cd $(FRONTEND_DIR) && bun run dev
 
 run: ## 同时启动后端和前端开发服务器
 	uv run python scripts/dev_run.py
