@@ -21,6 +21,7 @@ from __future__ import annotations
 import subprocess
 from typing import Any, cast
 
+from django.conf import settings
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from ninja import Router
 from ninja.errors import HttpError
@@ -60,6 +61,7 @@ from apps.system.idempotency import (
     release_idempotency,
     store_idempotency_result,
 )
+from apps.system.rate_limiter import check_token_bucket
 
 router = Router(tags=["ingest"], auth=JWTAuth())
 
@@ -448,9 +450,10 @@ def trigger_task(request: HttpRequest, task_id: int) -> HttpResponse:
     1. ``sync:trigger`` scope 校验。
     2. 任务存在性校验（404）。
     3. 幂等检查（``Idempotency-Key`` 命中回放结果）。
-    4. 分布式锁 ``ingest:task:{task_id}``（占用返回 409，与 /run 同锁名）。
-    5. ``spawn_ingest`` 子进程执行；写 ``INGEST_TRIGGER`` 审计（成功/失败均写）。
-    6. 存幂等结果返回。
+    4. 令牌桶限流 ``trigger:{token_prefix}``（超额返回 429 + ``Retry-After``）。
+    5. 分布式锁 ``ingest:task:{task_id}``（占用返回 409，与 /run 同锁名）。
+    6. ``spawn_ingest`` 子进程执行；写 ``INGEST_TRIGGER`` 审计（成功/失败均写）。
+    7. 存幂等结果返回。
     """
     token = _require_scope(request, "sync:trigger")
     task = _get_task_or_404(task_id)
@@ -458,6 +461,22 @@ def trigger_task(request: HttpRequest, task_id: int) -> HttpResponse:
     cached = check_idempotency(request)
     if cached is not None:
         return cached
+
+    # 令牌桶限流：按 Token 维度限流触发端点（sync trigger + ingest trigger 共享一个桶）。
+    rate_key = f"trigger:{token.prefix}"
+    allowed, retry_after = check_token_bucket(
+        rate_key,
+        capacity=settings.RATE_LIMIT_TRIGGER_CAPACITY,
+        refill_rate=settings.RATE_LIMIT_TRIGGER_REFILL_RATE,
+    )
+    if not allowed:
+        release_idempotency(request)
+        resp = JsonResponse(
+            {"detail": f"触发请求过于频繁，请 {retry_after} 秒后重试"},
+            status=429,
+        )
+        resp["Retry-After"] = str(retry_after)
+        return resp
 
     lock = get_lock(f"ingest:task:{task.pk}")
     if not lock.acquire():

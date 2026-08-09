@@ -50,7 +50,7 @@ from apps.system.idempotency import (
     store_idempotency_result,
 )
 from apps.system.quota import check_and_consume_quota
-from apps.system.rate_limiter import check_rate_limit
+from apps.system.rate_limiter import check_rate_limit, check_token_bucket
 
 from .engine import get_engine
 from .models import Dataset, DataSource
@@ -731,9 +731,10 @@ def trigger_dataset_sync(request: HttpRequest, slug: str) -> HttpResponse:
     2. 数据集存在性 + ``is_active`` 校验（404）。
     3. 数据集须绑定 ``sync_config``（400）；同步配置须存在且 ``is_active``（400）。
     4. 幂等检查（``Idempotency-Key`` 命中回放缓存的 task_id）。
-    5. 分布式锁 ``sync:config:{sync_config_id}``（占用返回 409）。
-    6. 启动后台线程执行 ``SyncService(config).run()``，finally 释放锁与 DB 连接。
-    7. 写 ``SYNC_TRIGGER`` 审计，存幂等结果返回 202 + ``task_id``。
+    5. 令牌桶限流 ``trigger:{token_prefix}``（超额返回 429 + ``Retry-After``）。
+    6. 分布式锁 ``sync:config:{sync_config_id}``（占用返回 409）。
+    7. 启动后台线程执行 ``SyncService(config).run()``，finally 释放锁与 DB 连接。
+    8. 写 ``SYNC_TRIGGER`` 审计，存幂等结果返回 202 + ``task_id``。
     """
     _require_scope(request, "sync:trigger")
 
@@ -754,6 +755,23 @@ def trigger_dataset_sync(request: HttpRequest, slug: str) -> HttpResponse:
     if cached is not None:
         return cached
 
+    # 令牌桶限流：按 Token 维度限流触发端点（sync trigger + ingest trigger 共享一个桶）。
+    token = cast(ApiToken, getattr(request, "api_token", None))
+    rate_key = f"trigger:{token.prefix}"
+    allowed, retry_after = check_token_bucket(
+        rate_key,
+        capacity=settings.RATE_LIMIT_TRIGGER_CAPACITY,
+        refill_rate=settings.RATE_LIMIT_TRIGGER_REFILL_RATE,
+    )
+    if not allowed:
+        release_idempotency(request)
+        resp = JsonResponse(
+            {"detail": f"触发请求过于频繁，请 {retry_after} 秒后重试"},
+            status=429,
+        )
+        resp["Retry-After"] = str(retry_after)
+        return resp
+
     # 分布式锁：防同一同步配置并发执行（与 /sync/configs/{id}/trigger 同锁名）。
     lock = get_lock(f"sync:config:{sync_config_id}")
     if not lock.acquire():
@@ -762,7 +780,6 @@ def trigger_dataset_sync(request: HttpRequest, slug: str) -> HttpResponse:
         raise HttpError(409, f"同步配置 {sync_config_id} 正在执行中（锁剩余 {info.ttl}s）")
 
     task_id = uuid.uuid4().hex
-    token = cast(ApiToken, getattr(request, "api_token", None))
 
     def _bg_run() -> None:
         """后台线程执行同步：finally 释放锁并关闭本线程的 DB 连接."""

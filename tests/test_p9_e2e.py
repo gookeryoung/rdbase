@@ -227,6 +227,16 @@ def _fake_spawn_success(task_id: int) -> _FakeSpawnResult:
     return _FakeSpawnResult()
 
 
+class _FakeLock:
+    """测试用假锁：始终可获取，release 为空操作（限流测试隔离锁逻辑）."""
+
+    def acquire(self) -> bool:
+        return True
+
+    def release(self) -> bool:
+        return True
+
+
 # ================================================================
 # P9 端到端全流程
 # ================================================================
@@ -431,3 +441,106 @@ def test_openapi_external_view_includes_get_and_post_methods(
     methods = set(rows_path.keys())
     assert "get" in methods
     assert "post" in methods
+
+
+# ================================================================
+# 触发端点令牌桶限流（iter-47）
+# ================================================================
+
+
+@pytest.mark.django_db(transaction=True)
+def test_sync_trigger_rate_limited_429(
+    make_user: Callable[..., User],
+    dataset: Dataset,
+    monkeypatch: pytest.MonkeyPatch,
+    settings: Any,
+) -> None:
+    """sync trigger 超出令牌桶容量应 429 + Retry-After."""
+    admin = make_user(username="admin-rl-sync", role=Role.ADMIN)
+    plaintext, _ = _make_token(admin, scopes=["sync:trigger"], name="rl-sync")
+    client = _token_client(plaintext)
+
+    # 容量 2、不补充令牌；mock SyncService.run 与 get_lock 隔离后台线程与锁
+    settings.RATE_LIMIT_TRIGGER_CAPACITY = 2
+    settings.RATE_LIMIT_TRIGGER_REFILL_RATE = 0.0
+    rate_limiter.reset_rate_limiter()
+
+    def _noop_sync_run(self: Any) -> None:
+        return None
+
+    def _fake_get_lock(_name: str) -> _FakeLock:
+        return _FakeLock()
+
+    monkeypatch.setattr("apps.datasources.datasets_api.SyncService.run", _noop_sync_run)
+    monkeypatch.setattr("apps.datasources.datasets_api.get_lock", _fake_get_lock)
+
+    url = f"/api/v1/datasets/{dataset.slug}/sync"
+    for _ in range(2):
+        resp = _post(client, url)
+        assert resp.status_code == 202, resp.content
+    # 第 3 次应被限流
+    resp = _post(client, url)
+    assert resp.status_code == 429
+    assert resp["Retry-After"]
+    body = json.loads(resp.content)
+    assert "频繁" in body["detail"]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_ingest_trigger_rate_limited_429(
+    make_user: Callable[..., User],
+    ingest_task: IngestTask,
+    monkeypatch: pytest.MonkeyPatch,
+    settings: Any,
+) -> None:
+    """ingest trigger 超出令牌桶容量应 429 + Retry-After."""
+    admin = make_user(username="admin-rl-ingest", role=Role.ADMIN)
+    plaintext, _ = _make_token(admin, scopes=["sync:trigger"], name="rl-ingest")
+    client = _token_client(plaintext)
+
+    settings.RATE_LIMIT_TRIGGER_CAPACITY = 2
+    settings.RATE_LIMIT_TRIGGER_REFILL_RATE = 0.0
+    rate_limiter.reset_rate_limiter()
+    monkeypatch.setattr("apps.ingest.api.spawn_ingest", _fake_spawn_success)
+
+    url = f"/api/v1/ingest/tasks/{ingest_task.pk}/trigger"
+    for _ in range(2):
+        resp = _post(client, url)
+        assert resp.status_code == 200, resp.content
+    # 第 3 次应被限流
+    resp = _post(client, url)
+    assert resp.status_code == 429
+    assert resp["Retry-After"]
+    body = json.loads(resp.content)
+    assert "频繁" in body["detail"]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_trigger_rate_limit_independent_per_token(
+    make_user: Callable[..., User],
+    ingest_task: IngestTask,
+    monkeypatch: pytest.MonkeyPatch,
+    settings: Any,
+) -> None:
+    """不同 Token 的触发限流桶相互独立."""
+    admin = make_user(username="admin-rl-indep", role=Role.ADMIN)
+    plaintext_a, _ = _make_token(admin, scopes=["sync:trigger"], name="rl-a")
+    plaintext_b, _ = _make_token(admin, scopes=["sync:trigger"], name="rl-b")
+    client_a = _token_client(plaintext_a)
+    client_b = _token_client(plaintext_b)
+
+    settings.RATE_LIMIT_TRIGGER_CAPACITY = 2
+    settings.RATE_LIMIT_TRIGGER_REFILL_RATE = 0.0
+    rate_limiter.reset_rate_limiter()
+    monkeypatch.setattr("apps.ingest.api.spawn_ingest", _fake_spawn_success)
+
+    url = f"/api/v1/ingest/tasks/{ingest_task.pk}/trigger"
+    # Token A 耗尽配额
+    for _ in range(2):
+        resp = _post(client_a, url)
+        assert resp.status_code == 200, resp.content
+    resp = _post(client_a, url)
+    assert resp.status_code == 429
+    # Token B 不受影响，仍可调用
+    resp = _post(client_b, url)
+    assert resp.status_code == 200, resp.content

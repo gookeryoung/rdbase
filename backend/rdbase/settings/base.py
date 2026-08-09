@@ -104,6 +104,12 @@ REDIS_FAKE: bool = False
 RATE_LIMIT_DATASET_WRITE: int = 60
 DATASET_WRITE_DAILY_QUOTA: int = 10000
 
+# 触发端点令牌桶限流（iter-47，sync trigger + ingest trigger 共享一个桶）
+# - RATE_LIMIT_TRIGGER_CAPACITY: 桶容量，允许的突发上限
+# - RATE_LIMIT_TRIGGER_REFILL_RATE: 每秒补充的令牌数（长期平均速率上限）
+RATE_LIMIT_TRIGGER_CAPACITY: int = 10
+RATE_LIMIT_TRIGGER_REFILL_RATE: float = 0.5
+
 # 密码验证
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
