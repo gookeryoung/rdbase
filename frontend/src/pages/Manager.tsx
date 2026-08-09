@@ -897,6 +897,21 @@ const Manager = () => {
     setModalState({ open: true, mode: "edit", pk, initialValues });
   };
 
+  // Modal 打开时强制设置表单值。
+  // antd Form 的 initialValues 仅在 form 实例无值时生效；form 实例由
+  // useForm 创建后跨 Modal 开关复用，保留了上一次编辑的值，导致新打开
+  // Modal 时 initialValues 被忽略（表现为「编辑任何行都显示第一次的行」）。
+  // 在 Modal 打开、Form 挂载后用 setFieldsValue 强制覆盖，确保显示当前行数据。
+  useEffect(() => {
+    if (modalState.open) {
+      // initialValues 中可能含 null/undefined，与 antd StoreValue 约束
+      // （{} | undefined）不完全兼容，此处断言为 antd 期望的入参类型
+      form.setFieldsValue(
+        modalState.initialValues as Parameters<typeof form.setFieldsValue>[0]
+      );
+    }
+  }, [modalState.open, modalState.initialValues, form]);
+
   // Modal 提交
   const handleModalSubmit = async () => {
     if (selectedDsId == null || !selectedTable) return;
@@ -1509,6 +1524,7 @@ const Manager = () => {
         onOk={() => void handleModalSubmit()}
         onCancel={() => setModalState((prev) => ({ ...prev, open: false }))}
         confirmLoading={modalSubmitting}
+        destroyOnClose
         width={600}
       >
         <Form
