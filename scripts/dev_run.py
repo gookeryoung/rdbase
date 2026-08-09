@@ -4,24 +4,32 @@
 启动的是阻塞式开发服务器，永远不会返回，导致 `run-fe` 无法执行。
 
 本脚本用子进程同时拉起后端（Django runserver）与前端（Vite）开发服务器，
-统一转发两者的输出并带上前缀，任一进程退出或收到 Ctrl+C 时优雅关闭全部进程。
+统一转发两者输出并带上前缀，任一进程退出或收到 Ctrl+C 时优雅关闭全部进程。
 不依赖具体 shell（cmd/bash/PowerShell 均可），兼容 Windows/Linux/macOS。
 
 进程树清理策略：
 - Windows：将子进程加入配置了 KILL_ON_JOB_CLOSE 的 Job 对象，关闭 Job 句柄即
   原子式终止整棵进程树，规避 Django 自动重载子进程被杀后又被重启导致的孤儿进程。
 - POSIX：子进程独立成会话，向其进程组发送 SIGINT 即可级联终止全部派生进程。
+
+启动前端口清理：
+- 后端固定监听 8000，前端默认 5173（Vite 占用时自动递增到 5174/5175）。
+  上次会话异常退出（如 IDE 强制结束）时这些端口常被残留进程占用，导致新一次
+  `make run` 启动后端时立即报 "That port is already in use"。
+  启动前主动清理 8000/5173/5174/5175 端口上的残留进程，避免每次手动 kill。
 """
 
 from __future__ import annotations
 
 import contextlib
 import os
+import re
 import shutil
 import signal
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import IO
 
@@ -40,6 +48,15 @@ _OUTPUT_ENCODING = "utf-8"
 # Windows 上 npm 需要通过 npm.cmd 调用；作为 PATH 解析失败时的兜底命令名
 NPM = "npm.cmd" if _IS_WINDOWS else "npm"
 
+# 启动前需清理的开发端口：
+# - 8000：后端 Django runserver 固定端口，被占用会直接报错退出
+# - 5173/5174/5175：前端 Vite 默认端口及被占用时的自动递增端口
+#   清理后让本次启动拿到干净的 5173，避免 Vite 越漂越远
+_DEV_PORTS = (8000, 5173, 5174, 5175)
+
+# 端口清理时等待进程退出的超时（秒）：先 SIGTERM 优雅退出，超时后 SIGKILL
+_PORT_RELEASE_TIMEOUT = 6
+
 
 def _log(message: str) -> None:
     """以 UTF-8 字节写入 stdout，避免 GBK 控制台编码中文提示时报错。"""
@@ -52,6 +69,148 @@ def _log(message: str) -> None:
         # 极少数无 buffer 的场景退化为 errors=replace 的文本写入
         sys.stdout.write(message)
         sys.stdout.flush()
+
+
+def _find_port_pids(port: int) -> list[int]:
+    """返回监听指定端口的进程 PID 列表（排除本进程）。
+
+    跨平台策略：
+    - POSIX：优先 ``lsof -ti :{port}``（直接输出 PID），回退 ``ss -tlnpH`` 解析
+      ``users:(("proc",pid=N,fd=N))`` 字段。两者均不可用则返回空。
+    - Windows：解析 ``netstat -ano`` 输出，匹配 ``:{port}`` 监听行的 PID 列。
+    """
+    if _IS_WINDOWS:
+        try:
+            result = subprocess.run(
+                ["netstat", "-ano"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return []
+        pids: list[int] = []
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            # 行格式：TCP  0.0.0.0:8000  0.0.0.0:0  LISTENING  1234
+            if len(parts) >= 5 and parts[0] in ("TCP", "TCPv6") and parts[-2] == "LISTENING":
+                local = parts[1]
+                if local.rsplit(":", 1)[-1] == str(port):
+                    with contextlib.suppress(ValueError):
+                        pids.append(int(parts[-1]))
+        return [p for p in set(pids) if p != os.getpid()]
+
+    # POSIX：依次尝试 lsof / ss，第一个有结果即返回
+    for cmd, parser in (
+        (["lsof", "-ti", f":{port}"], _parse_lsof_pids),
+        (["ss", "-tlnpH", f"sport = :{port}"], _parse_ss_pids),
+    ):
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+        if result.returncode != 0:
+            continue
+        pids = parser(result.stdout)
+        if pids:
+            return [p for p in set(pids) if p != os.getpid()]
+    return []
+
+
+def _parse_lsof_pids(stdout: str) -> list[int]:
+    """``lsof -ti :{port}`` 直接输出 PID（每行一个）。"""
+    pids: list[int] = []
+    for raw_line in stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            pids.append(int(line))
+        except ValueError:
+            continue
+    return pids
+
+
+def _parse_ss_pids(stdout: str) -> list[int]:
+    """解析 ``ss -tlnpH`` 输出中的 ``users:(("proc",pid=N,fd=N))`` 字段。"""
+    pids: list[int] = []
+    pid_re = re.compile(r"pid=(\d+)")
+    for line in stdout.splitlines():
+        m = pid_re.search(line)
+        if m:
+            pids.append(int(m.group(1)))
+    return pids
+
+
+def _terminate_pid(pid: int, *, force: bool) -> None:
+    """终止指定进程：POSIX 用 SIGTERM/SIGKILL，Windows 用 taskkill。"""
+    sig = signal.SIGKILL if force else signal.SIGTERM
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        if _IS_WINDOWS:
+            # /T 连同子进程一起终止；/F 强制（force=True 时）
+            args = ["taskkill", "/PID", str(pid), "/T"]
+            if force:
+                args.append("/F")
+            subprocess.run(args, check=False, timeout=10)
+        else:
+            os.kill(pid, sig)
+
+
+def _cleanup_stale_processes() -> None:
+    """启动前清理占用开发端口的残留进程。
+
+    针对场景：上次 ``make run`` 异常退出（如关闭终端窗口、IDE 强制结束）后，
+    Django/Vite 子进程仍在监听端口，导致本次启动后端立即报端口占用。
+
+    清理流程（每个端口独立处理）：
+    1. 探测占用 PID 列表；
+    2. 先 SIGTERM（Windows taskkill 不带 /F）优雅退出，等待最多
+       ``_PORT_RELEASE_TIMEOUT`` 秒；
+    3. 仍占用则 SIGKILL（Windows taskkill /F）强制结束；
+    4. 再次探测确认端口已释放；仍失败则告警但不阻塞启动（交由后续 Popen 报错）。
+    """
+    for port in _DEV_PORTS:
+        pids = _find_port_pids(port)
+        if not pids:
+            continue
+        pid_str = ", ".join(str(p) for p in pids)
+        _log(f"[dev_run] 端口 {port} 被占用（PID: {pid_str}），正在清理...\n")
+
+        # 第一阶段：SIGTERM 优雅退出
+        for pid in pids:
+            _terminate_pid(pid, force=False)
+
+        # 等待端口释放
+        deadline = time.monotonic() + _PORT_RELEASE_TIMEOUT
+        while time.monotonic() < deadline:
+            if not _find_port_pids(port):
+                break
+            time.sleep(0.3)
+
+        # 第二阶段：仍未释放则 SIGKILL 强制结束
+        remaining = _find_port_pids(port)
+        if remaining:
+            _log(f"[dev_run] 端口 {port} 仍未释放，强制终止 PID: {', '.join(map(str, remaining))}\n")
+            for pid in remaining:
+                _terminate_pid(pid, force=True)
+            # 短暂等待内核回收
+            time.sleep(0.5)
+
+        # 最终确认
+        final = _find_port_pids(port)
+        if final:
+            _log(
+                f"[dev_run] 警告：端口 {port} 仍被占用（PID: {', '.join(map(str, final))}），启动可能失败，请手动处理\n"
+            )
+        else:
+            _log(f"[dev_run] 端口 {port} 已释放\n")
 
 
 def _resolve_frontend() -> tuple[str, list[str]]:
@@ -235,6 +394,8 @@ def _install_signal_handlers() -> None:
 def main() -> int:
     """并行启动全部服务，阻塞直至任一服务退出或收到中断信号。"""
     _install_signal_handlers()
+    # 启动前清理上次会话残留的进程，避免端口占用导致后端启动失败
+    _cleanup_stale_processes()
     job = _create_win_job()
     processes: list[tuple[str, subprocess.Popen[bytes]]] = []
     threads: list[threading.Thread] = []

@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useState, type ReactNode, type ReactElement } from "react";
 import { Layout, Menu, Space, Typography, Dropdown, Avatar } from "antd";
 import {
   DashboardOutlined,
@@ -105,42 +105,29 @@ const isItemVisible = (item: MenuItem, user: User | null): boolean => {
   return true;
 };
 
-// 递归过滤后的菜单节点：
-// - 父节点（分组）含 children 数组
-// - 叶子节点不含 children 字段（满足 antd Menu SubMenuType 类型约束）
-interface MenuParent {
-  key: string;
-  icon?: ReactNode;
-  label: string;
-  children: MenuNode[];
-}
-interface MenuLeaf {
-  key: string;
-  icon?: ReactNode;
-  label: string;
-}
-type MenuNode = MenuParent | MenuLeaf;
-
-// 递归过滤菜单项，返回 antd Menu 接受的结构（含 children 转 SubMenu）
-const filterMenuItems = (user: User | null): MenuNode[] =>
+// 渲染菜单项为 JSX 元素（用 Menu.Item / Menu.SubMenu 方式，避免 items prop 在
+// 某些 Vite 预构建环境下 SubMenu 组件丢失导致 children 不渲染的问题）
+const renderMenuItems = (user: User | null): ReactElement[] =>
   menuItems
     .filter((item) => isItemVisible(item, user))
-    .map((item): MenuNode => {
+    .map((item) => {
       if (item.children) {
-        return {
-          key: item.key,
-          icon: item.icon,
-          label: item.label,
-          children: item.children
-            .filter((child) => isItemVisible(child, user))
-            .map((child): MenuLeaf => ({
-              key: child.key,
-              icon: child.icon,
-              label: child.label,
-            })),
-        };
+        const visibleChildren = item.children.filter((child) => isItemVisible(child, user));
+        return (
+          <Menu.SubMenu key={item.key} icon={item.icon} title={item.label}>
+            {visibleChildren.map((child) => (
+              <Menu.Item key={child.key} icon={child.icon}>
+                {child.label}
+              </Menu.Item>
+            ))}
+          </Menu.SubMenu>
+        );
       }
-      return { key: item.key, icon: item.icon, label: item.label };
+      return (
+        <Menu.Item key={item.key} icon={item.icon}>
+          {item.label}
+        </Menu.Item>
+      );
     });
 
 // 计算当前路径所属的 SubMenu key（用于默认展开）
@@ -162,9 +149,9 @@ const MainLayout = () => {
   const user = useAuthStore((state) => state.user);
   const logout = useAuthStore((state) => state.logout);
 
-  const visibleMenu = filterMenuItems(user);
-  // 进入页面时默认展开当前路径所属分组
-  const [openKeys, setOpenKeys] = useState<string[]>(() => computeOpenKeys(location.pathname));
+  const menuChildren = renderMenuItems(user);
+  // 进入页面时默认展开当前路径所属分组（非受控，由 antd 管理后续展开/折叠）
+  const defaultOpenKeys = computeOpenKeys(location.pathname);
 
   const handleLogout = async () => {
     // 通知后端清除 refresh cookie，并清除本地认证状态
@@ -213,11 +200,11 @@ const MainLayout = () => {
           theme="dark"
           mode="inline"
           selectedKeys={[location.pathname]}
-          openKeys={collapsed ? [] : openKeys}
-          onOpenChange={(keys) => setOpenKeys(keys as string[])}
-          items={visibleMenu as MenuProps["items"]}
+          defaultOpenKeys={defaultOpenKeys}
           onClick={({ key }) => navigate(key)}
-        />
+        >
+          {menuChildren}
+        </Menu>
       </Sider>
       <Layout>
         <Header
