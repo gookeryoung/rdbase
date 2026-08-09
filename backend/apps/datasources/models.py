@@ -151,6 +151,15 @@ class Dataset(models.Model):
         related_name="datasets",
         verbose_name="负责人",
     )
+    # 绑定的同步配置（可选）；外部 API 触发 /sync 时按此关联执行
+    sync_config = models.ForeignKey(
+        "sync.SyncConfig",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="datasets",
+        verbose_name="绑定同步配置",
+    )
     is_active = models.BooleanField(default=True, verbose_name="是否启用")
     version = models.PositiveIntegerField(default=1, verbose_name="版本号（变更自增）")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")

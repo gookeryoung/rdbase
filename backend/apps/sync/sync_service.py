@@ -191,6 +191,7 @@ class SyncService:
                 config.last_sync_at = started_at
                 config.retry_count = 0
                 config.save(update_fields=["last_sync_at", "retry_count"])
+                _emit_sync_completed_event(log)
                 return log
 
             converted_rows = self._apply_mappings(source_rows, mappings)
@@ -215,6 +216,7 @@ class SyncService:
                 written,
                 skipped,
             )
+            _emit_sync_completed_event(log)
 
         except Exception as exc:
             elapsed_ms = int((timezone.now() - started_at).total_seconds() * 1000)
@@ -878,6 +880,32 @@ class SyncService:
         if schema and dialect != EngineType.SQLITE:
             return f"{self._quote_ident(schema, dialect)}.{self._quote_ident(table, dialect)}"
         return self._quote_ident(table, dialect)
+
+
+def _emit_sync_completed_event(log: SyncLog) -> None:
+    """同步成功后分发 ``sync.completed`` 事件到 Webhook 订阅.
+
+    延迟导入避免 ``apps.webhook`` 与 ``apps.sync`` 间循环依赖；投递失败不影响
+    同步主流程（异常被捕获并记日志）。
+    """
+    try:
+        from apps.webhook.deliverer import deliver_event
+
+        deliver_event(
+            "sync.completed",
+            {
+                "config_id": log.config_id,
+                "log_id": log.pk,
+                "status": log.status,
+                "mode": log.mode,
+                "rows_read": log.rows_read,
+                "rows_written": log.rows_written,
+                "rows_skipped": log.rows_skipped,
+                "duration_ms": log.duration_ms,
+            },
+        )
+    except Exception:
+        logger.exception("分发 sync.completed 事件失败: log_id=%s", log.pk)
 
 
 __all__ = ["BatchSyncResult", "SyncError", "SyncPreview", "SyncService"]

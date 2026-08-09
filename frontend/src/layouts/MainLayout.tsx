@@ -15,6 +15,7 @@ import {
   CloudDownloadOutlined,
   MonitorOutlined,
   AppstoreOutlined,
+  BellOutlined,
 } from "@ant-design/icons";
 import { Outlet, useNavigate, useLocation } from "react-router-dom";
 import { useAuthStore } from "@/store/auth";
@@ -85,6 +86,12 @@ const menuItems: MenuItem[] = [
     key: "/system-status",
     icon: <MonitorOutlined />,
     label: "系统状态",
+    roles: [Role.ADMIN],
+  },
+  {
+    key: "/webhooks",
+    icon: <BellOutlined />,
+    label: "Webhook 订阅",
     roles: [Role.ADMIN],
   },
   { key: "/profile", icon: <UserOutlined />, label: "个人中心" },

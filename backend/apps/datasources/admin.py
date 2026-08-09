@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from django.contrib import admin
 
-from .models import DataSource, Dataset
+from .models import Dataset, DataSource
 
 
 @admin.register(DataSource)

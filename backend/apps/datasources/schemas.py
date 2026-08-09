@@ -104,6 +104,7 @@ class DatasetCreateIn(Schema):
     filter_expression: dict[str, Any] = {}
     aggregations: dict[str, Any] = {}
     is_active: bool = True
+    sync_config_id: int | None = None
 
 
 class DatasetUpdateIn(Schema):
@@ -119,6 +120,7 @@ class DatasetUpdateIn(Schema):
     filter_expression: dict[str, Any] | None = None
     aggregations: dict[str, Any] | None = None
     is_active: bool | None = None
+    sync_config_id: int | None = None
 
 
 class DatasetOut(Schema):
@@ -135,6 +137,7 @@ class DatasetOut(Schema):
     filter_expression: dict[str, Any]
     aggregations: dict[str, Any]
     owner_id: int | None
+    sync_config_id: int | None
     is_active: bool
     version: int
     created_at: str
@@ -178,3 +181,17 @@ class DatasetWriteOut(Schema):
     written: int
     skipped: int
     total: int
+
+
+class DatasetSyncTriggerOut(Schema):
+    """数据集同步触发响应（异步，返回后台任务 ID）.
+
+    Attributes:
+        task_id: 后台任务标识（uuid4 hex），供调用方跟踪/对账。
+        sync_config_id: 实际执行的同步配置 ID。
+        status: 触发受理状态，固定为 ``accepted``。
+    """
+
+    task_id: str
+    sync_config_id: int
+    status: str

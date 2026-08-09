@@ -44,6 +44,7 @@ INSTALLED_APPS = [
     "apps.sync",
     "apps.ingest",
     "apps.system",
+    "apps.webhook",
 ]
 
 # 自定义用户模型（须在首次 migrate 前设置）

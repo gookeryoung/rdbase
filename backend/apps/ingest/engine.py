@@ -137,8 +137,37 @@ def execute_task(task: IngestTask) -> IngestLog:
         log.duration_ms = int((log.finished_at - started_at).total_seconds() * 1000)
         log.save()
         _apply_task_status(task, log)
+        _emit_ingest_completed_event(task, log)
 
     return log
+
+
+def _emit_ingest_completed_event(task: IngestTask, log: IngestLog) -> None:
+    """爬取完成后分发 ``ingest.completed`` 事件到 Webhook 订阅.
+
+    仅在 SUCCESS/PARTIAL 时分发；子进程内运行需 ``wait=True`` 同步等待投递完成，
+    避免进程退出杀掉 daemon 投递线程。投递失败不影响爬取主流程。
+    """
+    if log.status not in (IngestLogStatus.SUCCESS, IngestLogStatus.PARTIAL):
+        return
+    try:
+        from apps.webhook.deliverer import deliver_event
+
+        deliver_event(
+            "ingest.completed",
+            {
+                "task_id": task.pk,
+                "log_id": log.pk,
+                "status": log.status,
+                "rows_read": log.rows_read,
+                "rows_written": log.rows_written,
+                "rows_skipped": log.rows_skipped,
+                "duration_ms": log.duration_ms,
+            },
+            wait=True,
+        )
+    except Exception:
+        logger.exception("分发 ingest.completed 事件失败: log_id=%s", log.pk)
 
 
 def _apply_task_status(task: IngestTask, log: IngestLog) -> None:

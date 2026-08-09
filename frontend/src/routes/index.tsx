@@ -13,6 +13,7 @@ import Settings from "@/pages/Settings";
 import Sync from "@/pages/Sync";
 import Ingest from "@/pages/Ingest";
 import SystemStatus from "@/pages/SystemStatus";
+import Webhooks from "@/pages/Webhooks";
 import MainLayout from "@/layouts/MainLayout";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import RoleRoute from "@/components/RoleRoute";
@@ -76,6 +77,11 @@ export const routes: RouteObject[] = [
             path: "system-status",
             element: <RoleRoute allowedRoles={[Role.ADMIN]} />,
             children: [{ index: true, element: <SystemStatus /> }],
+          },
+          {
+            path: "webhooks",
+            element: <RoleRoute allowedRoles={[Role.ADMIN]} />,
+            children: [{ index: true, element: <Webhooks /> }],
           },
           { path: "profile", element: <Profile /> },
         ],

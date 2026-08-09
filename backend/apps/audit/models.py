@@ -67,6 +67,10 @@ class AuditAction(models.TextChoices):
     TOKEN_CREATE = "token.create", "创建 Token"
     TOKEN_REVOKE = "token.revoke", "吊销 Token"
     TOKEN_ROTATE = "token.rotate", "轮换 Token"
+    # 调度触发（外部 API Token 触发同步/爬取）
+    SYNC_TRIGGER = "sync.trigger", "触发同步"
+    INGEST_TRIGGER = "ingest.trigger", "触发爬取"
+    WEBHOOK_DELIVER = "webhook.deliver", "Webhook 投递"
 
 
 class AuditSource(models.TextChoices):

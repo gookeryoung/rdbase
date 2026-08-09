@@ -164,3 +164,19 @@ class IngestStatsOut(BaseModel):
     total_rows_read: int
     total_rows_written: int
     total_rows_skipped: int
+
+
+class IngestTriggerOut(BaseModel):
+    """外部触发爬取任务结果输出（与 IngestRunOut 同构，语义为外部触发执行结果）.
+
+    Attributes:
+        task_id: 爬取任务 ID。
+        returncode: 子进程退出码（0 表示成功）。
+        log: 最新一条执行日志；任务无日志时为 None。
+        stderr: 子进程标准错误输出。
+    """
+
+    task_id: int
+    returncode: int
+    log: IngestLogOut | None = None
+    stderr: str = ""

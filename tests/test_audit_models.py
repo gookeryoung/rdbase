@@ -47,6 +47,9 @@ def test_audit_action_choices() -> None:
     assert AuditAction.TOKEN_CREATE == "token.create"
     assert AuditAction.TOKEN_REVOKE == "token.revoke"
     assert AuditAction.TOKEN_ROTATE == "token.rotate"
+    assert AuditAction.SYNC_TRIGGER == "sync.trigger"
+    assert AuditAction.INGEST_TRIGGER == "ingest.trigger"
+    assert AuditAction.WEBHOOK_DELIVER == "webhook.deliver"
 
 
 def test_audit_source_choices() -> None:
@@ -62,8 +65,8 @@ def test_audit_status_choices() -> None:
 
 
 def test_audit_action_choices_count() -> None:
-    """AuditAction 共 29 个枚举值."""
-    assert len(AuditAction.choices) == 29
+    """AuditAction 共 32 个枚举值."""
+    assert len(AuditAction.choices) == 32
 
 
 def test_audit_log_meta_ordering() -> None:

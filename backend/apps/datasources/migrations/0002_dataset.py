@@ -20,8 +20,14 @@ class Migration(migrations.Migration):
                 ("name", models.CharField(max_length=128, verbose_name="名称")),
                 ("description", models.TextField(blank=True, default="", verbose_name="描述")),
                 ("table_name", models.CharField(max_length=128, verbose_name="表名")),
-                ("schema_name", models.CharField(blank=True, default="", max_length=128, verbose_name="Schema 名（SQLite 留空）")),
-                ("fields_whitelist", models.JSONField(blank=True, default=list, verbose_name="字段白名单（空表示全部）")),
+                (
+                    "schema_name",
+                    models.CharField(blank=True, default="", max_length=128, verbose_name="Schema 名（SQLite 留空）"),
+                ),
+                (
+                    "fields_whitelist",
+                    models.JSONField(blank=True, default=list, verbose_name="字段白名单（空表示全部）"),
+                ),
                 ("filter_expression", models.JSONField(blank=True, default=dict, verbose_name="行级过滤条件")),
                 ("aggregations", models.JSONField(blank=True, default=dict, verbose_name="预聚合规则")),
                 ("is_active", models.BooleanField(default=True, verbose_name="是否启用")),

@@ -21,10 +21,13 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
+import uuid
 from typing import Any, cast
 
 from django.conf import settings
+from django.db import connections
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from ninja import Router
 from ninja.errors import HttpError
@@ -38,6 +41,9 @@ from apps.audit.models import AuditAction, AuditStatus
 from apps.ingest.models import ConflictStrategy
 from apps.ingest.writer import write_rows
 from apps.manager.query import QueryError, get_column_names, get_pk_columns, query_table_rows
+from apps.sync.models import SyncConfig
+from apps.sync.sync_service import SyncError, SyncService
+from apps.system.distributed_lock import get_lock
 from apps.system.idempotency import (
     check_idempotency,
     release_idempotency,
@@ -53,6 +59,7 @@ from .schemas import (
     DatasetListOut,
     DatasetOut,
     DatasetRowsOut,
+    DatasetSyncTriggerOut,
     DatasetUpdateIn,
     DatasetWriteIn,
     DatasetWriteOut,
@@ -85,6 +92,7 @@ def _dataset_to_dict(ds: Dataset) -> dict[str, Any]:
         "filter_expression": dict(cast("dict[str, Any]", ds.filter_expression)),
         "aggregations": dict(cast("dict[str, Any]", ds.aggregations)),
         "owner_id": ds.owner_id,
+        "sync_config_id": ds.sync_config_id,
         "is_active": ds.is_active,
         "version": ds.version,
         "created_at": ds.created_at.isoformat(),  # type: ignore[missing-attribute]
@@ -303,6 +311,8 @@ def create_dataset(request: HttpRequest, payload: DatasetCreateIn) -> HttpRespon
         raise HttpError(400, "slug 已存在")
     if not DataSource.objects.filter(pk=payload.datasource_id).exists():
         raise HttpError(400, "数据源不存在")
+    if payload.sync_config_id is not None and not SyncConfig.objects.filter(pk=payload.sync_config_id).exists():
+        raise HttpError(400, "同步配置不存在")
     user = cast(User, getattr(request, "auth", None))
     ds = Dataset(
         slug=payload.slug,
@@ -315,6 +325,7 @@ def create_dataset(request: HttpRequest, payload: DatasetCreateIn) -> HttpRespon
         filter_expression=dict(payload.filter_expression),
         aggregations=dict(payload.aggregations),
         owner=user,
+        sync_config_id=payload.sync_config_id,
         is_active=payload.is_active,
     )
     ds.save()
@@ -352,6 +363,12 @@ def update_dataset(request: HttpRequest, slug: str, payload: DatasetUpdateIn) ->
         raise HttpError(400, "slug 已存在")
     if "datasource_id" in data and not DataSource.objects.filter(pk=data["datasource_id"]).exists():
         raise HttpError(400, "数据源不存在")
+    if (
+        "sync_config_id" in data
+        and data["sync_config_id"] is not None
+        and not SyncConfig.objects.filter(pk=data["sync_config_id"]).exists()
+    ):
+        raise HttpError(400, "同步配置不存在")
 
     # 白名单类字段强制复制为 list/dict，避免共享引用
     if "fields_whitelist" in data and data["fields_whitelist"] is not None:
@@ -694,6 +711,92 @@ def write_dataset_rows(  # noqa: PLR0912
     ).model_dump()
     store_idempotency_result(request, 200, body)
     return JsonResponse(body)
+
+
+# ============================================================
+# 公开触发端点：POST /{slug}/sync
+# ============================================================
+
+
+@router.post("/{slug}/sync", response={202: DatasetSyncTriggerOut}, auth=ApiTokenAuth())
+def trigger_dataset_sync(request: HttpRequest, slug: str) -> HttpResponse:
+    """外部应用按 slug 触发绑定的同步配置执行（API Token + sync:trigger scope）.
+
+    接入幂等保护与分布式锁，**异步**在后台线程执行 ``SyncService.run`` 并立即返回
+    ``task_id``，供调用方对账（执行结果以 ``SyncLog`` 为准）。
+
+    处理流程：
+
+    1. ``sync:trigger`` scope 校验。
+    2. 数据集存在性 + ``is_active`` 校验（404）。
+    3. 数据集须绑定 ``sync_config``（400）；同步配置须存在且 ``is_active``（400）。
+    4. 幂等检查（``Idempotency-Key`` 命中回放缓存的 task_id）。
+    5. 分布式锁 ``sync:config:{sync_config_id}``（占用返回 409）。
+    6. 启动后台线程执行 ``SyncService(config).run()``，finally 释放锁与 DB 连接。
+    7. 写 ``SYNC_TRIGGER`` 审计，存幂等结果返回 202 + ``task_id``。
+    """
+    _require_scope(request, "sync:trigger")
+
+    ds = _get_dataset_or_404(slug, active_only=True)
+    sync_config_id = ds.sync_config_id
+    if sync_config_id is None:
+        raise HttpError(400, "数据集未绑定同步配置")
+
+    try:
+        config = SyncConfig.objects.get(pk=sync_config_id)
+    except SyncConfig.DoesNotExist:  # type: ignore[missing-attribute]
+        raise HttpError(400, "绑定的同步配置不存在") from None
+    if not config.is_active:
+        raise HttpError(400, "同步配置已暂停，请先启用")
+
+    # 幂等检查：命中已完成缓存则回放 task_id，命中 in_progress 返回 409。
+    cached = check_idempotency(request)
+    if cached is not None:
+        return cached
+
+    # 分布式锁：防同一同步配置并发执行（与 /sync/configs/{id}/trigger 同锁名）。
+    lock = get_lock(f"sync:config:{sync_config_id}")
+    if not lock.acquire():
+        release_idempotency(request)
+        info = lock.info()
+        raise HttpError(409, f"同步配置 {sync_config_id} 正在执行中（锁剩余 {info.ttl}s）")
+
+    task_id = uuid.uuid4().hex
+    token = cast(ApiToken, getattr(request, "api_token", None))
+
+    def _bg_run() -> None:
+        """后台线程执行同步：finally 释放锁并关闭本线程的 DB 连接."""
+        try:
+            SyncService(config).run()
+        except SyncError:
+            # 同步失败已由 SyncService 内部记录 SyncLog/告警，此处不抛出。
+            pass
+        finally:
+            lock.release()
+            connections.close_all()
+
+    threading.Thread(target=_bg_run, daemon=True).start()
+
+    log_audit(
+        request,
+        action=AuditAction.SYNC_TRIGGER,
+        resource_type="dataset",
+        resource_id=str(ds.pk),
+        extra={
+            "slug": ds.slug,
+            "sync_config_id": sync_config_id,
+            "task_id": task_id,
+            "token": token.prefix if token else "",
+        },
+    )
+
+    body = DatasetSyncTriggerOut(
+        task_id=task_id,
+        sync_config_id=sync_config_id,
+        status="accepted",
+    ).model_dump()
+    store_idempotency_result(request, 202, body)
+    return JsonResponse(body, status=202)
 
 
 __all__ = ["router"]

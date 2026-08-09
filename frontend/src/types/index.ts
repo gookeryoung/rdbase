@@ -490,6 +490,7 @@ export type AuditAction =
   | "dataset.create"
   | "dataset.update"
   | "dataset.delete"
+  | "dataset.write"
   | "draft.create"
   | "draft.update"
   | "draft.delete"
@@ -501,7 +502,16 @@ export type AuditAction =
   | "dml.import"
   | "sql.execute"
   | "obj.alter"
-  | "obj.drop";
+  | "obj.drop"
+  | "backup.create"
+  | "backup.restore"
+  | "audit.verify"
+  | "token.create"
+  | "token.revoke"
+  | "token.rotate"
+  | "sync.trigger"
+  | "ingest.trigger"
+  | "webhook.deliver";
 
 // 审计记录来源
 export type AuditSource = "middleware" | "business";
@@ -975,5 +985,66 @@ export interface PoolStat {
 // 连接池状态聚合
 export interface PoolStatsList {
   items: PoolStat[];
+  total: number;
+}
+
+// ----------------- Webhook 订阅（P9 iter-44） -----------------
+
+// Webhook 订阅创建请求
+export interface WebhookSubscriptionCreate {
+  name: string;
+  url: string;
+  secret: string;
+  events: string[];
+  is_active?: boolean;
+}
+
+// Webhook 订阅更新请求（所有字段可选；secret 为空表示不更新）
+export interface WebhookSubscriptionUpdate {
+  name?: string;
+  url?: string;
+  secret?: string;
+  events?: string[];
+  is_active?: boolean;
+}
+
+// Webhook 订阅响应（不回显 secret）
+export interface WebhookSubscription {
+  id: number;
+  name: string;
+  url: string;
+  signing_algorithm: string;
+  events: string[];
+  is_active: boolean;
+  created_by_id: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// Webhook 订阅列表响应
+export interface WebhookSubscriptionList {
+  items: WebhookSubscription[];
+  total: number;
+}
+
+// Webhook 投递日志响应
+export interface WebhookDeliveryLog {
+  id: number;
+  subscription_id: number;
+  event_type: string;
+  payload: Record<string, unknown>;
+  status_code: number | null;
+  retry_count: number;
+  next_retry_at: string | null;
+  response_body: string;
+  error_message: string;
+  started_at: string;
+  finished_at: string | null;
+  duration_ms: number | null;
+}
+
+// Webhook 投递日志列表响应
+export interface WebhookDeliveryLogList {
+  items: WebhookDeliveryLog[];
   total: number;
 }

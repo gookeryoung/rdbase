@@ -17,6 +17,7 @@ from apps.manager.api import router as manager_router
 from apps.settings.api import router as settings_router
 from apps.sync.api import router as sync_router
 from apps.system.api import router as system_router
+from apps.webhook.api import router as webhooks_router
 from ninja import NinjaAPI
 
 api = NinjaAPI(
@@ -37,3 +38,4 @@ api.add_router("/settings", settings_router)
 api.add_router("/sync", sync_router)
 api.add_router("/ingest", ingest_router)
 api.add_router("/system", system_router)
+api.add_router("/webhooks", webhooks_router)

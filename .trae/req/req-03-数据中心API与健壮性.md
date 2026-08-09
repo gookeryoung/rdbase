@@ -25,7 +25,7 @@
 - [x] 41 API Token 认证机制：ApiToken 模型（name/token_hash/scopes/expires_at/last_used_at/created_by）+ 生成（仅创建时返回明文，存储 SHA-256 哈希）+ 校验中间件 ApiTokenAuth（与 JWTAuth 并存，按请求头优先级解析）+ /api/v1/tokens CRUD（仅 admin）+ 吊销与轮换。接入 P8 已实现的幂等 key 抽象（Token 自动作为幂等主体）。
 - [x] 42 数据集（Dataset）抽象与查询 API：Dataset 模型（slug 唯一/绑定数据源/表名/字段白名单/过滤条件/聚合规则/owner）+ 对外只读查询端点 GET /api/v1/datasets/{slug}/rows（分页/排序/筛选/字段裁剪，复用 manager 查询能力，走 API Token 鉴权与 scope 校验）+ 前端数据集管理页（admin 可创建/编辑/删除/预览）
 - [x] 43 数据集写入 API：POST /api/v1/datasets/{slug}/rows（单行/批量 UPSERT）+ 冲突策略复用（UPSERT/SKIP/ERROR）+ 写入审计（AuditAction 新增 DATASET_WRITE）+ 配额控制（每 Token 每日写入上限，超额 429）+ 速率限制（Token 维度令牌桶，Redis 实现，复用 P8 Redis 基础设施）
-- [ ] 44 调度触发 API + Webhook 订阅：POST /api/v1/datasets/{slug}/sync（触发绑定 sync 配置）+ POST /api/v1/ingest/tasks/{id}/trigger（外部触发爬取，复用现有 run 逻辑但走异步队列；接入 P8 分布式锁防并发、P8 幂等防重复触发）+ WebhookSubscription 模型（事件类型/目标 URL/secret/启用）+ 事件投递器（sync/ingest 完成后异步 POST，HMAC-SHA256 签名，失败指数退避重试最多 5 次）+ 前端订阅管理页
+- [x] 44 调度触发 API + Webhook 订阅：POST /api/v1/datasets/{slug}/sync（触发绑定 sync 配置）+ POST /api/v1/ingest/tasks/{id}/trigger（外部触发爬取，复用现有 run 逻辑但走异步队列；接入 P8 分布式锁防并发、P8 幂等防重复触发）+ WebhookSubscription 模型（事件类型/目标 URL/secret/启用）+ 事件投递器（sync/ingest 完成后异步 POST，HMAC-SHA256 签名，失败指数退避重试最多 5 次）+ 前端订阅管理页
 - [ ] 45 OpenAPI spec 暴露 + 速率限制完善 + P9 测试文档收尾：/api/v1/openapi.json 对外可访问（仅含数据集与触发端点，隐藏管理端点）+ 速率限制中间件（按 Token + 按端点维度，Redis 令牌桶）+ 前端 Token 管理页（列表/创建/吊销/查看 last_used_at）+ 端到端测试（API Token 全流程 + 数据集查询写入 + Webhook 投递）+ 用户手册新增「外部应用接入指南」+ API 文档汇总
 
 ## 关键架构决策
