@@ -8,6 +8,7 @@ rdbase
    :caption: 目录
 
    api
+   external-api-guide
    changelog
 
 简介

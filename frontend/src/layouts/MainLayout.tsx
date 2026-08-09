@@ -16,6 +16,7 @@ import {
   MonitorOutlined,
   AppstoreOutlined,
   BellOutlined,
+  KeyOutlined,
 } from "@ant-design/icons";
 import { Outlet, useNavigate, useLocation } from "react-router-dom";
 import { useAuthStore } from "@/store/auth";
@@ -92,6 +93,12 @@ const menuItems: MenuItem[] = [
     key: "/webhooks",
     icon: <BellOutlined />,
     label: "Webhook 订阅",
+    roles: [Role.ADMIN],
+  },
+  {
+    key: "/tokens",
+    icon: <KeyOutlined />,
+    label: "API Token",
     roles: [Role.ADMIN],
   },
   { key: "/profile", icon: <UserOutlined />, label: "个人中心" },

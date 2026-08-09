@@ -1048,3 +1048,58 @@ export interface WebhookDeliveryLogList {
   items: WebhookDeliveryLog[];
   total: number;
 }
+
+// ----------------- API Token（P9 iter-45） -----------------
+
+// API Token 可用 scope 取值
+export type ApiTokenScope =
+  | "datasets:read"
+  | "datasets:write"
+  | "sync:trigger";
+
+// 创建 API Token 请求
+export interface ApiTokenCreate {
+  name: string;
+  scopes: ApiTokenScope[];
+  expires_at?: string | null;
+}
+
+// 创建/轮换 API Token 响应（含明文，仅此一次返回）
+export interface ApiTokenCreated {
+  id: number;
+  name: string;
+  token: string;
+  prefix: string;
+  scopes: ApiTokenScope[];
+  expires_at: string | null;
+  is_active: boolean;
+  created_at: string;
+}
+
+// API Token 列表项（不含明文）
+export interface ApiTokenListItem {
+  id: number;
+  name: string;
+  prefix: string;
+  scopes: ApiTokenScope[];
+  expires_at: string | null;
+  last_used_at: string | null;
+  is_active: boolean;
+  created_by_id: number | null;
+  created_at: string;
+}
+
+// API Token 列表响应
+export interface ApiTokenList {
+  items: ApiTokenListItem[];
+  total: number;
+}
+
+// 轮换 API Token 响应（含新明文，仅此一次返回）
+export interface ApiTokenRotated {
+  id: number;
+  name: string;
+  token: string;
+  prefix: string;
+  is_active: boolean;
+}
