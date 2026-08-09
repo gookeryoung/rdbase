@@ -205,6 +205,10 @@ Query 参数：
 - **异步执行**：立即返回 ``task_id``，调用方通过 ``SyncLog`` 查询执行结果
   （``GET /api/v1/sync/logs?config_id=1``）。
 - **幂等 + 分布式锁**：``Idempotency-Key`` 24h 缓存；同配置并发触发返回 409。
+- **速率限制**：与触发爬取共享令牌桶，每 Token 容量
+  ``RATE_LIMIT_TRIGGER_CAPACITY``（默认 10）、每秒补充
+  ``RATE_LIMIT_TRIGGER_REFILL_RATE``（默认 0.5，即每 2 秒恢复 1 次），
+  超限返回 ``429`` + ``Retry-After`` 头。
 - 数据集须绑定 ``sync_config``（否则 400）；同步配置须 ``is_active``（否则 400）。
 
 触发爬取
@@ -241,6 +245,10 @@ Query 参数：
 
 - **同步等待**：子进程执行完毕后返回 returncode 与最新日志。
 - **幂等 + 分布式锁**：同任务并发触发返回 409（与内部 ``/run`` 同锁名互斥）。
+- **速率限制**：与触发同步共享令牌桶，每 Token 容量
+  ``RATE_LIMIT_TRIGGER_CAPACITY``（默认 10）、每秒补充
+  ``RATE_LIMIT_TRIGGER_REFILL_RATE``（默认 0.5），超限返回 ``429`` +
+  ``Retry-After`` 头。
 - 失败返回 500 + FAILURE 审计日志。
 
 Webhook 事件订阅
