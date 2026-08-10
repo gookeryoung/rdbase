@@ -7,6 +7,7 @@
 - PATCH /webhooks/{id}：更新订阅
 - DELETE /webhooks/{id}：删除订阅
 - GET /webhooks/{id}/deliveries：查询订阅的投递日志
+- POST /webhooks/{id}/deliveries/{log_id}/redeliver：重投指定日志
 
 所有端点 ``JWTAuth`` + ``require_admin``：Webhook 配置含签名密钥，仅管理员可访问。
 """
@@ -25,6 +26,7 @@ from apps.accounts.permissions import require_admin
 from apps.audit.audit import log_audit
 from apps.audit.models import AuditAction
 
+from .deliverer import redeliver
 from .models import WebhookDeliveryLog, WebhookSubscription
 from .schemas import (
     MessageOut,
@@ -197,6 +199,34 @@ def list_deliveries(
     total = WebhookDeliveryLog.objects.filter(subscription_id=sub_id).count()
     body = WebhookDeliveryLogListOut(items=items, total=total).model_dump(mode="json")
     return JsonResponse(body)
+
+
+@router.post("/{sub_id}/deliveries/{log_id}/redeliver", response={200: WebhookDeliveryLogOut})
+def redeliver_delivery(
+    request: HttpRequest,
+    sub_id: int,
+    log_id: int,
+) -> HttpResponse:
+    """重投指定的投递日志（仅管理员）.
+
+    以源日志的 ``event_type`` + ``payload`` 重新投递，创建新日志；原日志保留作审计。
+    投递同步执行（含内联重试），可能耗时数秒至数十秒。
+    """
+    require_admin(request)
+    _get_sub_or_404(sub_id)
+    if not WebhookDeliveryLog.objects.filter(pk=log_id, subscription_id=sub_id).exists():
+        raise HttpError(404, f"投递日志 {log_id} 不属于订阅 {sub_id} 或不存在")
+    new_log = redeliver(log_id)
+    if new_log is None:
+        raise HttpError(404, f"投递日志 {log_id} 重投失败（订阅可能已删除）")
+    log_audit(
+        request,
+        action=AuditAction.WEBHOOK_DELIVER,
+        resource_type="webhook_delivery_log",
+        resource_id=str(log_id),
+        extra={"redeliver": True, "new_log_id": new_log.pk, "subscription_id": sub_id},
+    )
+    return JsonResponse(_log_to_out(new_log).model_dump(mode="json"))
 
 
 __all__ = ["router"]

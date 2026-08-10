@@ -1,6 +1,7 @@
 import client from "./client";
 import type {
   MessageOut,
+  WebhookDeliveryLog,
   WebhookDeliveryLogList,
   WebhookSubscription,
   WebhookSubscriptionCreate,
@@ -57,4 +58,15 @@ export const listWebhookDeliveries = (
     .get<WebhookDeliveryLogList>(`/webhooks/${subscriptionId}/deliveries`, {
       params,
     })
+    .then((res) => res.data);
+
+// 重投指定投递日志（仅管理员，同步执行含内联重试）
+export const redeliverWebhookDelivery = (
+  subscriptionId: number,
+  logId: number
+): Promise<WebhookDeliveryLog> =>
+  client
+    .post<WebhookDeliveryLog>(
+      `/webhooks/${subscriptionId}/deliveries/${logId}/redeliver`
+    )
     .then((res) => res.data);

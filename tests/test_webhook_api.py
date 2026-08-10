@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from typing import Any, cast
 
+import pytest
 from apps.accounts.jwt import create_access_token
 from apps.accounts.models import User
+from apps.webhook import deliverer
+from apps.webhook.deliverer import _PostResult
 from apps.webhook.models import WebhookDeliveryLog, WebhookSubscription
 from django.http import HttpResponse
 from django.test import Client
@@ -266,3 +270,137 @@ class TestWebhookDeliveryLogAPI:
             **_auth(regular_user),
         )
         assert resp.status_code in {401, 403}
+
+
+def _stub_post_success() -> tuple[list[dict[str, Any]], Any]:
+    """构造始终返回 200 的 _http_post 替身."""
+    calls: list[dict[str, Any]] = []
+
+    def _stub(url: str, body: bytes, headers: dict[str, str], timeout: int) -> _PostResult:
+        calls.append({"url": url, "body": body, "headers": dict(headers), "timeout": timeout})
+        return _PostResult(status_code=200, body="ok", error="")
+
+    return calls, _stub
+
+
+def _stub_post_fail() -> Any:
+    """构造始终返回 500 的 _http_post 替身."""
+
+    def _stub(url: str, body: bytes, headers: dict[str, str], timeout: int) -> _PostResult:
+        return _PostResult(status_code=500, body="err", error="")
+
+    return _stub
+
+
+def _noop_sleep(_delay: float) -> None:
+    """空操作 sleep 替身."""
+    return None
+
+
+class TestWebhookRedeliverAPI:
+    """重投端点测试."""
+
+    @pytest.mark.django_db(transaction=True)
+    def test_redeliver_success(self, client: Client, admin_user: User, monkeypatch: pytest.MonkeyPatch) -> None:
+        """管理员应能重投指定日志，返回新日志."""
+        monkeypatch.setattr(deliverer, "_http_post", _stub_post_success()[1])
+        monkeypatch.setattr(deliverer, "_backoff_sleep", _noop_sleep)
+        sub = _make_sub(admin_user, name="rdeliver-ok")
+        source = WebhookDeliveryLog.objects.create(
+            subscription=sub,
+            event_type="sync.completed",
+            payload={"config_id": 1},
+            status_code=503,
+            started_at=timezone.now(),
+            next_retry_at=timezone.now() + timedelta(seconds=300),
+        )
+
+        resp = client.post(
+            f"/api/v1/webhooks/{sub.pk}/deliveries/{source.pk}/redeliver",
+            **_auth(admin_user),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["id"] != source.pk
+        assert data["subscription_id"] == sub.pk
+        assert data["event_type"] == "sync.completed"
+        assert data["payload"] == {"config_id": 1}
+        assert data["status_code"] == 200
+        assert data["next_retry_at"] is None
+
+    @pytest.mark.django_db(transaction=True)
+    def test_redeliver_subscription_not_found(self, client: Client, admin_user: User) -> None:
+        """订阅不存在应返回 404."""
+        resp = client.post(
+            "/api/v1/webhooks/99999/deliveries/1/redeliver",
+            **_auth(admin_user),
+        )
+        assert resp.status_code == 404
+
+    @pytest.mark.django_db(transaction=True)
+    def test_redeliver_log_not_found(self, client: Client, admin_user: User, monkeypatch: pytest.MonkeyPatch) -> None:
+        """日志不存在应返回 404."""
+        monkeypatch.setattr(deliverer, "_http_post", _stub_post_success()[1])
+        monkeypatch.setattr(deliverer, "_backoff_sleep", _noop_sleep)
+        sub = _make_sub(admin_user, name="rdeliver-nolog")
+
+        resp = client.post(
+            f"/api/v1/webhooks/{sub.pk}/deliveries/99999/redeliver",
+            **_auth(admin_user),
+        )
+        assert resp.status_code == 404
+
+    @pytest.mark.django_db(transaction=True)
+    def test_redeliver_log_belongs_to_other_sub(
+        self, client: Client, admin_user: User, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """日志不属于该订阅应返回 404."""
+        monkeypatch.setattr(deliverer, "_http_post", _stub_post_success()[1])
+        monkeypatch.setattr(deliverer, "_backoff_sleep", _noop_sleep)
+        sub_a = _make_sub(admin_user, name="sub-a")
+        sub_b = _make_sub(admin_user, name="sub-b", url="https://other.com/h")
+        source = WebhookDeliveryLog.objects.create(
+            subscription=sub_a,
+            event_type="sync.completed",
+            payload={},
+            status_code=503,
+            started_at=timezone.now(),
+        )
+
+        # 用 sub_b 的 ID 去重投 sub_a 的日志
+        resp = client.post(
+            f"/api/v1/webhooks/{sub_b.pk}/deliveries/{source.pk}/redeliver",
+            **_auth(admin_user),
+        )
+        assert resp.status_code == 404
+
+    @pytest.mark.django_db(transaction=True)
+    def test_redeliver_requires_admin(
+        self, client: Client, regular_user: User, admin_user: User, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """非管理员重投应被拒绝."""
+        monkeypatch.setattr(deliverer, "_http_post", _stub_post_success()[1])
+        monkeypatch.setattr(deliverer, "_backoff_sleep", _noop_sleep)
+        sub = _make_sub(admin_user, name="rdeliver-perm")
+        source = WebhookDeliveryLog.objects.create(
+            subscription=sub,
+            event_type="sync.completed",
+            payload={},
+            status_code=503,
+            started_at=timezone.now(),
+        )
+
+        resp = client.post(
+            f"/api/v1/webhooks/{sub.pk}/deliveries/{source.pk}/redeliver",
+            **_auth(regular_user),
+        )
+        assert resp.status_code in {401, 403}
+
+    @pytest.mark.django_db(transaction=True)
+    def test_redeliver_unauthenticated(self, client: Client, admin_user: User) -> None:
+        """未认证应返回 401."""
+        sub = _make_sub(admin_user, name="rdeliver-noauth")
+        resp = client.post(
+            f"/api/v1/webhooks/{sub.pk}/deliveries/1/redeliver",
+        )
+        assert resp.status_code == 401

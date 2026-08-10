@@ -20,6 +20,7 @@ import {
   EditOutlined,
   DeleteOutlined,
   HistoryOutlined,
+  RedoOutlined,
 } from "@ant-design/icons";
 import {
   listWebhookSubscriptions,
@@ -27,6 +28,7 @@ import {
   updateWebhookSubscription,
   deleteWebhookSubscription,
   listWebhookDeliveries,
+  redeliverWebhookDelivery,
 } from "@/api/webhooks";
 import type {
   WebhookSubscription,
@@ -75,6 +77,7 @@ const Webhooks = () => {
   const [deliveries, setDeliveries] = useState<WebhookDeliveryLog[]>([]);
   const [deliveryTotal, setDeliveryTotal] = useState(0);
   const [deliveryLoading, setDeliveryLoading] = useState(false);
+  const [redeliveringId, setRedeliveringId] = useState<number | null>(null);
 
   const loadList = async () => {
     setLoading(true);
@@ -201,6 +204,39 @@ const Webhooks = () => {
       message.error(errMsg(err, "加载投递日志失败"));
     } finally {
       setDeliveryLoading(false);
+    }
+  };
+
+  // 刷新投递日志列表（重投后调用）
+  const refreshDeliveries = async () => {
+    if (!deliverySub) return;
+    setDeliveryLoading(true);
+    try {
+      const data: WebhookDeliveryLogList = await listWebhookDeliveries(
+        deliverySub.id,
+        { limit: 50 }
+      );
+      setDeliveries(data.items);
+      setDeliveryTotal(data.total);
+    } catch (err) {
+      message.error(errMsg(err, "刷新投递日志失败"));
+    } finally {
+      setDeliveryLoading(false);
+    }
+  };
+
+  // 重投指定日志
+  const handleRedeliver = async (log: WebhookDeliveryLog) => {
+    if (!deliverySub) return;
+    setRedeliveringId(log.id);
+    try {
+      await redeliverWebhookDelivery(deliverySub.id, log.id);
+      message.success("重投成功");
+      await refreshDeliveries();
+    } catch (err) {
+      message.error(errMsg(err, "重投失败"));
+    } finally {
+      setRedeliveringId(null);
     }
   };
 
@@ -342,6 +378,35 @@ const Webhooks = () => {
       dataIndex: "started_at",
       width: 180,
       render: (v: string) => (v ? new Date(v).toLocaleString("zh-CN") : "—"),
+    },
+    {
+      title: "操作",
+      key: "action",
+      width: 100,
+      render: (_: unknown, record: WebhookDeliveryLog) => {
+        const isFailed =
+          record.status_code === null ||
+          record.status_code < 200 ||
+          record.status_code >= 300;
+        if (!isFailed) return null;
+        return (
+          <Popconfirm
+            title="确认重投该日志？"
+            description="将同步重新投递，可能耗时数秒。"
+            okText="重投"
+            cancelText="取消"
+            onConfirm={() => handleRedeliver(record)}
+          >
+            <Button
+              size="small"
+              icon={<RedoOutlined />}
+              loading={redeliveringId === record.id}
+            >
+              重投
+            </Button>
+          </Popconfirm>
+        );
+      },
     },
   ];
 

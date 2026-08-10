@@ -9,11 +9,14 @@
 - **签名**：HMAC-SHA256，请求头 ``X-Webhook-Signature: sha256=<hex>``，接收方按
   同样算法用 ``subscription.secret`` 校验完整性。
 - **重试**：指数退避 1/2/4/8/16s，最多 5 次重试（总尝试 6 次）。2xx 视为成功
-  不再重试；其余状态码或网络异常触发重试。
+  不再重试；其余状态码或网络异常触发重试。内联重试全部失败后，日志
+  ``next_retry_at`` 设为 ``now + _SCHEDULED_RETRY_INTERVAL``，标记待调度重投。
 - **后台线程**：每个订阅独立线程，主调用方不阻塞；线程内 finally 关闭 Django
   DB 连接，避免线程池复用泄漏。
 - **日志**：每次投递流程（含全部重试）写一条 :class:`WebhookDeliveryLog`，
-  ``retry_count`` 记录最终重试次数。
+  ``retry_count`` 记录最终重试次数；``next_retry_at`` 非 None 表示待调度重投。
+- **重投**：:func:`redeliver` 按源日志 ID 重新投递（手动/调度），创建新日志，
+  原日志保留作审计；调用前清源日志 ``next_retry_at`` 避免重复调度。
 - **可测性**：模块级 ``_backoff_sleep = time.sleep``，测试可 monkeypatch 为空操作
   避免真实等待；``_http_post`` 钩子同样可替换为 stub。
 
@@ -31,12 +34,13 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from datetime import datetime, timedelta
 from typing import Any
 
 from django.db import connections
 from django.utils import timezone
 
-from .models import WebhookSubscription
+from .models import WebhookDeliveryLog, WebhookSubscription
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +52,8 @@ _MAX_RETRIES = 5
 _REQUEST_TIMEOUT = 10
 # 响应体最大记录长度（防日志膨胀）。
 _MAX_BODY_LOG = 4096
+# 调度重投间隔：内联重试全部失败后，下次调度重投的等待时间（秒）。
+_SCHEDULED_RETRY_INTERVAL = 300
 
 # 退避 sleep 钩子：默认 time.sleep，测试可 monkeypatch 为空操作。
 _backoff_sleep: Callable[[float], None] = time.sleep
@@ -126,23 +132,29 @@ def deliver_event(event_type: str, payload: dict[str, Any], *, wait: bool = Fals
             t.join()
 
 
-def _deliver_one(subscription_id: int, event_type: str, payload: dict[str, Any]) -> None:
-    """单订阅投递：含指数退避重试，最终写一条 DeliveryLog.
+def _deliver_one(subscription_id: int, event_type: str, payload: dict[str, Any]) -> WebhookDeliveryLog | None:
+    """单订阅投递：含指数退避重试，最终写一条 DeliveryLog 并返回.
 
     线程入口函数，不向上抛异常（所有异常被捕获并记录到日志字段）。
+    投递失败（status 非 2xx）时日志 ``next_retry_at`` 设为
+    ``now + _SCHEDULED_RETRY_INTERVAL``，标记待调度重投；成功时保持 None。
+
+    Returns:
+        创建的 :class:`WebhookDeliveryLog`；订阅不存在或日志写入失败时返回 None。
     """
     started_at = timezone.now()
     last_status: int | None = None
     last_body = ""
     last_error = ""
     retry_count = 0
+    created_log: WebhookDeliveryLog | None = None
 
     try:
         try:
             sub = WebhookSubscription.objects.get(pk=subscription_id)
         except WebhookSubscription.DoesNotExist:  # type: ignore[missing-attribute]
             logger.warning("Webhook 订阅 %s 不存在，跳过投递", subscription_id)
-            return
+            return None
 
         body_bytes = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
         signature = hmac.new(
@@ -182,14 +194,16 @@ def _deliver_one(subscription_id: int, event_type: str, payload: dict[str, Any])
         finished_at = timezone.now()
         duration_ms = int((finished_at - started_at).total_seconds() * 1000)
         try:
-            from .models import WebhookDeliveryLog
-
-            WebhookDeliveryLog.objects.create(
+            next_retry_at: datetime | None = None
+            if not _is_success(last_status):
+                next_retry_at = timezone.now() + timedelta(seconds=_SCHEDULED_RETRY_INTERVAL)
+            created_log = WebhookDeliveryLog.objects.create(
                 subscription_id=subscription_id,
                 event_type=event_type,
                 payload=payload,
                 status_code=last_status,
                 retry_count=retry_count,
+                next_retry_at=next_retry_at,
                 response_body=last_body,
                 error_message=last_error,
                 started_at=started_at,
@@ -200,6 +214,48 @@ def _deliver_one(subscription_id: int, event_type: str, payload: dict[str, Any])
             logger.exception("Webhook DeliveryLog 写入失败: subscription_id=%s", subscription_id)
         finally:
             connections.close_all()
+    return created_log
 
 
-__all__ = ["deliver_event"]
+def redeliver(log_id: int) -> WebhookDeliveryLog | None:
+    """按源日志 ID 重新投递（手动/调度入口）.
+
+    读源日志 → 清其 ``next_retry_at``（避免重复调度）→ 在独立线程同步调
+    :func:`_deliver_one` 用原始 ``event_type`` + ``payload`` 投递 → 返回新日志。
+    原日志保留作审计，不修改除 ``next_retry_at`` 外的字段。
+
+    在独立线程执行投递（阻塞等待完成），避免 ``_deliver_one`` 的
+    ``connections.close_all()`` 关闭调用方线程（API 请求/管理命令）的 DB 连接。
+
+    Args:
+        log_id: 源 :class:`WebhookDeliveryLog` 主键。
+
+    Returns:
+        新创建的 :class:`WebhookDeliveryLog`；源日志不存在或订阅不存在时返回 None。
+    """
+    try:
+        source = WebhookDeliveryLog.objects.get(pk=log_id)
+    except WebhookDeliveryLog.DoesNotExist:  # type: ignore[missing-attribute]
+        logger.warning("Webhook 重投：源日志 %s 不存在", log_id)
+        return None
+
+    # 清除源日志的 next_retry_at，避免调度器重复重投
+    if source.next_retry_at is not None:
+        source.next_retry_at = None
+        source.save(update_fields=["next_retry_at"])
+
+    sub_id = source.subscription_id
+    event_type = source.event_type
+    payload_copy = dict(source.payload)
+    result: list[WebhookDeliveryLog | None] = [None]
+
+    def _run() -> None:
+        result[0] = _deliver_one(sub_id, event_type, payload_copy)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    thread.join()
+    return result[0]
+
+
+__all__ = ["deliver_event", "redeliver"]

@@ -8,6 +8,8 @@
 - ``wait=True`` 时同步等待后台线程完成。
 - 无匹配订阅时不发起投递。
 - 事件分发匹配订阅的 events 列表。
+- 投递失败时 ``next_retry_at`` 标记待调度重投；成功时为 None。
+- ``redeliver`` 按源日志 ID 重投，创建新日志并清源日志 ``next_retry_at``。
 """
 
 from __future__ import annotations
@@ -16,12 +18,13 @@ import hashlib
 import hmac
 import json
 from collections.abc import Callable
+from datetime import timedelta
 from typing import Any
 
 import pytest
 from apps.accounts.models import Role, User
 from apps.webhook import deliverer
-from apps.webhook.deliverer import _PostResult, deliver_event
+from apps.webhook.deliverer import _PostResult, deliver_event, redeliver
 from apps.webhook.models import WebhookDeliveryLog, WebhookSubscription
 from django.utils import timezone
 
@@ -384,3 +387,192 @@ def test_emit_sync_completed_event_called_from_sync_service(
     assert delivered_payload["config_id"] == config.pk
     assert delivered_payload["status"] == SyncLogStatus.SUCCESS
     assert delivered_payload["rows_written"] == 8
+
+
+# ================================================================
+# next_retry_at 标记
+# ================================================================
+
+
+@pytest.mark.django_db(transaction=True)
+def test_next_retry_at_none_on_success(make_user: Callable[..., User], monkeypatch: pytest.MonkeyPatch) -> None:
+    """投递成功时 next_retry_at 应为 None."""
+    admin = make_user(role=Role.ADMIN)
+    _make_sub(admin)
+    _, stub = _capture_post_calls()
+    monkeypatch.setattr(deliverer, "_http_post", stub)
+
+    deliver_event("sync.completed", {"k": "v"}, wait=True)
+
+    log = WebhookDeliveryLog.objects.get()
+    assert log.status_code == 200
+    assert log.next_retry_at is None
+
+
+@pytest.mark.django_db(transaction=True)
+def test_next_retry_at_set_on_failure(make_user: Callable[..., User], monkeypatch: pytest.MonkeyPatch) -> None:
+    """投递全部失败时 next_retry_at 应设为 now + _SCHEDULED_RETRY_INTERVAL."""
+    admin = make_user(role=Role.ADMIN)
+    _make_sub(admin)
+
+    def _always_fail(url: str, body: bytes, headers: dict[str, str], timeout: int) -> _PostResult:
+        return _PostResult(status_code=503, body="unavailable", error="")
+
+    monkeypatch.setattr(deliverer, "_http_post", _always_fail)
+
+    before = timezone.now()
+    deliver_event("sync.completed", {"k": "v"}, wait=True)
+    after = timezone.now()
+
+    log = WebhookDeliveryLog.objects.get()
+    assert log.status_code == 503
+    assert log.next_retry_at is not None
+    # next_retry_at 应在 [before + 299s, after + 301s] 范围内（允许 1s 抖动）
+    expected_min = before + timedelta(seconds=deliverer._SCHEDULED_RETRY_INTERVAL - 1)
+    expected_max = after + timedelta(seconds=deliverer._SCHEDULED_RETRY_INTERVAL + 1)
+    assert expected_min <= log.next_retry_at <= expected_max
+
+
+@pytest.mark.django_db(transaction=True)
+def test_next_retry_at_none_on_network_error(make_user: Callable[..., User], monkeypatch: pytest.MonkeyPatch) -> None:
+    """网络异常（status_code=None）全部失败时 next_retry_at 也应设置."""
+    admin = make_user(role=Role.ADMIN)
+    _make_sub(admin)
+
+    def _network_error(url: str, body: bytes, headers: dict[str, str], timeout: int) -> _PostResult:
+        return _PostResult(status_code=None, body="", error="URLError: timeout")
+
+    monkeypatch.setattr(deliverer, "_http_post", _network_error)
+
+    deliver_event("sync.completed", {"k": "v"}, wait=True)
+
+    log = WebhookDeliveryLog.objects.get()
+    assert log.status_code is None
+    assert log.next_retry_at is not None
+
+
+# ================================================================
+# redeliver 重投
+# ================================================================
+
+
+@pytest.mark.django_db(transaction=True)
+def test_redeliver_creates_new_log_with_original_payload(
+    make_user: Callable[..., User], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """redeliver 应以源日志的 event_type+payload 创建新日志."""
+    admin = make_user(role=Role.ADMIN)
+    sub = _make_sub(admin)
+    calls, stub = _capture_post_calls()
+    monkeypatch.setattr(deliverer, "_http_post", stub)
+
+    # 创建源日志（模拟一次失败的投递）
+    source = WebhookDeliveryLog.objects.create(
+        subscription=sub,
+        event_type="sync.completed",
+        payload={"config_id": 42, "status": "success"},
+        status_code=503,
+        retry_count=5,
+        next_retry_at=timezone.now() + timedelta(seconds=300),
+        response_body="err",
+        error_message="失败",
+        started_at=timezone.now(),
+        finished_at=timezone.now(),
+        duration_ms=100,
+    )
+
+    new_log = redeliver(source.pk)
+
+    assert new_log is not None
+    assert new_log.pk != source.pk
+    assert new_log.subscription_id == sub.pk
+    assert new_log.event_type == "sync.completed"
+    assert new_log.payload == {"config_id": 42, "status": "success"}
+    assert new_log.status_code == 200  # stub 返回成功
+    assert new_log.next_retry_at is None  # 成功不设 next_retry_at
+    # 应发起一次 HTTP POST
+    assert len(calls) == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_redeliver_clears_source_next_retry_at(make_user: Callable[..., User], monkeypatch: pytest.MonkeyPatch) -> None:
+    """redeliver 应清源日志的 next_retry_at，避免调度器重复重投."""
+    admin = make_user(role=Role.ADMIN)
+    sub = _make_sub(admin)
+    _, stub = _capture_post_calls()
+    monkeypatch.setattr(deliverer, "_http_post", stub)
+
+    source = WebhookDeliveryLog.objects.create(
+        subscription=sub,
+        event_type="sync.completed",
+        payload={"k": "v"},
+        status_code=503,
+        started_at=timezone.now(),
+        next_retry_at=timezone.now() + timedelta(seconds=300),
+    )
+    assert source.next_retry_at is not None
+
+    redeliver(source.pk)
+
+    source.refresh_from_db()
+    assert source.next_retry_at is None
+
+
+@pytest.mark.django_db(transaction=True)
+def test_redeliver_nonexistent_log_returns_none(make_user: Callable[..., User]) -> None:
+    """redeliver 不存在的日志 ID 应返回 None."""
+    result = redeliver(99999)
+    assert result is None
+
+
+@pytest.mark.django_db(transaction=True)
+def test_redeliver_subscription_deleted_returns_none(
+    make_user: Callable[..., User], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """redeliver 源日志的订阅已删除时应返回 None（CASCADE 会删日志，此处测边界）."""
+    admin = make_user(role=Role.ADMIN)
+    sub = _make_sub(admin)
+    _, stub = _capture_post_calls()
+    monkeypatch.setattr(deliverer, "_http_post", stub)
+
+    source = WebhookDeliveryLog.objects.create(
+        subscription=sub,
+        event_type="sync.completed",
+        payload={"k": "v"},
+        status_code=503,
+        started_at=timezone.now(),
+    )
+    # 删除订阅（CASCADE 会同时删除源日志）
+    sub.delete()
+
+    result = redeliver(source.pk)
+    assert result is None
+
+
+@pytest.mark.django_db(transaction=True)
+def test_redeliver_failure_sets_next_retry_on_new_log(
+    make_user: Callable[..., User], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """redeliver 重投失败时新日志应设 next_retry_at（形成调度循环）."""
+    admin = make_user(role=Role.ADMIN)
+    sub = _make_sub(admin)
+
+    def _always_fail(url: str, body: bytes, headers: dict[str, str], timeout: int) -> _PostResult:
+        return _PostResult(status_code=500, body="err", error="")
+
+    monkeypatch.setattr(deliverer, "_http_post", _always_fail)
+
+    source = WebhookDeliveryLog.objects.create(
+        subscription=sub,
+        event_type="sync.completed",
+        payload={"k": "v"},
+        status_code=503,
+        started_at=timezone.now(),
+        next_retry_at=timezone.now() + timedelta(seconds=300),
+    )
+
+    new_log = redeliver(source.pk)
+
+    assert new_log is not None
+    assert new_log.status_code == 500
+    assert new_log.next_retry_at is not None  # 失败设 next_retry_at
