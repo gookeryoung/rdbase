@@ -576,3 +576,267 @@ def test_redeliver_failure_sets_next_retry_on_new_log(
     assert new_log is not None
     assert new_log.status_code == 500
     assert new_log.next_retry_at is not None  # 失败设 next_retry_at
+
+
+@pytest.mark.django_db(transaction=True)
+def test_redeliver_http_post_raises_exception(make_user: Callable[..., User], monkeypatch: pytest.MonkeyPatch) -> None:
+    """_http_post 抛异常时 _deliver_one 应捕获并记录 error，仍创建日志."""
+    admin = make_user(role=Role.ADMIN)
+    sub = _make_sub(admin)
+
+    def _raise(url: str, body: bytes, headers: dict[str, str], timeout: int) -> _PostResult:
+        raise RuntimeError("连接池耗尽")
+
+    monkeypatch.setattr(deliverer, "_http_post", _raise)
+
+    source = WebhookDeliveryLog.objects.create(
+        subscription=sub,
+        event_type="sync.completed",
+        payload={"k": "v"},
+        status_code=503,
+        started_at=timezone.now(),
+    )
+
+    new_log = redeliver(source.pk)
+
+    assert new_log is not None
+    assert new_log.status_code is None  # 未收到响应
+    assert "连接池耗尽" in new_log.error_message or "投递过程异常" in new_log.error_message
+    assert new_log.next_retry_at is not None  # 失败设 next_retry_at
+
+
+@pytest.mark.django_db(transaction=True)
+def test_redeliver_source_next_retry_at_already_none(
+    make_user: Callable[..., User], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """源日志 next_retry_at 已为 None（如成功日志手动重投）时不应报错."""
+    admin = make_user(role=Role.ADMIN)
+    sub = _make_sub(admin)
+    _, stub = _capture_post_calls()
+    monkeypatch.setattr(deliverer, "_http_post", stub)
+
+    source = WebhookDeliveryLog.objects.create(
+        subscription=sub,
+        event_type="sync.completed",
+        payload={"k": "v"},
+        status_code=200,
+        started_at=timezone.now(),
+        next_retry_at=None,
+    )
+
+    new_log = redeliver(source.pk)
+
+    assert new_log is not None
+    assert new_log.status_code == 200
+    # 源日志 next_retry_at 保持 None，save 不应报错
+    source.refresh_from_db()
+    assert source.next_retry_at is None
+
+
+@pytest.mark.django_db(transaction=True)
+def test_redeliver_source_status_code_none(make_user: Callable[..., User], monkeypatch: pytest.MonkeyPatch) -> None:
+    """源日志 status_code 为 None（原网络异常）时重投应正常执行."""
+    admin = make_user(role=Role.ADMIN)
+    sub = _make_sub(admin)
+    _, stub = _capture_post_calls()
+    monkeypatch.setattr(deliverer, "_http_post", stub)
+
+    source = WebhookDeliveryLog.objects.create(
+        subscription=sub,
+        event_type="ingest.completed",
+        payload={"url": "https://x.com"},
+        status_code=None,
+        error_message="URLError: timeout",
+        started_at=timezone.now(),
+        next_retry_at=timezone.now() + timedelta(seconds=300),
+    )
+
+    new_log = redeliver(source.pk)
+
+    assert new_log is not None
+    assert new_log.status_code == 200  # stub 返回成功
+    assert new_log.event_type == "ingest.completed"
+    assert new_log.payload == {"url": "https://x.com"}
+
+
+@pytest.mark.django_db(transaction=True)
+def test_redeliver_preserves_source_fields(make_user: Callable[..., User], monkeypatch: pytest.MonkeyPatch) -> None:
+    """重投不应修改源日志除 next_retry_at 外的任何字段."""
+    admin = make_user(role=Role.ADMIN)
+    sub = _make_sub(admin)
+    _, stub = _capture_post_calls()
+    monkeypatch.setattr(deliverer, "_http_post", stub)
+
+    source = WebhookDeliveryLog.objects.create(
+        subscription=sub,
+        event_type="sync.completed",
+        payload={"original": True},
+        status_code=503,
+        retry_count=5,
+        response_body="original error",
+        error_message="原失败原因",
+        started_at=timezone.now() - timedelta(hours=1),
+        finished_at=timezone.now() - timedelta(hours=1),
+        duration_ms=9999,
+        next_retry_at=timezone.now() + timedelta(seconds=300),
+    )
+
+    redeliver(source.pk)
+
+    source.refresh_from_db()
+    assert source.event_type == "sync.completed"
+    assert source.payload == {"original": True}
+    assert source.status_code == 503
+    assert source.retry_count == 5
+    assert source.response_body == "original error"
+    assert source.error_message == "原失败原因"
+    assert source.duration_ms == 9999
+    # 唯一应改变的字段
+    assert source.next_retry_at is None
+
+
+@pytest.mark.django_db(transaction=True)
+def test_redeliver_flaky_then_success(make_user: Callable[..., User], monkeypatch: pytest.MonkeyPatch) -> None:
+    """重投过程中先失败后成功应触发内联重试，最终日志记录成功."""
+    admin = make_user(role=Role.ADMIN)
+    sub = _make_sub(admin)
+
+    call_count = {"n": 0}
+
+    def _flaky(url: str, body: bytes, headers: dict[str, str], timeout: int) -> _PostResult:
+        call_count["n"] += 1
+        if call_count["n"] < 3:
+            return _PostResult(status_code=503, body="err", error="")
+        return _PostResult(status_code=200, body="ok", error="")
+
+    monkeypatch.setattr(deliverer, "_http_post", _flaky)
+
+    source = WebhookDeliveryLog.objects.create(
+        subscription=sub,
+        event_type="sync.completed",
+        payload={"k": "v"},
+        status_code=503,
+        started_at=timezone.now(),
+        next_retry_at=timezone.now() + timedelta(seconds=300),
+    )
+
+    new_log = redeliver(source.pk)
+
+    assert new_log is not None
+    assert call_count["n"] == 3  # 2 次失败 + 1 次成功
+    assert new_log.status_code == 200
+    assert new_log.retry_count == 2
+    assert new_log.next_retry_at is None
+
+
+@pytest.mark.django_db(transaction=True)
+def test_redeliver_new_log_retry_count_starts_from_zero(
+    make_user: Callable[..., User], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """新日志 retry_count 应从 0 开始，不继承源日志的重试次数."""
+    admin = make_user(role=Role.ADMIN)
+    sub = _make_sub(admin)
+    _, stub = _capture_post_calls()
+    monkeypatch.setattr(deliverer, "_http_post", stub)
+
+    source = WebhookDeliveryLog.objects.create(
+        subscription=sub,
+        event_type="sync.completed",
+        payload={"k": "v"},
+        status_code=503,
+        retry_count=5,  # 源日志已重试 5 次
+        started_at=timezone.now(),
+    )
+
+    new_log = redeliver(source.pk)
+
+    assert new_log is not None
+    assert new_log.retry_count == 0  # 新日志重新计数
+    assert new_log.status_code == 200
+
+
+@pytest.mark.django_db(transaction=True)
+def test_redeliver_nested_payload(make_user: Callable[..., User], monkeypatch: pytest.MonkeyPatch) -> None:
+    """源日志 payload 含嵌套结构时重投应完整传递."""
+    admin = make_user(role=Role.ADMIN)
+    sub = _make_sub(admin)
+    calls, stub = _capture_post_calls()
+    monkeypatch.setattr(deliverer, "_http_post", stub)
+
+    nested_payload = {
+        "config_id": 42,
+        "details": {"rows_read": 100, "rows_written": 95},
+        "tags": ["sync", "batch"],
+        "meta": {"user": {"id": 1, "name": "alice"}},
+    }
+    source = WebhookDeliveryLog.objects.create(
+        subscription=sub,
+        event_type="sync.completed",
+        payload=nested_payload,
+        status_code=503,
+        started_at=timezone.now(),
+    )
+
+    new_log = redeliver(source.pk)
+
+    assert new_log is not None
+    assert new_log.payload == nested_payload
+    # 验证投递时 body 确实包含嵌套结构
+    assert len(calls) == 1
+    delivered_body = json.loads(calls[0]["body"].decode("utf-8"))
+    assert delivered_body == nested_payload
+
+
+@pytest.mark.django_db(transaction=True)
+def test_redeliver_empty_payload(make_user: Callable[..., User], monkeypatch: pytest.MonkeyPatch) -> None:
+    """源日志 payload 为空 dict 时重投应正常执行."""
+    admin = make_user(role=Role.ADMIN)
+    sub = _make_sub(admin)
+    _, stub = _capture_post_calls()
+    monkeypatch.setattr(deliverer, "_http_post", stub)
+
+    source = WebhookDeliveryLog.objects.create(
+        subscription=sub,
+        event_type="sync.completed",
+        payload={},
+        status_code=503,
+        started_at=timezone.now(),
+    )
+
+    new_log = redeliver(source.pk)
+
+    assert new_log is not None
+    assert new_log.payload == {}
+    assert new_log.status_code == 200
+
+
+@pytest.mark.django_db(transaction=True)
+def test_redeliver_consecutive_calls_on_same_source(
+    make_user: Callable[..., User], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """连续重投同一条源日志应创建多条新日志，不报错."""
+    admin = make_user(role=Role.ADMIN)
+    sub = _make_sub(admin)
+    _, stub = _capture_post_calls()
+    monkeypatch.setattr(deliverer, "_http_post", stub)
+
+    source = WebhookDeliveryLog.objects.create(
+        subscription=sub,
+        event_type="sync.completed",
+        payload={"k": "v"},
+        status_code=503,
+        started_at=timezone.now(),
+        next_retry_at=timezone.now() + timedelta(seconds=300),
+    )
+
+    log1 = redeliver(source.pk)
+    log2 = redeliver(source.pk)
+
+    assert log1 is not None
+    assert log2 is not None
+    assert log1.pk != log2.pk
+    assert log1.pk != source.pk
+    assert log2.pk != source.pk
+    # 第二次重投时 next_retry_at 已为 None，save 不应报错
+    source.refresh_from_db()
+    assert source.next_retry_at is None
