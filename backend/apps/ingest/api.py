@@ -39,6 +39,7 @@ from apps.ingest.models import (
     IngestAlert,
     IngestFieldMapping,
     IngestLog,
+    IngestQualityReport,
     IngestTask,
     SourceType,
 )
@@ -46,6 +47,8 @@ from apps.ingest.schemas import (
     IngestAlertOut,
     IngestFieldMappingOut,
     IngestLogOut,
+    IngestQualityReportOut,
+    IngestQualitySummaryOut,
     IngestRunOut,
     IngestStatsOut,
     IngestTaskCreateIn,
@@ -153,6 +156,23 @@ def _log_to_out(log: IngestLog) -> IngestLogOut:
         started_at=log.started_at,
         finished_at=log.finished_at,
         duration_ms=log.duration_ms,
+    )
+
+
+def _quality_report_to_out(report: IngestQualityReport) -> IngestQualityReportOut:
+    """质量报告模型转输出."""
+    return IngestQualityReportOut(
+        id=report.pk,
+        task_id=report.task_id,
+        log_id=report.log_id,
+        field=report.field,
+        rule=report.rule,
+        total_count=report.total_count,
+        passed_count=report.passed_count,
+        failed_count=report.failed_count,
+        pass_rate=report.pass_rate,
+        failure_samples=cast(list[Any], report.failure_samples or []),
+        created_at=report.created_at,  # type: ignore[missing-attribute]
     )
 
 
@@ -373,6 +393,39 @@ def list_task_logs(request: HttpRequest, task_id: int) -> HttpResponse:  # noqa:
     logs = task.logs.order_by("-started_at")[:100]
     body = [_log_to_out(log).model_dump(mode="json") for log in logs]
     return JsonResponse(body, safe=False)
+
+
+@router.get("/tasks/{task_id}/quality-reports", response=list[IngestQualityReportOut])
+def list_task_quality_reports(request: HttpRequest, task_id: int) -> HttpResponse:
+    """列出指定任务的数据质量报告（默认最近 100 条）.
+
+    可选 ``?log_id=N`` 限定某次执行的报告。
+    """
+    task = _get_task_or_404(task_id)
+    qs = task.quality_reports.all()
+    log_id = request.GET.get("log_id")
+    if log_id and log_id.isdigit():
+        qs = qs.filter(log_id=int(log_id))
+    reports = qs.order_by("-created_at")[:100]
+    body = [_quality_report_to_out(r).model_dump(mode="json") for r in reports]
+    return JsonResponse(body, safe=False)
+
+
+@router.get("/tasks/{task_id}/quality-summary", response=IngestQualitySummaryOut)
+def get_task_quality_summary(request: HttpRequest, task_id: int) -> HttpResponse:  # noqa: ARG001
+    """返回指定任务最近一批质量报告的汇总摘要."""
+    _get_task_or_404(task_id)
+    summary = IngestQualityReport.aggregate_summary(task_id)
+    body = IngestQualitySummaryOut(
+        task_id=task_id,
+        total_rules=summary["total_rules"],
+        avg_pass_rate=summary["avg_pass_rate"],
+        worst_field=summary["worst_field"],
+        worst_rule=summary["worst_rule"],
+        total_failures=summary["total_failures"],
+        last_report_at=summary["last_report_at"],
+    ).model_dump(mode="json")
+    return JsonResponse(body)
 
 
 @router.get("/alerts", response=list[IngestAlertOut])

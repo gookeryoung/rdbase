@@ -32,7 +32,8 @@ class BaseIngestSpider(Spider):
     - conflict_strategy: 冲突策略
     - batch_size: 批量大小
     - clean_config: 清洗配置（CleaningPipeline 读取，空字典时透传不清洗）
-    - task_id: 任务 ID（用于去重命名空间）
+    - validation_config: 校验配置（ValidationPipeline 读取，空字典时透传不校验）
+    - task_id: 任务 ID（用于去重命名空间与质量报告关联）
 
     基类默认不发请求（start_urls 为空），子类应覆写 :meth:`parse`。
     """
@@ -52,6 +53,7 @@ class BaseIngestSpider(Spider):
         conflict_strategy: str = "upsert",
         batch_size: int = 500,
         clean_config: dict[str, Any] | None = None,
+        validation_config: dict[str, Any] | None = None,
         task_id: int | None = None,
         **kwargs: Any,
     ) -> None:
@@ -66,6 +68,7 @@ class BaseIngestSpider(Spider):
         self.conflict_strategy = conflict_strategy
         self.batch_size = batch_size
         self.clean_config: dict[str, Any] = clean_config or {}
+        self.validation_config: dict[str, Any] = validation_config or {}
         self.task_id = task_id
         # 基类不发请求；子类按源类型设置 start_urls
         self.start_urls: list[str] = []
@@ -102,6 +105,7 @@ class BaseIngestSpider(Spider):
             conflict_strategy=task.conflict_strategy,
             batch_size=task.batch_size,
             clean_config=cast(dict[str, Any], task.clean_config or {}),
+            validation_config=cast(dict[str, Any], task.validation_config or {}),
             task_id=task.pk,
         )
 

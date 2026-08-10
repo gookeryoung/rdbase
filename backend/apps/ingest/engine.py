@@ -250,6 +250,7 @@ def _build_spider_kwargs(task: IngestTask) -> dict[str, Any]:
         "conflict_strategy": task.conflict_strategy,
         "batch_size": task.batch_size,
         "clean_config": cast(dict[str, Any], task.clean_config or {}),
+        "validation_config": cast(dict[str, Any], task.validation_config or {}),
         "task_id": task.pk,
     }
 
@@ -268,6 +269,7 @@ def _build_scrapy_settings(task: IngestTask) -> dict[str, Any]:
         "COOKIES_ENABLED": bool(request_config.get("cookies_enabled", False)),
         "ITEM_PIPELINES": {
             "apps.ingest.cleaning.CleaningPipeline": 200,
+            "apps.ingest.validation.ValidationPipeline": 250,
             "apps.ingest.pipelines.FieldMappingPipeline": 300,
         },
     }

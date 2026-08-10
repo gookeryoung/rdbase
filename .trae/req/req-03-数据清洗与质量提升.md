@@ -37,9 +37,9 @@ P8 是 P7 数据爬取的纵深增强：
 
 ### P8-Q2 质量校验
 
-- [ ] 41 ValidationPipeline + 6 类规则（必填/范围/正则/枚举/唯一/引用完整性/自定义表达式）。
-- [ ] 42 IngestQualityReport 模型（任务/字段/规则/通过率/失败样本）+ API + 前端质量报告页。
-- [ ] 43 Pipeline 顺序固定为 Spider → CleaningPipeline(200) → ValidationPipeline(250) →
+- [x] 41 ValidationPipeline + 6 类规则（必填/范围/正则/枚举/唯一/引用完整性/自定义表达式）。
+- [x] 42 IngestQualityReport 模型（任务/字段/规则/通过率/失败样本）+ API + 前端质量报告页。
+- [x] 43 Pipeline 顺序固定为 Spider → CleaningPipeline(200) → ValidationPipeline(250) →
   FieldMappingPipeline(300)。
 
 ### P8-Q3 质量监控告警

@@ -953,6 +953,32 @@ export interface IngestStats {
   total_rows_skipped: number;
 }
 
+// 数据质量报告（P8-Q2）
+export interface IngestQualityReport {
+  id: number;
+  task_id: number;
+  log_id: number;
+  field: string;
+  rule: string;
+  total_count: number;
+  passed_count: number;
+  failed_count: number;
+  pass_rate: number;
+  failure_samples: Array<{ value: unknown; reason: string }>;
+  created_at: string;
+}
+
+// 数据质量汇总摘要（P8-Q2）
+export interface IngestQualitySummary {
+  task_id: number;
+  total_rules: number;
+  avg_pass_rate: number;
+  worst_field: string;
+  worst_rule: string;
+  total_failures: number;
+  last_report_at: string | null;
+}
+
 // ----------------- 系统运维（P8） -----------------
 
 // 健康状态

@@ -2,6 +2,8 @@ import client from "./client";
 import type {
   IngestAlert,
   IngestLog,
+  IngestQualityReport,
+  IngestQualitySummary,
   IngestRunResult,
   IngestStats,
   IngestTask,
@@ -58,3 +60,23 @@ export const getIngestStats = (days?: number): Promise<IngestStats> => {
     .get<IngestStats>("/ingest/stats", { params })
     .then((res) => res.data);
 };
+
+// 列出指定任务的数据质量报告（可选 ?log_id=N 限定某次执行）
+export const listIngestQualityReports = (
+  taskId: number,
+  logId?: number,
+): Promise<IngestQualityReport[]> => {
+  const params: Record<string, unknown> = {};
+  if (logId !== undefined) params.log_id = logId;
+  return client
+    .get<IngestQualityReport[]>(`/ingest/tasks/${taskId}/quality-reports`, { params })
+    .then((res) => res.data);
+};
+
+// 获取指定任务最近一批质量报告的汇总摘要
+export const getIngestQualitySummary = (
+  taskId: number,
+): Promise<IngestQualitySummary> =>
+  client
+    .get<IngestQualitySummary>(`/ingest/tasks/${taskId}/quality-summary`)
+    .then((res) => res.data);

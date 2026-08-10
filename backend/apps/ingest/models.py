@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Any
 
 from django.conf import settings
 from django.db import models
@@ -386,6 +387,97 @@ class IngestLog(models.Model):
         )
 
 
+class IngestQualityReport(models.Model):
+    """爬取数据质量报告.
+
+    每次爬取执行后由 :class:`apps.ingest.validation.ValidationPipeline` 按字段/规则
+    聚合写入：记录该 (task, field, rule) 组合的通过总数与失败样本（最多 N 个）。
+    同一次执行同一字段同一规则只产生一条记录。
+
+    - pass_rate：通过率（0-100，保留一位小数），无样本时为 100。
+    - failure_samples：失败样本数组（JSON），每条形如 ``{"value": ..., "reason": ...}``。
+    """
+
+    objects: models.Manager[IngestQualityReport]
+
+    task = models.ForeignKey(
+        IngestTask,
+        on_delete=models.CASCADE,
+        related_name="quality_reports",
+        verbose_name="爬取任务",
+    )
+    log = models.ForeignKey(
+        IngestLog,
+        on_delete=models.CASCADE,
+        related_name="quality_reports",
+        verbose_name="执行日志",
+    )
+    field = models.CharField(max_length=128, verbose_name="字段名")
+    rule = models.CharField(max_length=32, verbose_name="规则类型")
+    total_count = models.PositiveIntegerField(default=0, verbose_name="样本总数")
+    passed_count = models.PositiveIntegerField(default=0, verbose_name="通过数")
+    failed_count = models.PositiveIntegerField(default=0, verbose_name="失败数")
+    pass_rate = models.FloatField(default=100.0, verbose_name="通过率（百分比）")
+    failure_samples = models.JSONField(default=list, blank=True, verbose_name="失败样本")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
+
+    class Meta:
+        verbose_name = "数据质量报告"
+        verbose_name_plural = "数据质量报告"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["task", "-created_at"], name="ingest_qr_task_idx"),
+            models.Index(fields=["log"], name="ingest_qr_log_idx"),
+        ]
+
+    def __str__(self) -> str:  # type: ignore[missing-override-decorator]
+        return f"{self.task.name} {self.field}:{self.rule} {self.pass_rate}% ({self.pk})"  # type: ignore[bad-return]
+
+    @classmethod
+    def aggregate_summary(cls, task_id: int) -> dict[str, Any]:
+        """聚合某任务最近一批质量报告的摘要.
+
+        取该任务最新一条报告所属 log 的全部报告作为同一批汇总：
+
+        - total_rules: 规则数
+        - avg_pass_rate: 平均通过率
+        - worst_field: 通过率最低的字段名
+        - worst_rule: 通过率最低的规则类型
+        - total_failures: 失败样本总数
+
+        Args:
+            task_id: 爬取任务 ID。
+
+        Returns:
+            dict: 摘要字典，无报告时各项为 0/空。
+        """
+        latest = cls.objects.filter(task_id=task_id).order_by("-created_at").first()
+        if latest is None:
+            return {
+                "total_rules": 0,
+                "avg_pass_rate": 0.0,
+                "worst_field": "",
+                "worst_rule": "",
+                "total_failures": 0,
+                "last_report_at": None,
+            }
+        # 取 latest 所属 log 的全部报告作为同一批
+        batch = cls.objects.filter(task_id=task_id, log_id=latest.log_id)
+        reports = list(batch)
+        total = len(reports)
+        avg = round(sum(r.pass_rate for r in reports) / total, 1) if total else 0.0
+        worst = min(reports, key=lambda r: r.pass_rate) if reports else None
+        total_failures = sum(r.failed_count for r in reports)
+        return {
+            "total_rules": total,
+            "avg_pass_rate": avg,
+            "worst_field": worst.field if worst else "",
+            "worst_rule": worst.rule if worst else "",
+            "total_failures": total_failures,
+            "last_report_at": latest.created_at,
+        }
+
+
 class IngestAlert(models.Model):
     """爬取告警记录.
 
@@ -457,6 +549,7 @@ __all__ = [
     "IngestFieldMapping",
     "IngestLog",
     "IngestLogStatus",
+    "IngestQualityReport",
     "IngestStats",
     "IngestStatus",
     "IngestTask",

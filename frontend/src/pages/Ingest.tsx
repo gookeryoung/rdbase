@@ -32,6 +32,7 @@ import {
   PlayCircleOutlined,
   PlusOutlined,
   ReloadOutlined,
+  SafetyCertificateOutlined,
 } from "@ant-design/icons";
 
 import {
@@ -39,7 +40,9 @@ import {
   createIngestTask,
   deleteIngestTask,
   getIngestStats,
+  getIngestQualitySummary,
   listIngestAlerts,
+  listIngestQualityReports,
   listIngestTaskLogs,
   listIngestTasks,
   runIngestTask,
@@ -55,6 +58,8 @@ import type {
   IngestFieldMapping,
   IngestLog,
   IngestLogStatus,
+  IngestQualityReport,
+  IngestQualitySummary,
   IngestRunResult,
   IngestSourceType,
   IngestStats,
@@ -169,6 +174,18 @@ const defaultCleanConfig = (): Record<string, unknown> => ({
   dedup: { enabled: false, fields: [], ttl_hours: 24 },
 });
 
+// 校验配置默认模板（点击「填充模板」时使用，P8-Q2）
+const defaultValidationConfig = (): Record<string, unknown> => ({
+  rules: [
+    { field: "name", op: "required" },
+    { field: "age", op: "range", min: 0, max: 150 },
+    { field: "email", op: "regex", pattern: "^[^@]+@[^@]+$" },
+    { field: "status", op: "enum", values: ["active", "inactive"] },
+    { field: "id", op: "unique" },
+    { field: "age", op: "expression", expr: "value > 0" },
+  ],
+});
+
 export default function IngestPage() {
   const [tasks, setTasks] = useState<IngestTask[]>([]);
   const [datasources, setDatasources] = useState<DataSource[]>([]);
@@ -204,6 +221,13 @@ export default function IngestPage() {
   const [monitorLoading, setMonitorLoading] = useState(false);
   const [statsDays, setStatsDays] = useState<number | null>(7);
   const [onlyUnacked, setOnlyUnacked] = useState(true);
+
+  // 质量报告（P8-Q2）
+  const [qualityReports, setQualityReports] = useState<IngestQualityReport[]>([]);
+  const [qualitySummary, setQualitySummary] = useState<IngestQualitySummary | null>(null);
+  const [qualityOpen, setQualityOpen] = useState(false);
+  const [viewingQualityTaskId, setViewingQualityTaskId] = useState<number | null>(null);
+  const [qualityLoading, setQualityLoading] = useState(false);
 
   // --- 数据加载 ---
   const loadTasks = useCallback(async () => {
@@ -243,6 +267,23 @@ export default function IngestPage() {
       setUnackCount(data.length);
     } catch {
       // 徽标辅助信息
+    }
+  }, []);
+
+  const loadQuality = useCallback(async (taskId?: number) => {
+    if (!taskId) return;
+    setQualityLoading(true);
+    try {
+      const [reports, summary] = await Promise.all([
+        listIngestQualityReports(taskId),
+        getIngestQualitySummary(taskId),
+      ]);
+      setQualityReports(reports);
+      setQualitySummary(summary);
+    } catch {
+      message.error("加载质量报告失败");
+    } finally {
+      setQualityLoading(false);
     }
   }, []);
 
@@ -562,6 +603,14 @@ export default function IngestPage() {
     setLogsOpen(true);
   };
 
+  const handleViewQuality = (taskId: number) => {
+    setViewingQualityTaskId(taskId);
+    setQualityReports([]);
+    setQualitySummary(null);
+    setQualityOpen(true);
+    loadQuality(taskId);
+  };
+
   const handleAckAlert = async (id: number) => {
     try {
       await ackIngestAlert(id);
@@ -651,7 +700,7 @@ export default function IngestPage() {
     },
     {
       title: "操作",
-      width: 200,
+      width: 230,
       render: (_, record) => (
         <Space size={0}>
           <Button
@@ -660,6 +709,13 @@ export default function IngestPage() {
             icon={<EyeOutlined />}
             onClick={() => handleViewLogs(record.id)}
             title="查看日志"
+          />
+          <Button
+            type="link"
+            size="small"
+            icon={<SafetyCertificateOutlined />}
+            onClick={() => handleViewQuality(record.id)}
+            title="查看质量报告"
           />
           <Button
             type="link"
@@ -716,6 +772,73 @@ export default function IngestPage() {
       dataIndex: "error_message",
       ellipsis: true,
       render: (v: string) => v || "-",
+    },
+  ];
+
+  const qualityReportColumns: ColumnsType<IngestQualityReport> = [
+    { title: "字段", dataIndex: "field", width: 140, ellipsis: true },
+    {
+      title: "规则",
+      dataIndex: "rule",
+      width: 100,
+      render: (r: string) => <Tag color="blue">{r}</Tag>,
+    },
+    {
+      title: "总数",
+      dataIndex: "total_count",
+      width: 70,
+      align: "right" as const,
+    },
+    {
+      title: "通过",
+      dataIndex: "passed_count",
+      width: 70,
+      align: "right" as const,
+    },
+    {
+      title: "失败",
+      dataIndex: "failed_count",
+      width: 70,
+      align: "right" as const,
+      render: (v: number) => (
+        <Text type={v > 0 ? "danger" : "secondary"}>{v}</Text>
+      ),
+    },
+    {
+      title: "通过率",
+      dataIndex: "pass_rate",
+      width: 100,
+      render: (v: number) => (
+        <Tag color={v >= 90 ? "success" : v >= 70 ? "warning" : "error"}>
+          {v.toFixed(1)}%
+        </Tag>
+      ),
+    },
+    {
+      title: "失败样本",
+      dataIndex: "failure_samples",
+      ellipsis: true,
+      render: (samples: Array<{ value: unknown; reason: string }>) => {
+        if (!samples || samples.length === 0) {
+          return <Text type="secondary">-</Text>;
+        }
+        const preview = samples
+          .slice(0, 3)
+          .map((s) => JSON.stringify(s.value))
+          .join(", ");
+        return (
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {preview}
+            {samples.length > 3 ? ` ... (+${samples.length - 3})` : ""}
+          </Text>
+        );
+      },
+    },
+    {
+      title: "报告时间",
+      dataIndex: "created_at",
+      width: 160,
+      render: (v: string) => new Date(v).toLocaleString("zh-CN"),
     },
   ];
 
@@ -1431,7 +1554,7 @@ export default function IngestPage() {
               />
             </Form.Item>
 
-            {/* 校验配置（P8-Q2 预留） */}
+            {/* 校验配置（P8-Q2） */}
             <Space
               style={{
                 width: "100%",
@@ -1440,27 +1563,41 @@ export default function IngestPage() {
                 marginBottom: 8,
               }}
             >
-              <Text strong>校验配置（P8-Q2 预留）</Text>
-              <Button
-                size="small"
-                onClick={() => setValidationConfigDraftJson("{}")}
-              >
-                清空
-              </Button>
+              <Text strong>校验配置（P8-Q2）</Text>
+              <Space size="small">
+                <Button
+                  size="small"
+                  onClick={() =>
+                    setValidationConfigDraftJson(
+                      JSON.stringify(defaultValidationConfig(), null, 2),
+                    )
+                  }
+                >
+                  填充模板
+                </Button>
+                <Button
+                  size="small"
+                  onClick={() => setValidationConfigDraftJson("{}")}
+                >
+                  清空
+                </Button>
+              </Space>
             </Space>
             <Form.Item
               validateStatus={validationConfigJsonError ? "error" : ""}
               help={
                 validationConfigJsonError ||
-                "JSON 对象。当前预留，P8-Q2 将启用必填/范围/正则/枚举/唯一/引用完整性规则"
+                "JSON 对象。rules 数组按序执行 required/range/regex/enum/unique/expression；校验失败不丢弃，记录到质量报告"
               }
             >
               <TextArea
                 value={validationConfigDraftJson}
                 onChange={(e) => setValidationConfigDraftJson(e.target.value)}
-                rows={4}
+                rows={8}
                 style={{ fontFamily: "monospace", fontSize: 12 }}
-                placeholder="{}"
+                placeholder={
+                  '{\n  "rules": [\n    {"field": "name", "op": "required"},\n    {"field": "age", "op": "range", "min": 0, "max": 150},\n    {"field": "email", "op": "regex", "pattern": "^[^@]+@[^@]+$"},\n    {"field": "status", "op": "enum", "values": ["active", "inactive"]},\n    {"field": "id", "op": "unique"},\n    {"field": "age", "op": "expression", "expr": "value > 0"}\n  ]\n}'
+                }
               />
             </Form.Item>
           </Form>
@@ -1501,6 +1638,89 @@ export default function IngestPage() {
           pagination={{ pageSize: 20 }}
           locale={{ emptyText: "暂无日志记录" }}
         />
+      </Modal>
+
+      {/* 质量报告对话框（P8-Q2） */}
+      <Modal
+        open={qualityOpen}
+        title={
+          <span>
+            数据质量报告
+            {viewingQualityTaskId && (
+              <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
+                （任务 #{viewingQualityTaskId}）
+              </Text>
+            )}
+          </span>
+        }
+        onCancel={() => setQualityOpen(false)}
+        footer={null}
+        width={960}
+      >
+        <Space style={{ marginBottom: 8, width: "100%", justifyContent: "flex-end" }}>
+          <Button
+            size="small"
+            icon={<ReloadOutlined />}
+            onClick={() => loadQuality(viewingQualityTaskId ?? undefined)}
+          >
+            刷新
+          </Button>
+        </Space>
+        {qualityLoading ? (
+          <div style={{ textAlign: "center", padding: 40 }}>
+            <Spin tip="加载质量报告中..." />
+          </div>
+        ) : (
+          <>
+            <Row gutter={16} style={{ marginBottom: 16 }}>
+              <Col span={6}>
+                <Statistic
+                  title="规则数"
+                  value={qualitySummary?.total_rules ?? 0}
+                />
+              </Col>
+              <Col span={6}>
+                <Statistic
+                  title="平均通过率"
+                  value={qualitySummary?.avg_pass_rate ?? 0}
+                  suffix="%"
+                  valueStyle={{
+                    color:
+                      (qualitySummary?.avg_pass_rate ?? 100) >= 90
+                        ? "#3f8600"
+                        : (qualitySummary?.avg_pass_rate ?? 100) >= 70
+                          ? "#faad14"
+                          : "#cf1322",
+                  }}
+                />
+              </Col>
+              <Col span={6}>
+                <Statistic
+                  title="失败样本"
+                  value={qualitySummary?.total_failures ?? 0}
+                  valueStyle={{
+                    color: (qualitySummary?.total_failures ?? 0) > 0 ? "#cf1322" : undefined,
+                  }}
+                />
+              </Col>
+              <Col span={6}>
+                <Statistic
+                  title="最差字段"
+                  value={qualitySummary?.worst_field || "-"}
+                  suffix={qualitySummary?.worst_rule ? ` (${qualitySummary.worst_rule})` : ""}
+                />
+              </Col>
+            </Row>
+            <Table
+              columns={qualityReportColumns}
+              dataSource={qualityReports}
+              rowKey="id"
+              size="small"
+              pagination={{ pageSize: 20 }}
+              locale={{ emptyText: "暂无质量报告（任务尚未执行或未配置校验规则）" }}
+            />
+          </>
+        )}
       </Modal>
 
       {/* 执行结果对话框 */}

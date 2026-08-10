@@ -186,3 +186,55 @@ class IngestTriggerOut(BaseModel):
     returncode: int
     log: IngestLogOut | None = None
     stderr: str = ""
+
+
+class IngestQualityReportOut(BaseModel):
+    """爬取数据质量报告输出.
+
+    Attributes:
+        id: 报告 ID。
+        task_id: 爬取任务 ID。
+        log_id: 关联的执行日志 ID。
+        field: 字段名。
+        rule: 规则类型（required/range/regex/enum/unique/expression）。
+        total_count: 样本总数。
+        passed_count: 通过数。
+        failed_count: 失败数。
+        pass_rate: 通过率（0-100，保留一位小数）。
+        failure_samples: 失败样本数组（最多 20 条）。
+        created_at: 报告创建时间。
+    """
+
+    id: int
+    task_id: int
+    log_id: int
+    field: str
+    rule: str
+    total_count: int
+    passed_count: int
+    failed_count: int
+    pass_rate: float
+    failure_samples: list[Any]
+    created_at: datetime
+
+
+class IngestQualitySummaryOut(BaseModel):
+    """爬取任务最近一批质量报告的汇总摘要.
+
+    Attributes:
+        task_id: 爬取任务 ID。
+        total_rules: 规则数。
+        avg_pass_rate: 平均通过率。
+        worst_field: 通过率最低的字段名。
+        worst_rule: 通过率最低的规则类型。
+        total_failures: 失败样本总数。
+        last_report_at: 最近一次报告时间，无报告时为 None。
+    """
+
+    task_id: int
+    total_rules: int
+    avg_pass_rate: float
+    worst_field: str
+    worst_rule: str
+    total_failures: int
+    last_report_at: datetime | None = None
