@@ -919,6 +919,7 @@ export interface IngestLog {
   started_at: string;
   finished_at: string | null;
   duration_ms: number;
+  quality_score: number;
 }
 
 // 爬取告警
@@ -951,6 +952,19 @@ export interface IngestStats {
   total_rows_read: number;
   total_rows_written: number;
   total_rows_skipped: number;
+  avg_quality_score: number;
+}
+
+// 字段健康度（P8-Q3）
+export interface IngestFieldHealth {
+  field: string;
+  rule: string;
+  avg_pass_rate: number;
+  total_checks: number;
+  total_failures: number;
+  last_pass_rate: number;
+  last_report_at: string;
+  samples: number;
 }
 
 // 数据质量报告（P8-Q2）

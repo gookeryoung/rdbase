@@ -27,7 +27,12 @@ CleaningPipeline(200) 与 FieldMappingPipeline(300) 之间（ITEM_PIPELINES 数�
 - ``ingest_rows_invalid``：至少有一条规则失败的 item 数（去重计数）
 
 close_spider 时按 (field, rule) 聚合统计写入 :class:`IngestQualityReport`，
-关联到任务最近一次 IngestLog。
+关联到任务最近一次 IngestLog。同时按校验通过率加权计算 ``quality_score``
+（0-100）写回 IngestLog.quality_score；当分数低于阈值时产生 :class:`IngestAlert`
+告警（WARNING/ERROR），阈值由 validation_config.quality_thresholds 配置：
+
+- ``warning``：默认 80，低于此值产生 WARNING 告警
+- ``critical``：默认 60，低于此值产生 ERROR 告警
 """
 
 from __future__ import annotations
@@ -42,9 +47,14 @@ _STATS_TOTAL = "ingest_validation_total"
 _STATS_PASSED = "ingest_validation_passed"
 _STATS_FAILED = "ingest_validation_failed"
 _STATS_INVALID_ROWS = "ingest_rows_invalid"
+_STATS_QUALITY_SCORE = "ingest_quality_score"
 
 # 每条规则最多保留的失败样本数
 MAX_SAMPLES_PER_RULE = 20
+
+# 默认质量分阈值（validation_config.quality_thresholds 可覆盖）
+DEFAULT_WARNING_THRESHOLD = 80.0
+DEFAULT_CRITICAL_THRESHOLD = 60.0
 
 
 # ----------------------------------------------------------------
@@ -263,6 +273,29 @@ def _coerce_sample(value: Any) -> Any:
     return str(value)[:500]
 
 
+def _coerce_threshold(value: Any, default: float) -> float:
+    """将配置中的阈值转为 float，非法时回退到默认值.
+
+    Args:
+        value: 配置原值（可能是 int/float/str/None）。
+        default: 回退默认值。
+
+    Returns:
+        float: 阈值（0-100 范围，超出则截断到此范围）。
+    """
+    if value is None:
+        return default
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return default
+    if num < 0:
+        return 0.0
+    if num > 100:
+        return 100.0
+    return num
+
+
 # ----------------------------------------------------------------
 # ValidationPipeline
 # ----------------------------------------------------------------
@@ -291,6 +324,9 @@ class ValidationPipeline:
         self._total_checks: int = 0
         self._passed_checks: int = 0
         self._failed_checks: int = 0
+        # 质量分阈值（open_spider 时从 validation_config.quality_thresholds 读取）
+        self._warning_threshold: float = DEFAULT_WARNING_THRESHOLD
+        self._critical_threshold: float = DEFAULT_CRITICAL_THRESHOLD
 
     @classmethod
     def from_crawler(cls, crawler: Any) -> ValidationPipeline:  # type: ignore[missing-override-decorator, override]
@@ -308,6 +344,11 @@ class ValidationPipeline:
         if isinstance(rules, list):
             self._rules = [r for r in rules if isinstance(r, dict) and r.get("op") in _VALIDATORS]
         self._task_id = getattr(spider, "task_id", None)
+        # 读取质量分阈值（容错：非数字时保持默认）
+        thresholds = validation_config.get("quality_thresholds") or {}
+        if isinstance(thresholds, dict):
+            self._warning_threshold = _coerce_threshold(thresholds.get("warning"), DEFAULT_WARNING_THRESHOLD)
+            self._critical_threshold = _coerce_threshold(thresholds.get("critical"), DEFAULT_CRITICAL_THRESHOLD)
         # 初始化每条规则的统计累加器与 unique seen set
         for rule in self._rules:
             field = str(rule.get("field", ""))
@@ -376,34 +417,73 @@ class ValidationPipeline:
                 self._stats.inc_value(_STATS_INVALID_ROWS)
         return item
 
+    def _compute_quality_score(self) -> float:
+        """计算本次执行的质量分（0-100，保留一位小数）.
+
+        按校验次数加权通过率：``_passed_checks / _total_checks * 100``。
+        无校验记录时为 100（视为全部通过）。
+        """
+        if self._total_checks == 0:
+            return 100.0
+        return round(self._passed_checks / self._total_checks * 100, 1)
+
+    def _maybe_raise_quality_alert(self, task: Any, quality_score: float) -> None:
+        """按阈值产生质量告警.
+
+        - quality_score < critical_threshold：ERROR 告警
+        - quality_score < warning_threshold：WARNING 告警
+        - 否则不产生告警
+
+        Args:
+            task: 爬取任务实例（用于关联告警）。
+            quality_score: 本次执行的质量分。
+        """
+        from apps.ingest.models import AlertLevel, IngestAlert
+
+        if quality_score < self._critical_threshold:
+            level = AlertLevel.ERROR
+            message = f"数据质量分过低：{quality_score}/100 （低于 CRITICAL 阈值 {self._critical_threshold}）"
+        elif quality_score < self._warning_threshold:
+            level = AlertLevel.WARNING
+            message = f"数据质量分偏低：{quality_score}/100 （低于 WARNING 阈值 {self._warning_threshold}）"
+        else:
+            return
+        IngestAlert.raise_alert(task, message, level=level)
+
     def close_spider(self, spider: Any) -> None:  # type: ignore[missing-override-decorator]  # noqa: ARG002
-        """聚合规则统计写入 IngestQualityReport.
+        """聚合规则统计写入 IngestQualityReport，并写 quality_score 与告警.
 
         - 写入 stats 总计。
+        - 计算质量分并写入 stats（``ingest_quality_score``）。
         - 按规则批量创建 IngestQualityReport，关联到任务最近一次 IngestLog。
+        - 更新 IngestLog.quality_score；按阈值产生 IngestAlert。
         - 无 task_id 或无 log 时仅写 stats，不创建报告。
         """
+        quality_score = self._compute_quality_score()
         if self._stats is not None:
             try:
                 self._stats.set_value(_STATS_TOTAL, self._total_checks)
                 self._stats.set_value(_STATS_PASSED, self._passed_checks)
                 self._stats.set_value(_STATS_FAILED, self._failed_checks)
                 self._stats.set_value(_STATS_INVALID_ROWS, self._invalid_rows)
+                self._stats.set_value(_STATS_QUALITY_SCORE, quality_score)
             except Exception:  # pragma: no cover - stats 收集器异常不应中断主流程
                 logger.debug("写入校验统计失败", exc_info=True)
 
-        if not self._rule_stats:
-            return
         if self._task_id is None:
             return
 
         # 延迟导入避免循环依赖（models 在 apps.ready 时可能未就绪）
-        from apps.ingest.models import IngestLog, IngestQualityReport
+        from apps.ingest.models import IngestLog, IngestQualityReport, IngestTask
 
         log = IngestLog.objects.filter(task_id=self._task_id).order_by("-started_at").first()
         if log is None:
             logger.warning("校验报告未关联日志：task_id=%s 无 IngestLog 记录", self._task_id)
             return
+
+        # 写回 IngestLog.quality_score（即使无规则也写入 100，确保字段非空）
+        log.quality_score = quality_score
+        log.save(update_fields=["quality_score"])
 
         objs = [
             IngestQualityReport(
@@ -423,8 +503,19 @@ class ValidationPipeline:
         if objs:
             IngestQualityReport.objects.bulk_create(objs)
 
+        # 阈值告警（仅在有校验规则时触发，避免无规则任务产生噪声告警）
+        if self._rules:
+            try:
+                task = IngestTask.objects.get(pk=self._task_id)
+            except IngestTask.DoesNotExist:  # pragma: no cover - task 不应缺失
+                logger.warning("质量告警未触发：task_id=%s 不存在", self._task_id)
+                return
+            self._maybe_raise_quality_alert(task, quality_score)
+
 
 __all__ = [
+    "DEFAULT_CRITICAL_THRESHOLD",
+    "DEFAULT_WARNING_THRESHOLD",
     "MAX_SAMPLES_PER_RULE",
     "ValidationPipeline",
 ]

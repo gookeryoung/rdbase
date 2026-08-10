@@ -1,6 +1,7 @@
 import client from "./client";
 import type {
   IngestAlert,
+  IngestFieldHealth,
   IngestLog,
   IngestQualityReport,
   IngestQualitySummary,
@@ -80,3 +81,28 @@ export const getIngestQualitySummary = (
   client
     .get<IngestQualitySummary>(`/ingest/tasks/${taskId}/quality-summary`)
     .then((res) => res.data);
+
+// 获取全局字段健康度（按 field+rule 聚合最近 N 次报告）
+export const getIngestFieldHealth = (
+  taskId?: number,
+  recent?: number,
+): Promise<IngestFieldHealth[]> => {
+  const params: Record<string, unknown> = {};
+  if (taskId !== undefined) params.task_id = taskId;
+  if (recent !== undefined) params.recent = recent;
+  return client
+    .get<IngestFieldHealth[]>("/ingest/field-health", { params })
+    .then((res) => res.data);
+};
+
+// 获取指定任务的字段健康度
+export const getIngestTaskFieldHealth = (
+  taskId: number,
+  recent?: number,
+): Promise<IngestFieldHealth[]> => {
+  const params: Record<string, unknown> = {};
+  if (recent !== undefined) params.recent = recent;
+  return client
+    .get<IngestFieldHealth[]>(`/ingest/tasks/${taskId}/field-health`, { params })
+    .then((res) => res.data);
+};

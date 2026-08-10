@@ -39,6 +39,7 @@ import {
   ackIngestAlert,
   createIngestTask,
   deleteIngestTask,
+  getIngestFieldHealth,
   getIngestStats,
   getIngestQualitySummary,
   listIngestAlerts,
@@ -55,6 +56,7 @@ import type {
   IngestAlert,
   IngestAuthType,
   IngestConflictStrategy,
+  IngestFieldHealth,
   IngestFieldMapping,
   IngestLog,
   IngestLogStatus,
@@ -221,6 +223,8 @@ export default function IngestPage() {
   const [monitorLoading, setMonitorLoading] = useState(false);
   const [statsDays, setStatsDays] = useState<number | null>(7);
   const [onlyUnacked, setOnlyUnacked] = useState(true);
+  // 字段健康度（P8-Q3）
+  const [fieldHealth, setFieldHealth] = useState<IngestFieldHealth[]>([]);
 
   // 质量报告（P8-Q2）
   const [qualityReports, setQualityReports] = useState<IngestQualityReport[]>([]);
@@ -290,12 +294,14 @@ export default function IngestPage() {
   const loadMonitor = useCallback(async () => {
     setMonitorLoading(true);
     try {
-      const [statsData, alertData] = await Promise.all([
+      const [statsData, alertData, fieldHealthData] = await Promise.all([
         getIngestStats(statsDays ?? undefined),
         listIngestAlerts(!onlyUnacked),
+        getIngestFieldHealth(undefined, 10),
       ]);
       setStats(statsData);
       setAlerts(alertData);
+      setFieldHealth(fieldHealthData);
       setUnackCount(onlyUnacked ? alertData.length : alertData.filter((a) => !a.acknowledged).length);
     } catch {
       message.error("加载监控数据失败");
@@ -760,6 +766,25 @@ export default function IngestPage() {
     { title: "读取", dataIndex: "rows_read", width: 70, align: "right" as const },
     { title: "写入", dataIndex: "rows_written", width: 70, align: "right" as const },
     { title: "跳过", dataIndex: "rows_skipped", width: 70, align: "right" as const },
+    {
+      title: "质量分",
+      dataIndex: "quality_score",
+      width: 90,
+      align: "right" as const,
+      render: (v: number) => (
+        <Tag
+          color={
+            v === undefined || v >= 90
+              ? "success"
+              : v >= 70
+                ? "warning"
+                : "error"
+          }
+        >
+          {v === undefined ? "-" : Number(v).toFixed(1)}
+        </Tag>
+      ),
+    },
     { title: "耗时(ms)", dataIndex: "duration_ms", width: 100, align: "right" as const },
     {
       title: "开始时间",
@@ -898,6 +923,66 @@ export default function IngestPage() {
             确认
           </Button>
         ),
+    },
+  ];
+
+  const fieldHealthColumns: ColumnsType<IngestFieldHealth> = [
+    { title: "字段", dataIndex: "field", width: 140, ellipsis: true },
+    {
+      title: "规则",
+      dataIndex: "rule",
+      width: 100,
+      render: (r: string) => <Tag color="blue">{r}</Tag>,
+    },
+    {
+      title: "平均通过率",
+      dataIndex: "avg_pass_rate",
+      width: 110,
+      align: "right" as const,
+      render: (v: number) => (
+        <Tag color={v >= 90 ? "success" : v >= 70 ? "warning" : "error"}>
+          {Number(v).toFixed(1)}%
+        </Tag>
+      ),
+    },
+    {
+      title: "最近通过率",
+      dataIndex: "last_pass_rate",
+      width: 110,
+      align: "right" as const,
+      render: (v: number) => (
+        <Text type={v >= 90 ? "success" : v >= 70 ? "warning" : "danger"}>
+          {Number(v).toFixed(1)}%
+        </Text>
+      ),
+    },
+    {
+      title: "检查次数",
+      dataIndex: "total_checks",
+      width: 90,
+      align: "right" as const,
+    },
+    {
+      title: "失败次数",
+      dataIndex: "total_failures",
+      width: 90,
+      align: "right" as const,
+      render: (v: number) => (
+        <Text type={v > 0 ? "danger" : "secondary"}>{v}</Text>
+      ),
+    },
+    {
+      title: "样本数",
+      dataIndex: "samples",
+      width: 70,
+      align: "right" as const,
+      render: (v: number) => <Text type="secondary">{v}</Text>,
+    },
+    {
+      title: "最近报告",
+      dataIndex: "last_report_at",
+      width: 160,
+      render: (v: string) => new Date(v).toLocaleString("zh-CN"),
     },
   ];
 
@@ -1885,9 +1970,34 @@ export default function IngestPage() {
               <Statistic title="累计写入行" value={stats?.total_rows_written ?? 0} />
             </Col>
             <Col span={6}>
-              <Statistic title="累计跳过行" value={stats?.total_rows_skipped ?? 0} />
+              <Statistic
+                title="平均质量分"
+                value={stats?.avg_quality_score ?? 0}
+                precision={1}
+                valueStyle={{
+                  color:
+                    (stats?.avg_quality_score ?? 100) >= 80
+                      ? "#3f8600"
+                      : (stats?.avg_quality_score ?? 100) >= 60
+                        ? "#faad14"
+                        : "#cf1322",
+                }}
+              />
             </Col>
           </Row>
+
+          <Title level={5} style={{ margin: 0, marginBottom: 8 }}>
+            字段健康度（P8-Q3，按平均通过率升序，最差字段在前）
+          </Title>
+          <Table
+            columns={fieldHealthColumns}
+            dataSource={fieldHealth}
+            rowKey={(r) => `${r.field}:${r.rule}`}
+            size="small"
+            pagination={{ pageSize: 10 }}
+            style={{ marginBottom: 16 }}
+            locale={{ emptyText: "暂无字段健康度数据（任务未配置校验规则或尚未执行）" }}
+          />
 
           <Title level={5} style={{ margin: 0, marginBottom: 8 }}>
             失败告警

@@ -135,6 +135,7 @@ class IngestLogOut(BaseModel):
     started_at: datetime
     finished_at: datetime | None = None
     duration_ms: int
+    quality_score: float = 100.0
 
 
 class IngestAlertOut(BaseModel):
@@ -170,6 +171,33 @@ class IngestStatsOut(BaseModel):
     total_rows_read: int
     total_rows_written: int
     total_rows_skipped: int
+    avg_quality_score: float = 0.0
+
+
+class IngestFieldHealthOut(BaseModel):
+    """爬取字段健康度输出（P8-Q3）.
+
+    按 (field, rule) 聚合历史质量报告，用于监控面板字段健康度展示。
+
+    Attributes:
+        field: 字段名。
+        rule: 规则类型。
+        avg_pass_rate: 最近 N 次平均通过率。
+        total_checks: 最近 N 次累计检查次数。
+        total_failures: 最近 N 次累计失败次数。
+        last_pass_rate: 最近一次通过率（趋势指示）。
+        last_report_at: 最近一次报告时间。
+        samples: 参与统计的样本数。
+    """
+
+    field: str
+    rule: str
+    avg_pass_rate: float
+    total_checks: int
+    total_failures: int
+    last_pass_rate: float
+    last_report_at: datetime
+    samples: int
 
 
 class IngestTriggerOut(BaseModel):

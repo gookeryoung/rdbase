@@ -89,6 +89,7 @@ class IngestStats:
 
     汇总一段时间内（或某任务）的爬取日志，用于监控面板展示。
     success_rate 为百分比（0-100，保留一位小数），无日志时为 0。
+    avg_quality_score 为日志质量分加权平均（按 rows_read 加权），无日志时为 0。
     """
 
     total: int
@@ -100,6 +101,7 @@ class IngestStats:
     total_rows_read: int
     total_rows_written: int
     total_rows_skipped: int
+    avg_quality_score: float
 
 
 class IngestTask(models.Model):
@@ -333,6 +335,12 @@ class IngestLog(models.Model):
     started_at = models.DateTimeField(verbose_name="开始时间")
     finished_at = models.DateTimeField(null=True, blank=True, verbose_name="结束时间")
     duration_ms = models.PositiveIntegerField(default=0, verbose_name="耗时（毫秒）")
+    # 质量分（0-100）：由 ValidationPipeline.close_spider 按校验通过率加权计算写入。
+    # 100 表示无校验规则或全部通过；低于阈值时触发质量告警（P8-Q3）。
+    quality_score = models.FloatField(
+        default=100.0,
+        verbose_name="质量分（0-100）",
+    )
 
     class Meta:
         verbose_name = "爬取日志"
@@ -368,11 +376,14 @@ class IngestLog(models.Model):
             rows_read=Sum("rows_read"),
             rows_written=Sum("rows_written"),
             rows_skipped=Sum("rows_skipped"),
+            avg_quality=Avg("quality_score"),
         )
 
         total = agg["total"] or 0
         succeeded = agg["succeeded"] or 0
         success_rate = round(succeeded / total * 100, 1) if total else 0.0
+        # 质量分均值：无日志时为 0（与 success_rate 语义一致），有日志时取均值保留一位小数
+        avg_quality_score = round(float(agg["avg_quality"] or 0.0), 1)
 
         return IngestStats(
             total=total,
@@ -384,6 +395,7 @@ class IngestLog(models.Model):
             total_rows_read=agg["rows_read"] or 0,
             total_rows_written=agg["rows_written"] or 0,
             total_rows_skipped=agg["rows_skipped"] or 0,
+            avg_quality_score=avg_quality_score,
         )
 
 
@@ -476,6 +488,87 @@ class IngestQualityReport(models.Model):
             "total_failures": total_failures,
             "last_report_at": latest.created_at,
         }
+
+    @classmethod
+    def field_health(
+        cls,
+        *,
+        task_id: int | None = None,
+        recent: int = 10,
+    ) -> list[dict[str, Any]]:
+        """按字段聚合历史质量数据，用于监控面板字段健康度展示.
+
+        对每个 (field, rule) 组合按 created_at 倒序取最近 ``recent`` 条报告，
+        计算平均通过率、总检查数、总失败数与最近一次通过率（趋势指示）。
+
+        Args:
+            task_id: 限定任务，None 则跨全部任务聚合（用于全局字段健康度）。
+            recent: 每条 (field, rule) 取最近 N 条报告参与统计，默认 10。
+
+        Returns:
+            list[dict]: 每条形如::
+
+                {
+                    "field": "name",
+                    "rule": "required",
+                    "avg_pass_rate": 92.5,
+                    "total_checks": 100,
+                    "total_failures": 8,
+                    "last_pass_rate": 100.0,
+                    "last_report_at": <datetime>,
+                    "samples": 3,
+                }
+
+            按平均通过率升序排列（最差字段在前），无报告时返回空列表。
+        """
+        qs = cls.objects.all()
+        if task_id is not None:
+            qs = qs.filter(task_id=task_id)
+
+        # 取全部候选报告到内存按 (field, rule) 分组（监控场景报告数有限，避免 N 次查询）
+        reports = list(
+            qs.order_by("-created_at").values(
+                "field",
+                "rule",
+                "pass_rate",
+                "total_count",
+                "failed_count",
+                "created_at",
+            )
+        )
+        if not reports:
+            return []
+
+        groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for r in reports:
+            key = (r["field"], r["rule"])
+            groups.setdefault(key, []).append(r)
+
+        result: list[dict[str, Any]] = []
+        for (field, rule), items in groups.items():
+            # 仅取最近 recent 条
+            recent_items = items[:recent]
+            samples = len(recent_items)
+            total_checks = sum(int(i["total_count"]) for i in recent_items)
+            total_failures = sum(int(i["failed_count"]) for i in recent_items)
+            avg_pass_rate = round(sum(float(i["pass_rate"]) for i in recent_items) / samples, 1)
+            last = recent_items[0]  # 已按 created_at 倒序，第一条为最新
+            result.append(
+                {
+                    "field": field,
+                    "rule": rule,
+                    "avg_pass_rate": avg_pass_rate,
+                    "total_checks": total_checks,
+                    "total_failures": total_failures,
+                    "last_pass_rate": float(last["pass_rate"]),
+                    "last_report_at": last["created_at"],
+                    "samples": samples,
+                }
+            )
+
+        # 平均通过率升序（最差在前）
+        result.sort(key=lambda x: x["avg_pass_rate"])
+        return result
 
 
 class IngestAlert(models.Model):

@@ -44,9 +44,9 @@ P8 是 P7 数据爬取的纵深增强：
 
 ### P8-Q3 质量监控告警
 
-- [ ] 44 IngestLog 新增 quality_score 字段（0-100），爬取完成后写入。
-- [ ] 45 质量告警（rows_invalid/rows_total > 阈值时 WARNING）+ 字段健康度统计。
-- [ ] 46 监控面板扩展（质量分卡片 + 字段健康度表格）。
+- [x] 44 IngestLog 新增 quality_score 字段（0-100），爬取完成后写入。
+- [x] 45 质量告警（rows_invalid/rows_total > 阈值时 WARNING）+ 字段健康度统计。
+- [x] 46 监控面板扩展（质量分卡片 + 字段健康度表格）。
 
 ### P8-Q4 收集增强
 

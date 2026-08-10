@@ -45,6 +45,7 @@ from apps.ingest.models import (
 )
 from apps.ingest.schemas import (
     IngestAlertOut,
+    IngestFieldHealthOut,
     IngestFieldMappingOut,
     IngestLogOut,
     IngestQualityReportOut,
@@ -156,6 +157,7 @@ def _log_to_out(log: IngestLog) -> IngestLogOut:
         started_at=log.started_at,
         finished_at=log.finished_at,
         duration_ms=log.duration_ms,
+        quality_score=log.quality_score,
     )
 
 
@@ -488,8 +490,68 @@ def get_stats(request: HttpRequest) -> HttpResponse:
         total_rows_read=stats.total_rows_read,
         total_rows_written=stats.total_rows_written,
         total_rows_skipped=stats.total_rows_skipped,
+        avg_quality_score=stats.avg_quality_score,
     ).model_dump(mode="json")
     return JsonResponse(body)
+
+
+@router.get("/field-health", response=list[IngestFieldHealthOut])
+def list_field_health(request: HttpRequest) -> HttpResponse:
+    """全局字段健康度（按 field+rule 聚合最近 N 次报告，最差在前）.
+
+    可选查询参数：
+    - ``?task_id=N``：限定任务
+    - ``?recent=10``：每条 (field, rule) 取最近 N 条报告参与统计（默认 10，上限 100）
+    """
+    task_id_param = request.GET.get("task_id")
+    task_id = int(task_id_param) if task_id_param and task_id_param.isdigit() else None
+    recent_param = request.GET.get("recent")
+    recent = int(recent_param) if recent_param and recent_param.isdigit() else 10
+    # 上限保护，避免恶意传入超大值拖慢查询
+    recent = max(1, min(recent, 100))
+    items = IngestQualityReport.field_health(task_id=task_id, recent=recent)
+    body = [
+        IngestFieldHealthOut(
+            field=it["field"],
+            rule=it["rule"],
+            avg_pass_rate=it["avg_pass_rate"],
+            total_checks=it["total_checks"],
+            total_failures=it["total_failures"],
+            last_pass_rate=it["last_pass_rate"],
+            last_report_at=it["last_report_at"],
+            samples=it["samples"],
+        ).model_dump(mode="json")
+        for it in items
+    ]
+    return JsonResponse(body, safe=False)
+
+
+@router.get("/tasks/{task_id}/field-health", response=list[IngestFieldHealthOut])
+def list_task_field_health(request: HttpRequest, task_id: int) -> HttpResponse:
+    """指定任务的字段健康度（按 field+rule 聚合最近 N 次报告）.
+
+    可选查询参数：
+    - ``?recent=10``：每条 (field, rule) 取最近 N 条报告参与统计（默认 10，上限 100）
+    """
+    _get_task_or_404(task_id)
+    recent_param = request.GET.get("recent")
+    recent = int(recent_param) if recent_param and recent_param.isdigit() else 10
+    recent = max(1, min(recent, 100))
+    items = IngestQualityReport.field_health(task_id=task_id, recent=recent)
+    body = [
+        IngestFieldHealthOut(
+            field=it["field"],
+            rule=it["rule"],
+            avg_pass_rate=it["avg_pass_rate"],
+            total_checks=it["total_checks"],
+            total_failures=it["total_failures"],
+            last_pass_rate=it["last_pass_rate"],
+            last_report_at=it["last_report_at"],
+            samples=it["samples"],
+        ).model_dump(mode="json")
+        for it in items
+    ]
+    return JsonResponse(body, safe=False)
 
 
 # ================================================================
