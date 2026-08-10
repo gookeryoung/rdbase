@@ -76,6 +76,7 @@ rdbase/
 - **P3 数据库设计**：可视化建表与 ER 图（已完成）
 - **P4 数据库管理**：数据 CRUD + SQL 控制台（已完成）
 - **P5 系统管理与部署**：可生产部署（已完成）
+- **P6 数据同步增强**：定时调度闭环、监控告警、增量冲突与并发、源方言化（已完成）
 
 完整需求见 `.trae/req/req-01-数据库管理平台.md`。
 
@@ -242,6 +243,97 @@ Redis 是健壮性模块的基础设施，用于：
 | `REDIS_FAKE` | 开发环境用 fakeredis 模拟（生产环境必须留空） |
 
 开发环境未配置 `REDIS_URL` 时自动降级为本地内存（fakeredis 兜底），不阻断业务。生产环境建议配置 `REDIS_URL` 启用跨进程共享。
+
+## 数据同步
+
+数据同步模块（`apps/sync`）将 rdbase 平台库的表数据按配置定期或手动推送到外部数据源（MySQL/PostgreSQL/SQLite），形成「平台库 → 外部数据源」的单向数据流。支持全量与增量两种模式，配合定时调度、监控告警形成闭环。
+
+### 核心概念
+
+| 概念 | 说明 |
+|------|------|
+| **SyncConfig** | 同步任务配置：源表 → 目标数据源/表，含字段映射、冲突策略、调度设置 |
+| **SyncFieldMapping** | 字段映射：源字段 → 目标字段，支持直接映射与常量写入 |
+| **SyncLog** | 同步执行日志：每次执行的状态、读写行数、耗时、错误信息 |
+| **SyncAlert** | 同步告警记录：重试耗尽仍失败时产生，需人工确认处理 |
+| **SyncMode** | 同步模式：`full`（全量）/ `incremental`（增量，按 `timestamp_field` 筛选） |
+| **ConflictStrategy** | 主键冲突策略：`upsert`（更新）/ `skip`（跳过）/ `error`（报错回滚） |
+
+### API 端点
+
+| 端点 | 用途 |
+|------|------|
+| `GET /api/v1/sync/configs` | 列出同步配置 |
+| `POST /api/v1/sync/configs` | 创建同步配置 |
+| `GET /api/v1/sync/configs/{id}` | 获取单个配置 |
+| `PATCH /api/v1/sync/configs/{id}` | 更新配置 |
+| `DELETE /api/v1/sync/configs/{id}` | 删除配置 |
+| `POST /api/v1/sync/configs/{id}/trigger` | 手动触发同步（支持 `Idempotency-Key`、分布式锁） |
+| `POST /api/v1/sync/configs/{id}/preview` | 预览将要同步的数据（不实际写入） |
+| `POST /api/v1/sync/configs/{id}/schedule` | 更新调度设置（启用/禁用、cron、最大重试） |
+| `POST /api/v1/sync/batch-trigger` | 批量触发多个配置（支持并发 `max_workers`、`stop_on_error`） |
+| `POST /api/v1/sync/scheduled` | 执行所有到期的定时任务（一次性触发） |
+| `GET /api/v1/sync/logs?config_id=&limit=` | 列出同步日志 |
+| `GET /api/v1/sync/source-columns?table=` | 读取源表（平台库）列信息 |
+| `GET /api/v1/sync/target-columns?datasource_id=&table=` | 读取目标表列信息 |
+| `GET /api/v1/sync/stats?config_id=&days=` | 同步统计（成功率、平均耗时、读写行数） |
+| `GET /api/v1/sync/alerts?config_id=&acknowledged=&level=&limit=` | 列出告警（含未确认计数） |
+| `POST /api/v1/sync/alerts/{alert_id}/ack` | 确认告警 |
+
+所有端点需管理员权限。
+
+### 监控与告警
+
+监控数据来源于 `SyncLog` 与 `SyncAlert` 两个模型：
+
+- **统计接口** `GET /sync/stats`：通过 `SyncLog.aggregate_stats(config_id, days)` 聚合，返回成功率（仅完全成功计入分子，PARTIAL 不计）、平均耗时、读写跳过行数。可按配置 ID 与最近 N 天过滤。
+- **告警触发**：`SyncService.run` 重试耗尽仍失败时调 `SyncAlert.raise_alert(config, message, level=ERROR)`，仅最终失败告警一次，避免每次重试都产生告警。
+- **告警确认**：`POST /sync/alerts/{id}/ack` 调 `SyncAlert.acknowledge()` 置 `acknowledged=True` 并记录确认时间。
+
+前端「同步」页面右上角「监控面板」按钮配 Badge 显示未确认告警数，点击打开监控面板对话框：
+
+- 8 张统计卡片：成功率、执行次数、失败次数、平均耗时、成功、部分成功、累计写入行、累计跳过行
+- 统计范围切换：近 7 天 / 近 30 天 / 全部
+- 失败告警表格：级别、配置、内容、时间、状态、确认操作
+- 「仅看未确认」过滤器
+
+### 定时调度
+
+调度闭环基于 croniter：
+
+1. **配置调度**：`SyncConfig.scheduler_enabled=True` + 合法 `cron_expression`（标准 5 段：分 时 日 月 周）。
+2. **计算 next_run_at**：`SyncConfig.refresh_next_run()` 调 `scheduling.compute_next_run(cron, base)`，严格晚于基准时间的下次执行时间。创建/更新配置或调度设置时自动刷新。
+3. **到期执行**：`SyncService.run_scheduled()` 查找 `next_run_at <= now` 的配置并执行，执行后无论成功失败都基于 cron 滚动到下次执行时间，形成自动循环。
+4. **触发方式**：
+   - 系统定时器周期调管理命令 `python manage.py run_scheduled_sync`（推荐每分钟）。
+   - 手动调 `POST /sync/scheduled` 端点（管理员）。
+
+### 内部架构
+
+```
+SyncConfig ──┬── field_mappings ──> SyncFieldMapping
+             ├── logs ──> SyncLog ──> aggregate_stats() ──> SyncStats
+             └── alerts ──> SyncAlert ──> raise_alert() / acknowledge()
+
+SyncService(config)
+  ├── run(force_full, max_retries)
+  │     ├── 熔断器 sync:config:{id}（CLOSED/OPEN/HALF_OPEN）
+  │     ├── 指数退避重试（base_delay 起步翻倍，max_delay 上限）
+  │     ├── _do_run()：读源 → 映射 → 写目标（各方言 UPSERT）
+  │     ├── 成功：重置 retry_count、状态置 ACTIVE
+  │     └── 最终失败：状态置 ERROR + raise_alert()
+  ├── preview()：不实际写入的预览
+  ├── run_batch(config_ids, max_workers)：线程池并发
+  └── run_scheduled()：到期任务滚动执行
+```
+
+关键机制：
+
+- **方言化读写**：源读取按 `connections[alias].vendor` 选择 SQLite/MySQL/PostgreSQL 引用符与参数占位符；目标写入按 `engine.dialect.name` 选择对应 UPSERT 实现（MySQL `ON DUPLICATE KEY UPDATE`、PG/SQLite `ON CONFLICT DO UPDATE`）。
+- **冲突策略**：`upsert` 更新 / `skip` 跳过（`DO NOTHING`，按 `rowcount` 判定是否冲突）/ `error` 纯 INSERT 任一行冲突即回滚整批。
+- **熔断与重试**：每个配置独立熔断器 `sync:config:{id}`，连续失败 5 次短路 60 秒；重试采用指数退避，达 `max_retries` 仍失败才告警。
+- **分布式锁与幂等**：`trigger` 端点加锁 `sync:config:{id}` 防并发执行（锁超时 30 秒），支持 `Idempotency-Key` 24 小时内重复请求返回首次结果。
+- **事件分发**：同步成功后分发 `sync.completed` 事件到 Webhook 订阅（投递失败不影响同步主流程）。
 
 ## 离线内网部署
 
