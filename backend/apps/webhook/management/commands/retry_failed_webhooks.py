@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from django.core.management.base import BaseCommand
@@ -20,6 +21,8 @@ from django.utils import timezone
 
 from apps.webhook.deliverer import redeliver
 from apps.webhook.models import WebhookDeliveryLog
+
+logger = logging.getLogger(__name__)
 
 
 class Command(BaseCommand):
@@ -33,9 +36,11 @@ class Command(BaseCommand):
         pending = list(WebhookDeliveryLog.objects.filter(next_retry_at__isnull=False, next_retry_at__lte=now))
         total = len(pending)
         if total == 0:
+            logger.info("Webhook 调度重投：无到期任务")
             self.stdout.write("无到期的待调度 Webhook 重投任务")
             return
 
+        logger.info("Webhook 调度重投：扫描到 %d 条到期日志 ids=%s", total, [log.pk for log in pending])
         succeeded = 0
         failed = 0
         for log in pending:
@@ -45,6 +50,12 @@ class Command(BaseCommand):
             else:
                 failed += 1
 
+        logger.info(
+            "Webhook 调度重投完成：扫描 %d 条，成功 %d 条，失败 %d 条",
+            total,
+            succeeded,
+            failed,
+        )
         self.stdout.write(
             self.style.SUCCESS(f"Webhook 重投完成：扫描 {total} 条，成功重投 {succeeded} 条，失败 {failed} 条")
         )

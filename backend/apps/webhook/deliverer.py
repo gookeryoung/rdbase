@@ -115,8 +115,16 @@ def deliver_event(event_type: str, payload: dict[str, Any], *, wait: bool = Fals
     subs = WebhookSubscription.objects.filter(is_active=True)
     matched_ids = [s.pk for s in subs if event_type in list(s.events)]
     if not matched_ids:
+        logger.info("Webhook 事件分发: event=%s 无匹配订阅，跳过", event_type)
         return
 
+    logger.info(
+        "Webhook 事件分发: event=%s 匹配 %d 个订阅 ids=%s wait=%s",
+        event_type,
+        len(matched_ids),
+        matched_ids,
+        wait,
+    )
     threads: list[threading.Thread] = []
     for sub_id in matched_ids:
         thread = threading.Thread(
@@ -149,6 +157,11 @@ def _deliver_one(subscription_id: int, event_type: str, payload: dict[str, Any])
     retry_count = 0
     created_log: WebhookDeliveryLog | None = None
 
+    logger.info(
+        "Webhook 投递开始: subscription_id=%s event=%s",
+        subscription_id,
+        event_type,
+    )
     try:
         try:
             sub = WebhookSubscription.objects.get(pk=subscription_id)
@@ -156,6 +169,13 @@ def _deliver_one(subscription_id: int, event_type: str, payload: dict[str, Any])
             logger.warning("Webhook 订阅 %s 不存在，跳过投递", subscription_id)
             return None
 
+        logger.info(
+            "Webhook 投递就绪: subscription=%s(%s) event=%s url=%s",
+            sub.name,
+            subscription_id,
+            event_type,
+            sub.url,
+        )
         body_bytes = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
         signature = hmac.new(
             sub.secret.encode("utf-8"),
@@ -170,12 +190,29 @@ def _deliver_one(subscription_id: int, event_type: str, payload: dict[str, Any])
 
         for attempt in range(_MAX_RETRIES + 1):
             if attempt > 0:
+                logger.info(
+                    "Webhook 退避重试 %d/%d: subscription=%s event=%s delay=%.1fs",
+                    attempt,
+                    _MAX_RETRIES,
+                    sub.name,
+                    event_type,
+                    _BACKOFF_DELAYS[attempt - 1],
+                )
                 _backoff_sleep(_BACKOFF_DELAYS[attempt - 1])
                 retry_count = attempt
             result = _http_post(sub.url, body_bytes, headers, _REQUEST_TIMEOUT)
             last_status = result.status_code
             last_body = result.body
             last_error = result.error
+            logger.info(
+                "Webhook 投递响应: subscription=%s event=%s attempt=%d/%d status=%s error=%s",
+                sub.name,
+                event_type,
+                attempt + 1,
+                _MAX_RETRIES + 1,
+                last_status,
+                last_error or "无",
+            )
             if _is_success(last_status):
                 break
 
@@ -197,6 +234,12 @@ def _deliver_one(subscription_id: int, event_type: str, payload: dict[str, Any])
             next_retry_at: datetime | None = None
             if not _is_success(last_status):
                 next_retry_at = timezone.now() + timedelta(seconds=_SCHEDULED_RETRY_INTERVAL)
+                logger.info(
+                    "Webhook 标记待调度重投: subscription_id=%s event=%s next_retry_at=%s",
+                    subscription_id,
+                    event_type,
+                    next_retry_at.isoformat(),
+                )
             created_log = WebhookDeliveryLog.objects.create(
                 subscription_id=subscription_id,
                 event_type=event_type,
@@ -209,6 +252,15 @@ def _deliver_one(subscription_id: int, event_type: str, payload: dict[str, Any])
                 started_at=started_at,
                 finished_at=finished_at,
                 duration_ms=duration_ms,
+            )
+            logger.info(
+                "Webhook DeliveryLog 已写入: log_id=%s subscription_id=%s event=%s status=%s retries=%d duration_ms=%d",
+                created_log.pk,
+                subscription_id,
+                event_type,
+                last_status,
+                retry_count,
+                duration_ms,
             )
         except Exception:
             logger.exception("Webhook DeliveryLog 写入失败: subscription_id=%s", subscription_id)
@@ -239,10 +291,20 @@ def redeliver(log_id: int) -> WebhookDeliveryLog | None:
         logger.warning("Webhook 重投：源日志 %s 不存在", log_id)
         return None
 
+    logger.info(
+        "Webhook 重投开始: source_log_id=%s subscription_id=%s event=%s status=%s next_retry_at=%s",
+        log_id,
+        source.subscription_id,
+        source.event_type,
+        source.status_code,
+        source.next_retry_at,
+    )
+
     # 清除源日志的 next_retry_at，避免调度器重复重投
     if source.next_retry_at is not None:
         source.next_retry_at = None
         source.save(update_fields=["next_retry_at"])
+        logger.info("Webhook 重投：已清源日志 %s 的 next_retry_at", log_id)
 
     sub_id = source.subscription_id
     event_type = source.event_type
@@ -255,7 +317,22 @@ def redeliver(log_id: int) -> WebhookDeliveryLog | None:
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
     thread.join()
-    return result[0]
+
+    new_log = result[0]
+    if new_log is not None:
+        logger.info(
+            "Webhook 重投完成: source_log_id=%s new_log_id=%s status=%s next_retry_at=%s",
+            log_id,
+            new_log.pk,
+            new_log.status_code,
+            new_log.next_retry_at,
+        )
+    else:
+        logger.warning(
+            "Webhook 重投失败: source_log_id=%s 未创建新日志（订阅可能已删除）",
+            log_id,
+        )
+    return new_log
 
 
 __all__ = ["deliver_event", "redeliver"]
