@@ -866,6 +866,8 @@ export interface IngestTask {
   obey_robots: boolean;
   scheduler_enabled: boolean;
   cron_expression: string;
+  clean_config: Record<string, unknown>;
+  validation_config: Record<string, unknown>;
   next_run_at: string | null;
   last_run_at: string | null;
   last_sync_at: string | null;
@@ -895,6 +897,8 @@ export interface IngestTaskCreate {
   obey_robots?: boolean;
   scheduler_enabled?: boolean;
   cron_expression?: string;
+  clean_config?: Record<string, unknown>;
+  validation_config?: Record<string, unknown>;
   field_mappings: IngestFieldMapping[];
 }
 

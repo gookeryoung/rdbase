@@ -58,6 +58,8 @@ class IngestTaskCreateIn(BaseModel):
     obey_robots: bool = True
     scheduler_enabled: bool = False
     cron_expression: str = ""
+    clean_config: dict[str, Any] = {}
+    validation_config: dict[str, Any] = {}
     field_mappings: list[IngestFieldMappingIn] = []
 
 
@@ -82,6 +84,8 @@ class IngestTaskUpdateIn(BaseModel):
     scheduler_enabled: bool | None = None
     cron_expression: str | None = None
     status: str | None = None
+    clean_config: dict[str, Any] | None = None
+    validation_config: dict[str, Any] | None = None
     field_mappings: list[IngestFieldMappingIn] | None = None
 
 
@@ -104,6 +108,8 @@ class IngestTaskOut(BaseModel):
     obey_robots: bool
     scheduler_enabled: bool
     cron_expression: str
+    clean_config: dict[str, Any]
+    validation_config: dict[str, Any]
     next_run_at: datetime | None = None
     last_run_at: datetime | None = None
     last_sync_at: datetime | None = None

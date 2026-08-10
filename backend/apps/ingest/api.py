@@ -125,6 +125,8 @@ def _task_to_out(task: IngestTask) -> IngestTaskOut:
         obey_robots=bool(task.obey_robots),
         scheduler_enabled=bool(task.scheduler_enabled),
         cron_expression=task.cron_expression,
+        clean_config=cast(dict[str, Any], task.clean_config or {}),
+        validation_config=cast(dict[str, Any], task.validation_config or {}),
         next_run_at=task.next_run_at,
         last_run_at=task.last_run_at,
         last_sync_at=task.last_sync_at,
@@ -237,6 +239,8 @@ def create_task(request: HttpRequest, payload: IngestTaskCreateIn) -> HttpRespon
         obey_robots=payload.obey_robots,
         scheduler_enabled=payload.scheduler_enabled,
         cron_expression=payload.cron_expression,
+        clean_config=payload.clean_config,
+        validation_config=payload.validation_config,
         created_by=request.auth,
     )
     if payload.headers:
@@ -295,6 +299,8 @@ def update_task(request: HttpRequest, task_id: int, payload: IngestTaskUpdateIn)
         "scheduler_enabled",
         "cron_expression",
         "status",
+        "clean_config",
+        "validation_config",
     ):
         if field in data:
             setattr(task, field, data[field])

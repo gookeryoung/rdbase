@@ -124,6 +124,11 @@ class IngestTask(models.Model):
     parse_config = models.JSONField(default=dict, blank=True, verbose_name="解析配置")
     # 请求配置：HTTP method、body、分页规则、超时、重试等结构化配置（非敏感）
     request_config = models.JSONField(default=dict, blank=True, verbose_name="请求配置")
+    # 清洗配置：CleaningPipeline 按此配置对 spider 产出的原始 item 执行清洗
+    # （缺失值/类型转换/格式标准化/去重/HTML 剥离/枚举映射），空字典时透传不清洗
+    clean_config = models.JSONField(default=dict, blank=True, verbose_name="清洗配置")
+    # 校验配置：ValidationPipeline 按此配置执行质量校验（P8-Q2 启用，预留字段）
+    validation_config = models.JSONField(default=dict, blank=True, verbose_name="校验配置")
     # 敏感请求头（含 API Key/Cookie 等）整体 JSON 加密存储
     headers_encrypted = models.TextField(blank=True, default="", verbose_name="加密请求头")
     auth_type = models.CharField(

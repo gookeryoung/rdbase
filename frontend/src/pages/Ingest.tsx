@@ -154,7 +154,19 @@ const createEmptyTask = (): IngestTaskCreate => ({
   obey_robots: true,
   scheduler_enabled: false,
   cron_expression: "",
+  clean_config: {},
+  validation_config: {},
   field_mappings: [emptyMapping()],
+});
+
+// 清洗配置默认模板（点击「填充模板」时使用）
+const defaultCleanConfig = (): Record<string, unknown> => ({
+  rules: [
+    { field: "name", op: "on_missing", strategy: "fill_default", default: "" },
+    { field: "age", op: "cast_type", cast_type: "int" },
+    { field: "phone", op: "normalize", normalizer: "phone" },
+  ],
+  dedup: { enabled: false, fields: [], ttl_hours: 24 },
 });
 
 export default function IngestPage() {
@@ -173,6 +185,10 @@ export default function IngestPage() {
   const [headersDraft, setHeadersDraft] = useState<{ key: string; value: string }[]>([]);
   const [fieldsDraftJson, setFieldsDraftJson] = useState("");
   const [fieldsJsonError, setFieldsJsonError] = useState<string>("");
+  const [cleanConfigDraftJson, setCleanConfigDraftJson] = useState("");
+  const [cleanConfigJsonError, setCleanConfigJsonError] = useState<string>("");
+  const [validationConfigDraftJson, setValidationConfigDraftJson] = useState("");
+  const [validationConfigJsonError, setValidationConfigJsonError] = useState<string>("");
   const [saving, setSaving] = useState(false);
 
   // 执行结果对话框
@@ -266,6 +282,10 @@ export default function IngestPage() {
     setHeadersDraft([]);
     setFieldsDraftJson("{}");
     setFieldsJsonError("");
+    setCleanConfigDraftJson("{}");
+    setCleanConfigJsonError("");
+    setValidationConfigDraftJson("{}");
+    setValidationConfigJsonError("");
     setDialogOpen(true);
   };
 
@@ -286,6 +306,8 @@ export default function IngestPage() {
       obey_robots: task.obey_robots,
       scheduler_enabled: task.scheduler_enabled,
       cron_expression: task.cron_expression,
+      clean_config: { ...task.clean_config },
+      validation_config: { ...task.validation_config },
       field_mappings: task.field_mappings.map((m) => ({
         source_field: m.source_field,
         target_field: m.target_field,
@@ -301,6 +323,10 @@ export default function IngestPage() {
     const fieldsCfg = (task.parse_config?.fields as Record<string, unknown> | undefined) ?? {};
     setFieldsDraftJson(JSON.stringify(fieldsCfg, null, 2));
     setFieldsJsonError("");
+    setCleanConfigDraftJson(JSON.stringify(task.clean_config ?? {}, null, 2));
+    setCleanConfigJsonError("");
+    setValidationConfigDraftJson(JSON.stringify(task.validation_config ?? {}, null, 2));
+    setValidationConfigJsonError("");
     setDialogOpen(true);
   };
 
@@ -424,6 +450,38 @@ export default function IngestPage() {
       }
     }
 
+    // 清洗配置 JSON 校验
+    let finalCleanConfig: Record<string, unknown> = { ...editingTask.clean_config };
+    try {
+      const parsed = JSON.parse(cleanConfigDraftJson || "{}");
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        setCleanConfigJsonError("清洗配置必须是 JSON 对象");
+        return;
+      }
+      finalCleanConfig = parsed as Record<string, unknown>;
+      setCleanConfigJsonError("");
+    } catch (err) {
+      setCleanConfigJsonError(err instanceof Error ? err.message : "JSON 解析失败");
+      return;
+    }
+
+    // 校验配置 JSON 校验（P8-Q2 启用，当前仅校验格式）
+    let finalValidationConfig: Record<string, unknown> = {
+      ...editingTask.validation_config,
+    };
+    try {
+      const parsed = JSON.parse(validationConfigDraftJson || "{}");
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        setValidationConfigJsonError("校验配置必须是 JSON 对象");
+        return;
+      }
+      finalValidationConfig = parsed as Record<string, unknown>;
+      setValidationConfigJsonError("");
+    } catch (err) {
+      setValidationConfigJsonError(err instanceof Error ? err.message : "JSON 解析失败");
+      return;
+    }
+
     // 构造 headers（仅保留非空 key 的项）
     const headerEntries = headersDraft
       .filter((h) => h.key.trim())
@@ -439,6 +497,8 @@ export default function IngestPage() {
       const payload: IngestTaskCreate = {
         ...editingTask,
         parse_config: finalParseConfig,
+        clean_config: finalCleanConfig,
+        validation_config: finalValidationConfig,
         field_mappings: validMappings,
         headers: shouldSendHeaders ? headers : undefined,
       };
@@ -1327,6 +1387,82 @@ export default function IngestPage() {
                 },
               ]}
             />
+
+            {/* 清洗配置 */}
+            <Space
+              style={{
+                width: "100%",
+                justifyContent: "space-between",
+                marginTop: 16,
+                marginBottom: 8,
+              }}
+            >
+              <Text strong>清洗配置（P8-Q1）</Text>
+              <Space size="small">
+                <Button
+                  size="small"
+                  onClick={() => setCleanConfigDraftJson(JSON.stringify(defaultCleanConfig(), null, 2))}
+                >
+                  填充模板
+                </Button>
+                <Button
+                  size="small"
+                  onClick={() => setCleanConfigDraftJson("{}")}
+                >
+                  清空
+                </Button>
+              </Space>
+            </Space>
+            <Form.Item
+              validateStatus={cleanConfigJsonError ? "error" : ""}
+              help={
+                cleanConfigJsonError ||
+                "JSON 对象。rules 数组按序执行 on_missing/cast_type/normalize/strip_html/enum_map；dedup 控制去重"
+              }
+            >
+              <TextArea
+                value={cleanConfigDraftJson}
+                onChange={(e) => setCleanConfigDraftJson(e.target.value)}
+                rows={8}
+                style={{ fontFamily: "monospace", fontSize: 12 }}
+                placeholder={
+                  '{\n  "rules": [\n    {"field": "name", "op": "on_missing", "strategy": "fill_default", "default": ""},\n    {"field": "age", "op": "cast_type", "cast_type": "int"},\n    {"field": "phone", "op": "normalize", "normalizer": "phone"}\n  ],\n  "dedup": {"enabled": true, "fields": ["id"], "ttl_hours": 24}\n}'
+                }
+              />
+            </Form.Item>
+
+            {/* 校验配置（P8-Q2 预留） */}
+            <Space
+              style={{
+                width: "100%",
+                justifyContent: "space-between",
+                marginTop: 8,
+                marginBottom: 8,
+              }}
+            >
+              <Text strong>校验配置（P8-Q2 预留）</Text>
+              <Button
+                size="small"
+                onClick={() => setValidationConfigDraftJson("{}")}
+              >
+                清空
+              </Button>
+            </Space>
+            <Form.Item
+              validateStatus={validationConfigJsonError ? "error" : ""}
+              help={
+                validationConfigJsonError ||
+                "JSON 对象。当前预留，P8-Q2 将启用必填/范围/正则/枚举/唯一/引用完整性规则"
+              }
+            >
+              <TextArea
+                value={validationConfigDraftJson}
+                onChange={(e) => setValidationConfigDraftJson(e.target.value)}
+                rows={4}
+                style={{ fontFamily: "monospace", fontSize: 12 }}
+                placeholder="{}"
+              />
+            </Form.Item>
           </Form>
         )}
       </Modal>

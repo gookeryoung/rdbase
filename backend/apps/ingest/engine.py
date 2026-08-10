@@ -249,6 +249,8 @@ def _build_spider_kwargs(task: IngestTask) -> dict[str, Any]:
         "target_table": task.target_table,
         "conflict_strategy": task.conflict_strategy,
         "batch_size": task.batch_size,
+        "clean_config": cast(dict[str, Any], task.clean_config or {}),
+        "task_id": task.pk,
     }
 
 
@@ -264,7 +266,10 @@ def _build_scrapy_settings(task: IngestTask) -> dict[str, Any]:
         "USER_AGENT": request_config.get("user_agent", "rdbase-ingest/1.0"),
         "TELNETCONSOLE_ENABLED": False,
         "COOKIES_ENABLED": bool(request_config.get("cookies_enabled", False)),
-        "ITEM_PIPELINES": {"apps.ingest.pipelines.FieldMappingPipeline": 300},
+        "ITEM_PIPELINES": {
+            "apps.ingest.cleaning.CleaningPipeline": 200,
+            "apps.ingest.pipelines.FieldMappingPipeline": 300,
+        },
     }
 
 
