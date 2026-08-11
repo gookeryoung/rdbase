@@ -13,6 +13,11 @@ DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
         "NAME": DATA_DIR / "db.sqlite3",
+        # SQLite 并发写入时设置 busy_timeout 避免立即抛 "database is locked"
+        # Django 默认 busy_timeout=0，并发 INSERT 会失败（如 webhook 多订阅并发投递）
+        "OPTIONS": {
+            "init_command": "PRAGMA busy_timeout=5000",
+        },
     }
 }
 
