@@ -2,8 +2,8 @@
 ================
 
 本指南面向需要通过 API 接入 rdbase 数据中心能力的外部应用开发者。涵盖 API
-Token 获取、鉴权请求头、数据集查询/写入、调度触发、Webhook 事件订阅与签名
-校验等完整流程。
+Token 获取、鉴权请求头、数据集查询/写入、调度触发、Webhook 事件订阅（外发）、
+Webhook 被动接收（外推入 rdbase）与签名校验等完整流程。
 
 .. contents::
    :local:
@@ -28,6 +28,7 @@ rdbase 在 Web 前端（JWT 会话）之外，提供 **API Token** 认证机制�
 ``POST /api/v1/datasets/{slug}/rows`` 写入数据集行（单行/批量 UPSERT）
 ``POST /api/v1/datasets/{slug}/sync`` 触发数据集绑定的同步配置执行
 ``POST /api/v1/ingest/tasks/{id}/trigger`` 触发爬取任务执行
+``POST /api/v1/ingest/webhook/{token}`` Webhook 被动接收（公开，token 鉴权）
 ================================ =========================================
 
 OpenAPI 规范：``GET /api/v1/datasets/openapi.json`` 返回外部视图，仅含上述
@@ -324,17 +325,114 @@ Webhook 事件订阅
 - **日志**：每次投递流程（含全部重试）写一条 ``WebhookDeliveryLog``，可在
   Web 控制台查看 status_code、retry_count、duration_ms、error_message。
 
+Webhook 被动接收
+================
+
+与上一节「Webhook 事件订阅」（rdbase 外发）相反，被动接收端点允许外部应用
+主动将数据推入 rdbase：``POST /api/v1/ingest/webhook/{token}``。该端点为
+**公开端点**（不要求 ``X-API-Token`` 或 JWT），token 自身即鉴权——管理员在
+Web 控制台创建 ``source_type=webhook`` 类型的爬取任务时由系统通过
+``secrets.token_urlsafe(32)`` 自动生成（约 43 字符，密码学安全），DB 唯一约束。
+
+请求示例：
+
+.. code-block:: http
+
+   POST /api/v1/ingest/webhook/<token> HTTP/1.1
+   Content-Type: application/json
+   Idempotency-Key: client-unique-key-456
+
+   [
+     {"id": 1, "name": "alice", "score": 95},
+     {"id": 2, "name": "bob", "score": 87}
+   ]
+
+payload 支持两种格式：
+
+- **JSON 数组**：``[{...}, {...}]``，每个元素须为 JSON 对象；推荐批量场景使用。
+- **JSON 对象**：``{...}``，自动包装为单元素列表处理。
+
+空数组、非对象元素、非 JSON 内容返回 ``400``。
+
+响应（``200 OK``）：
+
+.. code-block:: json
+
+   {
+     "task_id": 42,
+     "log_id": 100,
+     "rows_read": 2,
+     "rows_written": 2,
+     "rows_skipped": 0,
+     "quality_score": 100.0
+   }
+
+字段说明：
+
+- ``task_id`` / ``log_id``：对应 ``IngestTask`` 与本次接收产生的 ``IngestLog`` 主键。
+- ``rows_read``：接收的原始 item 总数（payload 长度）。
+- ``rows_written``：经字段映射后实际写入目标表的行数。
+- ``rows_skipped``：清洗丢弃（``DropItem``）+ 写入冲突跳过的总行数；非 0 时
+  日志状态为 ``partial``。
+- ``quality_score``：本次接收的质量分（0-100），由 ``ValidationPipeline``
+  按校验通过率加权计算（无校验规则时为 100）。
+
+处理流程：
+
+1. **token 鉴权**：按 URL 路径中的 token 查找 ``source_type=webhook`` 类型任务；
+   token 不存在或对应任务非 WEBHOOK 源返回 ``404``；任务未激活（``paused`` /
+   ``error`` 状态）返回 ``409``。
+2. **payload 解析**：按上述两种格式解析为 item 列表；非法格式返回 ``400``。
+3. **幂等检查**：携带 ``Idempotency-Key`` 头时，24h 内相同 key 命中缓存直接
+   回放首次结果；subject 维度为 ``webhook:{token}``。
+4. **令牌桶限流**：按 ``webhook:{token}`` 维度限流（非 IP 维度，因为 token
+   已是任务级凭证），容量 ``RATE_LIMIT_WEBHOOK_CAPACITY``（默认 20）、每秒
+   补充 ``RATE_LIMIT_WEBHOOK_REFILL_RATE``（默认 2.0），超限返回 ``429`` +
+   ``Retry-After`` 头。
+5. **同步执行 pipeline 链**：
+
+   ``CleaningPipeline → ValidationPipeline → FieldMappingPipeline``
+
+   不经 Scrapy CrawlerProcess，直接实例化三个 pipeline 并调用
+   ``open_spider`` / ``process_item`` / ``close_spider``。清洗丢弃的 item
+   抛 ``DropItem`` 计入 ``rows_skipped``，不中断后续 item。
+6. **审计**：成功 / 失败均写 ``AuditAction.WEBHOOK_RECEIVE`` 审计日志，含
+   task_id / log_id / token / rows_* / quality_score / duration_ms。
+
+错误码：
+
+- ``400``：payload 非 JSON 对象/数组、含非对象元素、或为空数组。
+- ``404``：token 不存在或对应任务非 WEBHOOK 源类型。
+- ``409``：任务未激活（``paused`` / ``error`` 状态）；相同 ``Idempotency-Key``
+  正在执行中。
+- ``429``：触发限流（响应头含 ``Retry-After``）。
+- ``500``：pipeline 执行异常（响应体含 ``Webhook 处理失败: <错误信息>``），
+  同时写 FAILURE 审计日志。
+
+约束：
+
+- **不依赖 Scrapy 引擎**：webhook 端点同步处理 payload，避免 reactor 冲突；
+  适合中小批量数据推送场景。大批量推送建议拆分多个请求并配合 ``Idempotency-Key``。
+- **任务级凭证**：token 仅绑定单个 WEBHOOK 任务，泄露后管理员可重建任务生成
+  新 token（旧 token 立即失效）。当前未支持 IP 白名单，敏感场景建议在网络层
+  加防火墙规则。
+- **质量分写回**：``quality_score`` 同时写入 ``IngestLog`` 与 ``IngestQualityReport``
+  关联表，可在 Web 控制台「爬取」页查看质量报告与字段健康度。
+- **last_sync_at 更新**：每次接收视为一次同步，自动更新 ``task.last_sync_at``
+  与 ``last_run_at``，便于下游任务（如依赖该任务数据的同步配置）按序触发。
+
 错误码汇总
 ==========
 
 ==== ==============================================================
 401  Token 不存在 / 已吊销 / 已过期 / 无 Token
 403  Token 缺少所需 scope / JWT 访问公开端点
-404  数据集/数据源不存在或未启用；爬取任务不存在
-400  入参非法（rows 空、列不存在、冲突策略非法、数据集未绑定 sync_config 等）
-409  分布式锁占用（任务执行中）/ 幂等命中 in_progress
+404  数据集/数据源不存在或未启用；爬取任务不存在；Webhook token 无效
+400  入参非法（rows 空、列不存在、冲突策略非法、数据集未绑定 sync_config、
+     webhook payload 非对象/数组/空数组等）
+409  分布式锁占用（任务执行中）/ 幂等命中 in_progress / webhook 任务未激活
 429  速率限制 / 每日配额超限（响应头含 ``Retry-After``）
-500  子进程执行失败（爬取触发）
+500  子进程执行失败（爬取触发）/ Webhook pipeline 处理失败
 503  熔断器短路 / 健康检查不通过
 ==== ==============================================================
 
@@ -351,3 +449,6 @@ Webhook 事件订阅
 7. **处理 429**：尊重 ``Retry-After`` 头，指数退避重试，避免雪崩。
 8. **监控 last_used_at**：管理员可在 Token 管理页查看最近使用时间，及时
    清理闲置 Token。
+9. **Webhook 接收 token 与 API Token 区分**：前者仅绑定单个 WEBHOOK 任务、
+   通过 URL 路径鉴权、无 scope 概念；后者通过 ``X-API-Token`` 头鉴权、按
+   scope 授权多端点。两者不可互换。

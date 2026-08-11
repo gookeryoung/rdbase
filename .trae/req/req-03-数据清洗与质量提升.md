@@ -50,13 +50,13 @@ P8 是 P7 数据爬取的纵深增强：
 
 ### P8-Q4 收集增强
 
-- [ ] 47 SourceType.DATABASE 直连源（SQL 查询爬取器）+ Webhook 被动接收
+- [x] 47 SourceType.DATABASE 直连源（SQL 查询爬取器）+ Webhook 被动接收
   （POST /ingest/webhook/{token}）。
-- [ ] 48 增量策略扩展（API 按 updated_at 参数 / HTML 按指纹 / DB 按 timestamp_field）。
+- [x] 48 增量策略扩展（API 按 updated_at 参数 / HTML 按指纹 / DB 按 timestamp_field）。
 
 ### P8-Q5 文档与测试
 
-- [ ] 49 覆盖率 ≥ 95% 回归 + README/手册同步 + 端到端用例。
+- [x] 49 覆盖率 ≥ 95% 回归 + README/手册同步 + 端到端用例。
 
 ## 关键架构决策
 
