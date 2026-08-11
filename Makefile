@@ -5,7 +5,7 @@ BACKEND_DIR := backend
 FRONTEND_DIR := frontend
 COV_THRESHOLD := 95
 
-.PHONY: help sync dev test cov lint typecheck check migrate makemigrations run-be run-fe doc tox bump patch minor major push pack
+.PHONY: help sync dev test cov lint typecheck check migrate makemigrations run-be run-fe doc tox bump patch minor major push pack fspack
 
 help: ## 显示帮助信息
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z].*:.*##/ {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -66,3 +66,11 @@ push: ## 推送代码到所有远程仓库
 
 pack: ## 构建离线发布包到 dist/（联网环境运行）
 	uv run python scripts/offline_pack.py
+
+fspack: ## fspack 打包 Windows .exe + NSIS 安装包（需联网下载 embed python + wheels）
+	cd $(FRONTEND_DIR) && bun run build
+	cd $(BACKEND_DIR) && uv run python manage.py collectstatic --noinput
+	rm -rf $(BACKEND_DIR)/staticfiles/spa
+	cp -r $(FRONTEND_DIR)/dist $(BACKEND_DIR)/staticfiles/spa
+	fsp b --target windows --mirror aliyun
+	fsp p --target windows --format nsis

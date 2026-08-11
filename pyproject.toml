@@ -72,3 +72,17 @@ required-version = ">=0.5.0"
 [[tool.uv.index]]
 default = true
 url = "https://mirrors.aliyun.com/pypi/simple/"
+
+[tool.fspack]
+# fspack 打包配置：生成 Windows .exe + NSIS 安装包
+# 内置 _EXCLUDE 已排除 dist/build/__pycache__/.venv/tests/.git/*.md/docs 等
+# 此处仅追加项目特有的排除模式
+exclude = [
+    "node_modules",
+    "dbs",
+    "backend/media",
+]
+
+[tool.fspack.entries]
+# 多入口：键=exe 名，值=入口脚本相对项目根的路径
+rdbase = "backend/pack_main.py"

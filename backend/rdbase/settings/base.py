@@ -143,6 +143,9 @@ USE_TZ = True
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
+# 前端构建产物目录（pack 模式覆盖为 staticfiles/spa/）
+FRONTEND_DIST = ROOT_DIR / "frontend" / "dist"
+
 # 默认主键字段
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
