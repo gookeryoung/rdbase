@@ -191,6 +191,20 @@ def _clear_engine_cache() -> Iterator[None]:
     dispose_all()
 
 
+@pytest.fixture(autouse=True)
+def _reset_export_rate_limiter() -> Iterator[None]:
+    """每个测试前后重置限流器后端，避免跨测试限流桶状态污染.
+
+    导出端点限流按 ``dataset_export:{user_id}`` 维度计数；事务回滚导致
+    不同测试的 user.pk 复用，本地令牌桶单例会累积计数使后续测试误 429。
+    """
+    from apps.system import rate_limiter
+
+    rate_limiter.reset_rate_limiter()
+    yield
+    rate_limiter.reset_rate_limiter()
+
+
 def _make_sqlite_file_ds(tmp_path: Path, name: str = "ds-sqlite") -> DataSource:
     """构造基于临时文件的 SQLite 数据源并预置 users 表与 3 行数据."""
     db_path = tmp_path / "test.db"
@@ -1078,3 +1092,319 @@ def test_preview_rows_columns_subset(
     body = json.loads(response.content)
     assert body["columns"] == ["name", "email"]
     assert set(body["items"][0].keys()) == {"name", "email"}
+
+
+# ================================================================
+# 数据集行导出 CSV（iter-56，P9-Q1 item 50/51/52）
+# ================================================================
+
+
+def _read_streaming(response: HttpResponse) -> str:
+    """读取 StreamingHttpResponse 全部内容为字符串."""
+    content = (
+        b"".join(response.streaming_content)  # type: ignore[union-attr]
+        if hasattr(response, "streaming_content")
+        else response.content
+    )
+    return content.decode("utf-8")
+
+
+def _make_empty_table_ds(tmp_path: Path, name: str = "ds-empty") -> DataSource:
+    """构造含空表 empty_tbl 的 SQLite 文件数据源."""
+    db_path = tmp_path / "empty.db"
+    engine = create_engine(f"sqlite:///{db_path}", future=True)
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE empty_tbl (id INTEGER PRIMARY KEY AUTOINCREMENT, name VARCHAR(50))"))
+    engine.dispose()
+    return DataSource.objects.create(
+        name=name,
+        engine=EngineType.SQLITE,
+        database=str(db_path),
+    )
+
+
+@pytest.mark.django_db
+def test_export_dataset_rows_full_csv(
+    make_user: Callable[..., User],
+    tmp_path: Path,
+) -> None:
+    """全量导出 CSV：BOM + 表头 + 3 行数据."""
+    user = make_user(username="export-full", role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    _make_dataset(ds, slug="export-full")
+    client = _auth_client(user)
+    response = _get(client, "/api/v1/datasets/export-full/export")
+    assert response.status_code == 200
+    assert "text/csv" in response["Content-Type"]
+    assert 'filename="export-full.csv"' in response["Content-Disposition"]
+    text = _read_streaming(response)
+    assert text.startswith("\ufeff")  # UTF-8 BOM
+    assert "id,name,email,age,is_active" in text
+    assert "Alice" in text
+    assert "Bob" in text
+    assert "Charlie" in text
+    # 3 行数据 + 1 表头 = 4 行（BOM 不影响行数）
+    assert text.count("\n") == 4
+
+
+@pytest.mark.django_db
+def test_export_dataset_rows_columns_subset(
+    make_user: Callable[..., User],
+    tmp_path: Path,
+) -> None:
+    """columns 参数裁剪列：仅导出 name,email."""
+    user = make_user(username="export-cols", role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    _make_dataset(ds, slug="export-cols")
+    client = _auth_client(user)
+    response = _get(client, "/api/v1/datasets/export-cols/export?columns=name,email")
+    assert response.status_code == 200
+    text = _read_streaming(response)
+    first_line = text.split("\n")[0]
+    assert first_line == "\ufeffname,email"
+    assert "Alice" in text
+    # 不应包含未请求的列
+    assert "is_active" not in text
+
+
+@pytest.mark.django_db
+def test_export_dataset_rows_with_user_filters(
+    make_user: Callable[..., User],
+    tmp_path: Path,
+) -> None:
+    """filters 参数筛选行：仅导出 age=30 的 Alice."""
+    user = make_user(username="export-filter", role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    _make_dataset(ds, slug="export-filter")
+    client = _auth_client(user)
+    filters_param = json.dumps({"age": {"op": "eq", "val": 30}})
+    response = _get(
+        client,
+        f"/api/v1/datasets/export-filter/export?filters={filters_param}",
+    )
+    assert response.status_code == 200
+    text = _read_streaming(response)
+    assert "Alice" in text
+    assert "Bob" not in text
+    assert "Charlie" not in text
+    assert text.count("\n") == 2  # 表头 + 1 行
+
+
+@pytest.mark.django_db
+def test_export_dataset_rows_filter_expression_applied(
+    make_user: Callable[..., User],
+    tmp_path: Path,
+) -> None:
+    """Dataset.filter_expression 强制行级过滤：is_active=1 仅 2 行."""
+    user = make_user(username="export-fe", role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    _make_dataset(ds, slug="export-fe", filter_expression={"is_active": 1})
+    client = _auth_client(user)
+    response = _get(client, "/api/v1/datasets/export-fe/export")
+    assert response.status_code == 200
+    text = _read_streaming(response)
+    assert "Alice" in text
+    assert "Bob" in text
+    assert "Charlie" not in text
+    assert text.count("\n") == 3  # 表头 + 2 行
+
+
+@pytest.mark.django_db
+def test_export_dataset_rows_fields_whitelist(
+    make_user: Callable[..., User],
+    tmp_path: Path,
+) -> None:
+    """fields_whitelist 非空时仅导出白名单列."""
+    user = make_user(username="export-wl", role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    _make_dataset(ds, slug="export-wl", fields_whitelist=["name", "email"])
+    client = _auth_client(user)
+    response = _get(client, "/api/v1/datasets/export-wl/export")
+    assert response.status_code == 200
+    text = _read_streaming(response)
+    first_line = text.split("\n")[0]
+    assert first_line == "\ufeffname,email"
+    assert "age" not in text
+
+
+@pytest.mark.django_db
+def test_export_dataset_rows_empty_table(
+    make_user: Callable[..., User],
+    tmp_path: Path,
+) -> None:
+    """空表导出：仅 BOM + 表头，无数据行."""
+    user = make_user(username="export-empty", role=Role.VIEWER)
+    ds = _make_empty_table_ds(tmp_path)
+    Dataset.objects.create(
+        slug="export-empty",
+        name="空表",
+        datasource=ds,
+        table_name="empty_tbl",
+    )
+    client = _auth_client(user)
+    response = _get(client, "/api/v1/datasets/export-empty/export")
+    assert response.status_code == 200
+    text = _read_streaming(response)
+    assert text.startswith("\ufeff")
+    assert "id,name" in text
+    assert text.count("\n") == 1  # 仅表头
+
+
+@pytest.mark.django_db
+def test_export_dataset_rows_unauth_401(
+    tmp_path: Path,
+) -> None:
+    """未认证导出返回 401."""
+    ds = _make_sqlite_file_ds(tmp_path)
+    _make_dataset(ds, slug="export-unauth")
+    client = Client()
+    response = _get(client, "/api/v1/datasets/export-unauth/export")
+    assert response.status_code == 401
+
+
+@pytest.mark.django_db
+def test_export_dataset_rows_inactive_dataset_404(
+    make_user: Callable[..., User],
+    tmp_path: Path,
+) -> None:
+    """is_active=False 的数据集导出返回 404."""
+    user = make_user(username="export-inactive", role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    _make_dataset(ds, slug="export-inactive", is_active=False)
+    client = _auth_client(user)
+    response = _get(client, "/api/v1/datasets/export-inactive/export")
+    assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_export_dataset_rows_inactive_datasource_404(
+    make_user: Callable[..., User],
+    tmp_path: Path,
+) -> None:
+    """数据源 is_active=False 时导出返回 404."""
+    user = make_user(username="export-ds-inactive", role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    ds.is_active = False
+    ds.save()
+    _make_dataset(ds, slug="export-ds-inactive")
+    client = _auth_client(user)
+    response = _get(client, "/api/v1/datasets/export-ds-inactive/export")
+    assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_export_dataset_rows_unsupported_format_400(
+    make_user: Callable[..., User],
+    tmp_path: Path,
+) -> None:
+    """不支持的导出格式返回 400."""
+    user = make_user(username="export-fmt", role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    _make_dataset(ds, slug="export-fmt")
+    client = _auth_client(user)
+    response = _get(client, "/api/v1/datasets/export-fmt/export?format=xlsx")
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_export_dataset_rows_not_found_404(
+    make_user: Callable[..., User],
+) -> None:
+    """不存在的 slug 导出返回 404."""
+    user = make_user(username="export-404", role=Role.VIEWER)
+    client = _auth_client(user)
+    response = _get(client, "/api/v1/datasets/nonexistent-slug/export")
+    assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_export_dataset_rows_nonexistent_table_400(
+    make_user: Callable[..., User],
+    tmp_path: Path,
+) -> None:
+    """数据集指向不存在的表时导出返回 400（get_column_names 反射失败）."""
+    user = make_user(username="export-no-table", role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    # 创建数据集指向不存在的表名
+    Dataset.objects.create(
+        slug="export-no-table",
+        name="不存在表",
+        datasource=ds,
+        table_name="nonexistent_tbl",
+    )
+    client = _auth_client(user)
+    response = _get(client, "/api/v1/datasets/export-no-table/export")
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_export_dataset_rows_invalid_columns_400(
+    make_user: Callable[..., User],
+    tmp_path: Path,
+) -> None:
+    """columns 含非法列名时导出返回 400（iter_filtered_table_rows 校验失败）."""
+    user = make_user(username="export-bad-cols", role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    _make_dataset(ds, slug="export-bad-cols")
+    client = _auth_client(user)
+    response = _get(
+        client,
+        "/api/v1/datasets/export-bad-cols/export?columns=nonexistent_col",
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_export_dataset_rows_rate_limited_429(
+    make_user: Callable[..., User],
+    tmp_path: Path,
+    settings: Any,
+) -> None:
+    """超出令牌桶容量返回 429 + Retry-After."""
+    settings.RATE_LIMIT_DATASET_EXPORT_CAPACITY = 2
+    settings.RATE_LIMIT_DATASET_EXPORT_REFILL_RATE = 0.0
+
+    user = make_user(username="export-rl", role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    _make_dataset(ds, slug="export-rl")
+    client = _auth_client(user)
+    url = "/api/v1/datasets/export-rl/export"
+
+    # 容量 2，前 2 次成功
+    for _ in range(2):
+        resp = _get(client, url)
+        assert resp.status_code == 200, resp.content
+    # 第 3 次应被限流
+    resp = _get(client, url)
+    assert resp.status_code == 429
+    assert resp["Retry-After"]
+    body = json.loads(resp.content)
+    assert "频繁" in body["detail"]
+
+
+@pytest.mark.django_db
+def test_export_dataset_rows_rate_limit_per_user(
+    make_user: Callable[..., User],
+    tmp_path: Path,
+    settings: Any,
+) -> None:
+    """不同用户的导出限流桶相互独立."""
+    settings.RATE_LIMIT_DATASET_EXPORT_CAPACITY = 1
+    settings.RATE_LIMIT_DATASET_EXPORT_REFILL_RATE = 0.0
+
+    user_a = make_user(username="export-rl-a", role=Role.VIEWER)
+    user_b = make_user(username="export-rl-b", role=Role.VIEWER)
+    ds = _make_sqlite_file_ds(tmp_path)
+    _make_dataset(ds, slug="export-rl-indep")
+    client_a = _auth_client(user_a)
+    client_b = _auth_client(user_b)
+    url = "/api/v1/datasets/export-rl-indep/export"
+
+    # user_a 耗尽配额
+    resp = _get(client_a, url)
+    assert resp.status_code == 200
+    resp = _get(client_a, url)
+    assert resp.status_code == 429
+    # user_b 不受影响
+    resp = _get(client_b, url)
+    assert resp.status_code == 200

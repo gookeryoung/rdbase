@@ -19,6 +19,7 @@ import {
   EditOutlined,
   DeleteOutlined,
   EyeOutlined,
+  DownloadOutlined,
 } from "@ant-design/icons";
 import {
   listDatasets,
@@ -26,6 +27,7 @@ import {
   updateDataset,
   deleteDataset,
   previewDatasetRows,
+  exportDatasetCsv,
 } from "@/api/datasets";
 import { listDatasources } from "@/api/datasources";
 import type {
@@ -84,6 +86,9 @@ const Datasets = () => {
   const [previewSlug, setPreviewSlug] = useState<string>("");
   const [previewData, setPreviewData] = useState<DatasetRows | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
+
+  // 导出 loading 状态：记录正在导出的 slug
+  const [exportingSlug, setExportingSlug] = useState<string | null>(null);
 
   const loadDatasets = async () => {
     setLoading(true);
@@ -241,6 +246,33 @@ const Datasets = () => {
     }
   };
 
+  // 导出 CSV：触发浏览器下载
+  const handleExportCsv = async (record: Dataset) => {
+    setExportingSlug(record.slug);
+    try {
+      await exportDatasetCsv(record.slug);
+      message.success(`已导出 ${record.slug}.csv`);
+    } catch (err) {
+      const detail = (err as { response?: { data?: Blob } })?.response?.data;
+      // 429 限流响应体为 JSON（被 axios 包成 Blob），尝试解析
+      if (detail instanceof Blob) {
+        try {
+          const text = await detail.text();
+          const body = JSON.parse(text) as { detail?: string };
+          if (body.detail) {
+            message.error(body.detail);
+            return;
+          }
+        } catch {
+          // 解析失败走通用错误
+        }
+      }
+      message.error(errMsg(err, "导出失败"));
+    } finally {
+      setExportingSlug(null);
+    }
+  };
+
   const columns: ColumnsType<Dataset> = [
     { title: "Slug", dataIndex: "slug", width: 160 },
     { title: "名称", dataIndex: "name" },
@@ -292,7 +324,7 @@ const Datasets = () => {
     {
       title: "操作",
       key: "action",
-      width: 220,
+      width: 300,
       render: (_, record) => (
         <Space>
           <Button
@@ -301,6 +333,14 @@ const Datasets = () => {
             onClick={() => openPreview(record)}
           >
             预览
+          </Button>
+          <Button
+            size="small"
+            icon={<DownloadOutlined />}
+            loading={exportingSlug === record.slug}
+            onClick={() => handleExportCsv(record)}
+          >
+            导出 CSV
           </Button>
           <Button
             size="small"

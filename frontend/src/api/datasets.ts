@@ -46,3 +46,30 @@ export const previewDatasetRows = (
   client
     .get<DatasetRows>(`/datasets/${slug}/preview`, { params })
     .then((res) => res.data);
+
+// 导出数据集行为 CSV（所有登录用户可读，流式下载）
+// 触发浏览器下载，返回 void；下载中由调用方维护 loading 状态
+export const exportDatasetCsv = async (
+  slug: string,
+  params: { columns?: string; filters?: string } = {}
+): Promise<void> => {
+  const res = await client.get(`/datasets/${slug}/export`, {
+    params,
+    responseType: "blob",
+  });
+  // 从 Content-Disposition 解析文件名，失败回退默认名
+  const disposition = res.headers?.["content-disposition"] ?? "";
+  const match = /filename="?([^"]+)"?/.exec(disposition);
+  const filename = match?.[1] ?? `${slug}.csv`;
+  const blob = new Blob([res.data as BlobPart], {
+    type: "text/csv;charset=utf-8",
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};

@@ -33,6 +33,7 @@ from apps.manager.query import (
     get_row,
     import_rows,
     insert_row,
+    iter_filtered_table_rows,
     iter_select_rows,
     iter_table_rows,
     parse_csv_upload,
@@ -1732,6 +1733,94 @@ def test_iter_table_rows_unknown_table_raises() -> None:
     try:
         with pytest.raises(QueryError):
             list(iter_table_rows(engine, "nonexistent", schema=None))
+    finally:
+        engine.dispose()
+
+
+# ============================================================
+# P9-Q1 iter_filtered_table_rows（带列裁剪与筛选的流式拉取）
+# ============================================================
+
+
+def test_iter_filtered_table_rows_streams_all() -> None:
+    """无 filter/columns 时应流式生成全部行（等价 iter_table_rows）."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        rows = list(iter_filtered_table_rows(engine, "users", schema=None))
+        assert len(rows) == 5
+        assert rows[0]["name"] == "Alice"
+    finally:
+        engine.dispose()
+
+
+def test_iter_filtered_table_rows_columns_subset() -> None:
+    """columns 裁剪列：仅返回指定列."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        rows = list(iter_filtered_table_rows(engine, "users", schema=None, columns=["name", "age"]))
+        assert len(rows) == 5
+        assert set(rows[0].keys()) == {"name", "age"}
+    finally:
+        engine.dispose()
+
+
+def test_iter_filtered_table_rows_with_filters() -> None:
+    """filters 筛选行：仅返回满足条件的行."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        rows = list(
+            iter_filtered_table_rows(
+                engine,
+                "users",
+                schema=None,
+                filters={"age": {"op": "ge", "val": 28}},
+            )
+        )
+        assert len(rows) == 3  # Alice(30), Charlie(35), David(28)
+        names = {r["name"] for r in rows}
+        assert names == {"Alice", "Charlie", "David"}
+    finally:
+        engine.dispose()
+
+
+def test_iter_filtered_table_rows_batch_size() -> None:
+    """小 batch_size 也应正确分批."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        rows = list(iter_filtered_table_rows(engine, "users", schema=None, batch_size=2))
+        assert len(rows) == 5
+    finally:
+        engine.dispose()
+
+
+def test_iter_filtered_table_rows_invalid_column_raises() -> None:
+    """非法列名应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        _setup_tables(engine)
+        with pytest.raises(QueryError):
+            list(
+                iter_filtered_table_rows(
+                    engine,
+                    "users",
+                    schema=None,
+                    columns=["nonexistent"],
+                )
+            )
+    finally:
+        engine.dispose()
+
+
+def test_iter_filtered_table_rows_unknown_table_raises() -> None:
+    """不存在的表应抛 QueryError."""
+    engine = _make_memory_engine()
+    try:
+        with pytest.raises(QueryError):
+            list(iter_filtered_table_rows(engine, "nonexistent", schema=None))
     finally:
         engine.dispose()
 

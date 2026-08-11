@@ -24,11 +24,13 @@ import json
 import threading
 import time
 import uuid
+from collections.abc import Iterator
 from typing import Any, cast
+from urllib.parse import quote
 
 from django.conf import settings
 from django.db import connections
-from django.http import HttpRequest, HttpResponse, JsonResponse
+from django.http import HttpRequest, HttpResponse, HttpResponseBase, JsonResponse, StreamingHttpResponse
 from ninja import Router
 from ninja.errors import HttpError
 from sqlalchemy.exc import SQLAlchemyError
@@ -40,7 +42,14 @@ from apps.audit.audit import log_audit
 from apps.audit.models import AuditAction, AuditStatus
 from apps.ingest.models import ConflictStrategy
 from apps.ingest.writer import write_rows
-from apps.manager.query import QueryError, get_column_names, get_pk_columns, query_table_rows
+from apps.manager.query import (
+    QueryError,
+    get_column_names,
+    get_pk_columns,
+    iter_filtered_table_rows,
+    query_table_rows,
+    rows_to_csv,
+)
 from apps.sync.models import SyncConfig
 from apps.sync.sync_service import SyncError, SyncService
 from apps.system.distributed_lock import get_lock
@@ -451,6 +460,129 @@ def preview_rows(  # noqa: PLR0913, PLR0917
         columns=returned_columns,
     ).model_dump()
     return JsonResponse(body)
+
+
+# ============================================================
+# 管理端点：导出 CSV
+# ============================================================
+
+
+@router.get("/{slug}/export")
+def export_dataset_rows(
+    request: HttpRequest,
+    slug: str,
+    format: str = "csv",
+    columns: str | None = None,
+    filters: str | None = None,
+) -> HttpResponseBase:
+    """导出数据集行为 CSV（所有登录用户可读，JWT 认证）.
+
+    Query 参数：
+
+        format: 导出格式，仅 ``csv``（默认）。
+        columns: 逗号分隔的列名列表；为空时按白名单或全部列返回。
+        filters: JSON 字符串，格式 ``{"列名":{"op":"eq/ne/...","val":...}}``，
+                 与 Dataset.filter_expression AND 组合，同名列以 Dataset 为准。
+
+    行为：
+
+    - 复用 ``_query_dataset_rows`` 的列裁剪与 filter 合并逻辑（白名单子集校验、
+      Dataset.filter_expression 强制行级过滤）。
+    - ``is_active=False`` 的数据集返回 404；数据源 ``is_active=False`` 返回 404。
+    - 限流：按 ``dataset_export:{user_id}`` 维度令牌桶限流，超限 429 + ``Retry-After``。
+    - 流式响应：``StreamingHttpResponse`` + ``rows_to_csv``，UTF-8 BOM，
+      ``Content-Disposition: attachment; filename="{slug}.csv"``。
+
+    审计与权限过滤增强在 P9-Q2 实施；当前仅基础导出 + 限流。
+    """
+    fmt = format.lower()
+    if fmt != "csv":
+        raise HttpError(400, f"不支持的导出格式: {format}（数据集导出仅支持 csv）")
+
+    user = cast(User, getattr(request, "auth", None))
+    if user is None or not isinstance(user, User):  # pragma: no cover - JWTAuth 已校验
+        raise HttpError(401, "未认证")
+
+    # 令牌桶限流：按 user_id 维度，防止滥用导出大表
+    rate_key = f"dataset_export:{user.pk}"
+    allowed, retry_after = check_token_bucket(
+        rate_key,
+        capacity=settings.RATE_LIMIT_DATASET_EXPORT_CAPACITY,
+        refill_rate=settings.RATE_LIMIT_DATASET_EXPORT_REFILL_RATE,
+    )
+    if not allowed:
+        resp = JsonResponse(
+            {"detail": f"导出请求过于频繁，请 {retry_after} 秒后重试"},
+            status=429,
+        )
+        resp["Retry-After"] = str(retry_after)
+        return resp
+
+    ds = _get_dataset_or_404(slug, active_only=True)
+    datasource: DataSource = ds.datasource
+    if not datasource.is_active:
+        raise HttpError(404, "数据源已停用")
+
+    # 解析并合并 filters / columns（复用 /rows 的逻辑）
+    user_filters = _parse_filters_param(filters)
+    user_columns = _parse_columns_param(columns)
+    dataset_filters = _normalize_filter_expr(dict(cast("dict[str, Any]", ds.filter_expression)))
+    merged_filters = _merge_filters(dataset_filters, user_filters)
+    selected_columns = _resolve_columns(
+        list(cast("list[str]", ds.fields_whitelist)),
+        user_columns,
+    )
+
+    engine = get_engine(datasource)
+    schema = ds.schema_name or None
+
+    # Eager 校验表存在并获取列名（避免生成器延迟到流式阶段才抛错，此时响应头已发送）
+    try:
+        table_columns = get_column_names(engine, ds.table_name, schema)
+    except QueryError as exc:
+        raise HttpError(400, str(exc)) from None
+    except SQLAlchemyError as exc:
+        raise HttpError(400, f"读取表元数据失败: {exc}") from None
+
+    # 校验用户请求列在表内（selected_columns 已过白名单校验，但需确认列确实存在于表）
+    if selected_columns:
+        table_cols_set = set(table_columns)
+        invalid = [c for c in selected_columns if c not in table_cols_set]
+        if invalid:
+            raise HttpError(400, f"非法列名: {invalid}")
+        returned_columns = selected_columns
+    else:
+        returned_columns = table_columns
+
+    try:
+        rows_iter = iter_filtered_table_rows(
+            engine,
+            table_name=ds.table_name,
+            schema=schema,
+            columns=selected_columns,
+            filters=merged_filters,
+        )
+        chunks: Iterator[str] = rows_to_csv(rows_iter, returned_columns)
+    except QueryError as exc:  # pragma: no cover - eager 校验已拦截大部分场景
+        raise HttpError(400, str(exc)) from None
+    except SQLAlchemyError as exc:  # pragma: no cover
+        raise HttpError(400, f"导出失败: {exc}") from None
+
+    filename = f"{slug}.csv"
+    disposition = f"attachment; filename=\"{filename}\"; filename*=UTF-8''{quote(filename)}"
+
+    def _stream() -> Iterator[bytes]:
+        try:
+            for chunk in chunks:
+                yield chunk.encode("utf-8")
+        except QueryError as exc:  # pragma: no cover - eager 校验已拦截
+            yield f"\n[导出错误] {exc}".encode()
+        except SQLAlchemyError as exc:  # pragma: no cover
+            yield f"\n[导出错误] {exc}".encode()
+
+    resp = StreamingHttpResponse(_stream(), content_type="text/csv; charset=utf-8")
+    resp["Content-Disposition"] = disposition
+    return resp
 
 
 # ============================================================

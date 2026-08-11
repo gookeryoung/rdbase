@@ -879,6 +879,63 @@ def iter_table_rows(
                 yield cast("dict[str, Any]", dict(row._mapping))
 
 
+def iter_filtered_table_rows(  # noqa: PLR0913, PLR0917
+    engine: Engine,
+    table_name: str,
+    schema: str | None = None,
+    columns: list[str] | None = None,
+    filters: dict[str, dict[str, Any]] | None = None,
+    batch_size: int = 1000,
+) -> Iterator[dict[str, Any]]:
+    """流式生成带列裁剪与筛选条件的表行数据（生成器）.
+
+    与 :func:`iter_table_rows` 的差异：支持 ``columns`` 列裁剪与 ``filters``
+    筛选条件，复用 :func:`query_table_rows` 的列名校验与 WHERE 构造逻辑，
+    适用于数据集导出等需应用行级过滤/列级白名单的场景。
+
+    Args:
+        engine: SQLAlchemy 引擎。
+        table_name: 表名。
+        schema: Schema 名（SQLite 强制 None）。
+        columns: 显式指定的列名列表；None 或空表示所有列。
+        filters: 筛选条件，格式 ``{列名: {"op": "eq/ne/gt/lt/ge/le/like/in", "val": ...}}``。
+        batch_size: 每批拉取行数，默认 1000。
+
+    Yields:
+        行数据 dict（键为列名）。
+
+    Raises:
+        QueryError: 列名非法、操作符不支持、表不存在或反射失败。
+    """
+    filters = filters or {}
+    dialect = engine.dialect.name
+    effective_schema = _resolve_schema(engine, schema)
+    table_ref = _format_table_ref(table_name, effective_schema, dialect)
+
+    allowed = set(get_column_names(engine, table_name, schema))
+    selected_columns = _validate_columns(allowed, columns)
+    _validate_filter_columns(allowed, filters)
+
+    if selected_columns:
+        select_cols = ", ".join(_quote_ident(c, dialect) for c in selected_columns)
+    else:
+        select_cols = "*"
+
+    where_sql, params = _build_where_clause(filters, dialect)
+    where_clause = f" WHERE {where_sql}" if where_sql else ""
+    select_sql = f"SELECT {select_cols} FROM {table_ref}{where_clause}"
+
+    with engine.connect() as conn:
+        exec_conn = conn.execution_options(stream_results=True) if dialect != EngineType.SQLITE else conn
+        result = exec_conn.execute(text(select_sql), params)
+        while True:
+            batch = result.fetchmany(batch_size)
+            if not batch:
+                break
+            for row in batch:
+                yield cast("dict[str, Any]", dict(row._mapping))
+
+
 def rows_to_csv(
     rows_iter: Iterator[dict[str, Any]],
     columns: list[str],
@@ -1258,6 +1315,7 @@ __all__ = [
     "get_row",
     "import_rows",
     "insert_row",
+    "iter_filtered_table_rows",
     "iter_select_rows",
     "iter_table_rows",
     "parse_csv_upload",
