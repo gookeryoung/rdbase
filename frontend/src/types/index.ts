@@ -823,7 +823,7 @@ export interface TargetColumnInfo {
 // ----------------- 数据爬取（P7） -----------------
 
 // 爬取源类型
-export type IngestSourceType = "api" | "html" | "file" | "rss";
+export type IngestSourceType = "api" | "html" | "file" | "rss" | "webhook";
 
 // 爬取任务状态
 export type IngestStatus = "active" | "paused" | "error";
@@ -868,6 +868,8 @@ export interface IngestTask {
   cron_expression: string;
   clean_config: Record<string, unknown>;
   validation_config: Record<string, unknown>;
+  incremental_config: Record<string, unknown>;
+  webhook_token: string | null;
   next_run_at: string | null;
   last_run_at: string | null;
   last_sync_at: string | null;
@@ -899,6 +901,7 @@ export interface IngestTaskCreate {
   cron_expression?: string;
   clean_config?: Record<string, unknown>;
   validation_config?: Record<string, unknown>;
+  incremental_config?: Record<string, unknown>;
   field_mappings: IngestFieldMapping[];
 }
 

@@ -10,6 +10,16 @@ parse_config 结构::
         "next_page_path": "$.pagination.next", // 可选，下一页 URL 的 JSONPath
         "next_page_max": 10                     // 可选，最大翻页数（默认 0=不限）
     }
+
+增量策略 API_UPDATED_AT（incremental_config）::
+
+    {
+        "strategy": "api_updated_at",
+        "param_name": "updated_since",   // 可选，查询参数名（默认 updated_since）
+        "format": "iso"                  // 可选，时间格式（"iso" 或 strftime 如 "%Y-%m-%d"）
+    }
+
+启用增量时自动将 ``task.last_sync_at`` 作为查询参数追加到 start_url。
 """
 
 from __future__ import annotations
@@ -17,11 +27,14 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Iterator
+from datetime import datetime
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlparse
 
 from jsonpath_ng.ext import parse as jsonpath_parse  # type: ignore[import-not-found]
 from scrapy.http import Request, Response  # type: ignore[import-not-found]
 
+from apps.ingest.models import IncrementalStrategy
 from apps.ingest.spiders.base import BaseIngestSpider
 
 logger = logging.getLogger(__name__)
@@ -42,10 +55,17 @@ class ApiIngestSpider(BaseIngestSpider):
             self.start_urls = [self.source_url]
 
     def start_requests(self) -> Iterator[Request]:  # type: ignore[missing-override-decorator, override]
-        """发起首个请求，附带已解密请求头."""
+        """发起首个请求，附带已解密请求头与增量参数."""
         method = str(self.request_config.get("method", "GET")).upper()
         body = self.request_config.get("body")
-        for url in self.start_urls:
+
+        # 增量策略：API_UPDATED_AT 注入查询参数
+        strategy = str(self.incremental_config.get("strategy", IncrementalStrategy.NONE))
+        urls = self.start_urls
+        if strategy == IncrementalStrategy.API_UPDATED_AT:
+            urls = [self._inject_updated_param(url) for url in urls]
+
+        for url in urls:
             yield Request(
                 url,
                 method=method,
@@ -54,6 +74,55 @@ class ApiIngestSpider(BaseIngestSpider):
                 callback=self.parse,
                 dont_filter=True,
             )
+
+    def _inject_updated_param(self, url: str) -> str:
+        """按 API_UPDATED_AT 策略将 last_sync_at 作为查询参数追加到 URL.
+
+        参数名取 ``incremental_config.param_name``（默认 ``updated_since``）。
+        时间格式取 ``incremental_config.format``（默认 ``iso``，即 ISO 8601）；
+        也支持 strftime 模式（如 ``%Y-%m-%d``）。
+
+        首次执行（last_sync_at 为空）时不追加参数，全量拉取。
+        """
+        last_sync = self.request_config.get("__last_sync_at__")
+        if not last_sync:
+            logger.info("API_UPDATED_AT 增量策略启用但 last_sync_at 为空，首次全量拉取: task_id=%s", self.task_id)
+            return url
+
+        cfg = self.incremental_config or {}
+        param_name = str(cfg.get("param_name", "updated_since"))
+        fmt = str(cfg.get("format", "iso"))
+        value = self._format_last_sync(last_sync, fmt)
+
+        # 用 urlencode 正确拼接查询参数，避免手动拼接导致的转义问题
+        parsed = urlparse(url)
+        existing_params = dict(parse_qsl(parsed.query))
+        existing_params[param_name] = value
+        new_query = urlencode(existing_params)
+        return (
+            f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{new_query}"
+            if parsed.scheme
+            else f"{url}&{param_name}={value}"
+            if "?" in url
+            else f"{url}?{param_name}={value}"
+        )
+
+    @staticmethod
+    def _format_last_sync(last_sync: str, fmt: str) -> str:
+        """按配置格式化 last_sync_at 时间字符串.
+
+        Args:
+            last_sync: ISO 8601 格式的时间字符串（由 engine 注入）。
+            fmt: 格式标识，``"iso"`` 原样返回；其他值视为 strftime 模式。
+        """
+        if fmt == "iso":
+            return last_sync
+        try:
+            dt = datetime.fromisoformat(last_sync)
+            return dt.strftime(fmt)
+        except (ValueError, TypeError):
+            logger.warning("last_sync_at 格式化失败，回退 ISO: %s", last_sync)
+            return last_sync
 
     def parse(self, response: Response, **kwargs: Any) -> Iterator[Any]:  # type: ignore[missing-override-decorator, override]
         """解析 JSON 响应，提取条目并翻页.

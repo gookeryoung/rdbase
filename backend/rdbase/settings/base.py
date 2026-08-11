@@ -110,6 +110,12 @@ DATASET_WRITE_DAILY_QUOTA: int = 10000
 RATE_LIMIT_TRIGGER_CAPACITY: int = 10
 RATE_LIMIT_TRIGGER_REFILL_RATE: float = 0.5
 
+# Webhook 接收端点令牌桶限流（iter-54，按 webhook_token 维度限流）
+# - RATE_LIMIT_WEBHOOK_CAPACITY: 桶容量，允许的突发上限（数据推送场景默认高于触发端点）
+# - RATE_LIMIT_WEBHOOK_REFILL_RATE: 每秒补充的令牌数（长期平均速率上限）
+RATE_LIMIT_WEBHOOK_CAPACITY: int = 20
+RATE_LIMIT_WEBHOOK_REFILL_RATE: float = 2.0
+
 # 密码验证
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},

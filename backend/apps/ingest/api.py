@@ -11,6 +11,8 @@
 - GET /ingest/alerts：列出告警
 - POST /ingest/alerts/{id}/ack：确认告警（管理员）
 - GET /ingest/stats：爬取统计
+- POST /ingest/tasks/{id}/trigger：外部 API Token 触发爬取（sync:trigger scope）
+- POST /ingest/webhook/{token}：Webhook 被动接收（公开，token 自身即鉴权）
 
 写操作由 AuditMiddleware 中间件层捕获为通用 WRITE 审计；
 ingest 专用审计枚举与显式业务上下文记录在 iter-35 补全。
@@ -18,6 +20,7 @@ ingest 专用审计枚举与显式业务上下文记录在 iter-35 补全。
 
 from __future__ import annotations
 
+import json
 import subprocess
 from typing import Any, cast
 
@@ -57,11 +60,16 @@ from apps.ingest.schemas import (
     IngestTaskUpdateIn,
     IngestTriggerOut,
     MessageOut,
+    WebhookReceiveOut,
 )
+from apps.ingest.webhook import run_webhook_pipelines
 from apps.sync.scheduling import CronError, validate_cron
 from apps.system.distributed_lock import get_lock
 from apps.system.idempotency import (
+    IdempotencyState,
     check_idempotency,
+    get_idempotency_key,
+    get_manager,
     release_idempotency,
     store_idempotency_result,
 )
@@ -72,6 +80,12 @@ router = Router(tags=["ingest"], auth=JWTAuth())
 _VALID_SOURCE_TYPES = {st.value for st in SourceType}
 _VALID_AUTH_TYPES = {a.value for a in AuthType}
 _VALID_CONFLICT_STRATEGIES = {c.value for c in ConflictStrategy}
+_VALID_INCREMENTAL_STRATEGIES = {
+    "none",
+    "api_updated_at",
+    "html_fingerprint",
+    "db_timestamp",
+}
 
 
 def _require_scope(request: HttpRequest, scope: str) -> ApiToken:
@@ -131,6 +145,8 @@ def _task_to_out(task: IngestTask) -> IngestTaskOut:
         cron_expression=task.cron_expression,
         clean_config=cast(dict[str, Any], task.clean_config or {}),
         validation_config=cast(dict[str, Any], task.validation_config or {}),
+        incremental_config=cast(dict[str, Any], task.incremental_config or {}),
+        webhook_token=task.webhook_token,
         next_run_at=task.next_run_at,
         last_run_at=task.last_run_at,
         last_sync_at=task.last_sync_at,
@@ -186,6 +202,7 @@ def _validate_task_fields(  # noqa: PLR0913
     target_datasource_id: int,
     scheduler_enabled: bool,
     cron_expression: str,
+    incremental_config: dict[str, Any] | None = None,
 ) -> None:
     """校验任务字段合法性与目标数据源存在性.
 
@@ -205,6 +222,10 @@ def _validate_task_fields(  # noqa: PLR0913
             validate_cron(cron_expression)
         except CronError as exc:
             raise HttpError(400, str(exc)) from exc
+    if incremental_config is not None:
+        strategy = str(incremental_config.get("strategy", "none"))
+        if strategy not in _VALID_INCREMENTAL_STRATEGIES:
+            raise HttpError(400, f"无效的增量策略: {strategy}")
 
 
 def _sync_field_mappings(task: IngestTask, mappings: list[Any]) -> None:
@@ -245,6 +266,7 @@ def create_task(request: HttpRequest, payload: IngestTaskCreateIn) -> HttpRespon
         target_datasource_id=payload.target_datasource_id,
         scheduler_enabled=payload.scheduler_enabled,
         cron_expression=payload.cron_expression,
+        incremental_config=payload.incremental_config,
     )
     task = IngestTask(
         name=payload.name,
@@ -263,6 +285,7 @@ def create_task(request: HttpRequest, payload: IngestTaskCreateIn) -> HttpRespon
         cron_expression=payload.cron_expression,
         clean_config=payload.clean_config,
         validation_config=payload.validation_config,
+        incremental_config=payload.incremental_config,
         created_by=request.auth,
     )
     if payload.headers:
@@ -296,6 +319,7 @@ def update_task(request: HttpRequest, task_id: int, payload: IngestTaskUpdateIn)
     target_datasource_id = data.get("target_datasource_id", task.target_datasource_id)
     scheduler_enabled = data.get("scheduler_enabled", task.scheduler_enabled)
     cron_expression = data.get("cron_expression", task.cron_expression)
+    incremental_config = data.get("incremental_config")
     _validate_task_fields(
         source_type=source_type,
         auth_type=auth_type,
@@ -303,6 +327,7 @@ def update_task(request: HttpRequest, task_id: int, payload: IngestTaskUpdateIn)
         target_datasource_id=target_datasource_id,
         scheduler_enabled=scheduler_enabled,
         cron_expression=cron_expression,
+        incremental_config=incremental_config,
     )
 
     for field in (
@@ -323,6 +348,7 @@ def update_task(request: HttpRequest, task_id: int, payload: IngestTaskUpdateIn)
         "status",
         "clean_config",
         "validation_config",
+        "incremental_config",
     ):
         if field in data:
             setattr(task, field, data[field])
@@ -651,3 +677,163 @@ def trigger_task(request: HttpRequest, task_id: int) -> HttpResponse:
     ).model_dump(mode="json")
     store_idempotency_result(request, 200, body)
     return JsonResponse(body)
+
+
+# ================================================================
+# Webhook 被动接收端点：POST /webhook/{token}
+# ================================================================
+
+
+@router.post("/webhook/{token}", response=WebhookReceiveOut, auth=None)
+def receive_webhook(request: HttpRequest, token: str) -> HttpResponse:  # noqa: PLR0912
+    """Webhook 被动接收端点（公开，token 自身即鉴权）.
+
+    外部应用通过 ``POST /ingest/webhook/{token}`` 推送数据，payload 经完整
+    pipeline 链（清洗 → 校验 → 字段映射 → 写入）同步处理后返回结果。
+
+    处理流程：
+
+    1. 按 token 查找 WEBHOOK 类型任务（未命中或类型不符返回 404）。
+    2. 解析 payload（支持 list 或单个 dict，非 dict/空返回 400）。
+    3. 幂等检查（``Idempotency-Key`` 命中回放结果，subject=``webhook:{token}``）。
+    4. 令牌桶限流 ``webhook:{token}``（超额返回 429 + ``Retry-After``）。
+    5. 同步执行 pipeline 链，写 ``WEBHOOK_RECEIVE`` 审计（成功/失败均写）。
+    6. 存幂等结果返回。
+    """
+    task = _get_webhook_task_or_404(token)
+
+    items = _parse_webhook_payload(request)
+    if items is None:
+        raise HttpError(400, "payload 必须为 JSON 对象或数组")
+
+    # 幂等：webhook 端点无认证主体，用 token 自身作为 subject
+    idem_subject = f"webhook:{token}"
+    idem_key = get_idempotency_key(request)
+    manager = get_manager()
+    if idem_key:
+        record, should_run = manager.acquire(idem_subject, idem_key)
+        if not should_run:
+            if record is None:
+                raise HttpError(409, "相同 Idempotency-Key 请求正在执行中")
+            if record.state == IdempotencyState.COMPLETED:
+                try:
+                    cached_body = json.loads(record.body)
+                except json.JSONDecodeError:
+                    manager.release(idem_subject, idem_key)
+                else:
+                    return JsonResponse(cached_body, status=record.status_code)
+            else:
+                raise HttpError(409, "相同 Idempotency-Key 请求正在执行中")
+
+    # 令牌桶限流：按 webhook_token 维度
+    rate_key = f"webhook:{token}"
+    allowed, retry_after = check_token_bucket(
+        rate_key,
+        capacity=settings.RATE_LIMIT_WEBHOOK_CAPACITY,
+        refill_rate=settings.RATE_LIMIT_WEBHOOK_REFILL_RATE,
+    )
+    if not allowed:
+        if idem_key:
+            manager.release(idem_subject, idem_key)
+        resp = JsonResponse(
+            {"detail": f"Webhook 请求过于频繁，请 {retry_after} 秒后重试"},
+            status=429,
+        )
+        resp["Retry-After"] = str(retry_after)
+        return resp
+
+    status = AuditStatus.SUCCESS
+    error_msg = ""
+    try:
+        log = run_webhook_pipelines(task, items)
+    except Exception as exc:
+        if idem_key:
+            manager.release(idem_subject, idem_key)
+        status = AuditStatus.FAILURE
+        error_msg = str(exc)
+        log_audit(
+            request,
+            action=AuditAction.WEBHOOK_RECEIVE,
+            status=AuditStatus.FAILURE,
+            resource_type="ingest_task",
+            resource_id=str(task.pk),
+            error_message=error_msg,
+            extra={"task_id": task.pk, "webhook_token": token, "rows_read": len(items)},
+        )
+        raise HttpError(500, f"Webhook 处理失败: {exc}") from exc
+
+    log_audit(
+        request,
+        action=AuditAction.WEBHOOK_RECEIVE,
+        status=status,
+        resource_type="ingest_task",
+        resource_id=str(task.pk),
+        row_count=log.rows_written + log.rows_skipped,
+        elapsed_ms=log.duration_ms,
+        error_message=error_msg,
+        extra={
+            "task_id": task.pk,
+            "log_id": log.pk,
+            "webhook_token": token,
+            "rows_read": log.rows_read,
+            "rows_written": log.rows_written,
+            "rows_skipped": log.rows_skipped,
+        },
+    )
+
+    body = WebhookReceiveOut(
+        task_id=task.pk,
+        log_id=log.pk,
+        rows_read=log.rows_read,
+        rows_written=log.rows_written,
+        rows_skipped=log.rows_skipped,
+        quality_score=log.quality_score,
+    ).model_dump(mode="json")
+    if idem_key:
+        manager.store_result(idem_subject, idem_key, 200, json.dumps(body, ensure_ascii=False, default=str))
+    return JsonResponse(body)
+
+
+def _get_webhook_task_or_404(token: str) -> IngestTask:
+    """按 webhook_token 查找 WEBHOOK 类型任务，未命中或类型不符返回 404.
+
+    Args:
+        token: URL 路径中的 webhook token。
+
+    Raises:
+        HttpError(404): token 不存在或对应任务非 WEBHOOK 源类型。
+    """
+    try:
+        task = IngestTask.objects.get(webhook_token=token)
+    except IngestTask.DoesNotExist as exc:
+        raise HttpError(404, "Webhook token 无效") from exc
+    if task.source_type != SourceType.WEBHOOK:
+        raise HttpError(404, "Webhook token 无效")
+    if not task.is_active:
+        raise HttpError(409, f"爬取任务 {task.pk} 已暂停或处于错误状态")
+    return task
+
+
+def _parse_webhook_payload(request: HttpRequest) -> list[dict[str, Any]] | None:
+    """解析 webhook 请求体为 item 列表.
+
+    支持两种格式：
+
+    - JSON 数组：``[{...}, {...}]``，每个元素须为 dict。
+    - JSON 对象：``{...}``，包装为单元素列表。
+
+    Args:
+        request: HTTP 请求。
+
+    Returns:
+        item 列表；请求体非 JSON、非 dict/list、或元素非 dict 时返回 None。
+    """
+    try:
+        data = json.loads(request.body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if isinstance(data, dict):
+        return [data]
+    if isinstance(data, list) and all(isinstance(it, dict) for it in data):
+        return data if data else None
+    return None

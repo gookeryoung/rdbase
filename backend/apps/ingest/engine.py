@@ -32,6 +32,7 @@ from apps.ingest.models import (
 )
 from apps.ingest.spiders.api_spider import ApiIngestSpider
 from apps.ingest.spiders.base import BaseIngestSpider
+from apps.ingest.spiders.database_spider import DatabaseIngestSpider
 from apps.ingest.spiders.file_spider import FileIngestSpider
 from apps.ingest.spiders.html_spider import HtmlIngestSpider
 from apps.ingest.spiders.rss_spider import RssIngestSpider
@@ -208,19 +209,55 @@ def _run_spider(task: IngestTask) -> SpiderStats:
     rows_read = int(stats.get_value("item_scraped_count", 0) or 0)
     rows_written = int(stats.get_value("ingest_rows_written", 0) or 0)
     rows_skipped = int(stats.get_value("ingest_rows_skipped", 0) or 0)
+
+    # HTML_FINGERPRINT 增量策略：将新指纹写回 task.incremental_config._last_fingerprint
+    fingerprint = stats.get_value("_html_fingerprint")
+    if fingerprint:
+        _save_html_fingerprint(task, str(fingerprint))
+
     return SpiderStats(rows_read=rows_read, rows_written=rows_written, rows_skipped=rows_skipped)
 
 
+def _save_html_fingerprint(task: IngestTask, fingerprint: str) -> None:
+    """将 HTML 指纹写回 task.incremental_config._last_fingerprint.
+
+    仅更新 ``_last_fingerprint`` 键，保留 incremental_config 中的其他配置。
+    重新读取 task 以避免覆盖并发修改。
+    """
+    try:
+        fresh = IngestTask.objects.get(pk=task.pk)
+        cfg = dict(fresh.incremental_config or {})
+        cfg["_last_fingerprint"] = fingerprint
+        fresh.incremental_config = cfg
+        fresh.save(update_fields=["incremental_config"])
+        # 同步本地 task 实例，避免后续逻辑读到旧值
+        task.incremental_config = cfg
+    except IngestTask.DoesNotExist:  # pragma: no cover - task 不应在爬取中删除
+        logger.warning("HTML 指纹持久化失败：task_id=%s 不存在", task.pk)
+
+
+# 源类型到 Spider 类的映射（WEBHOOK 不经 Scrapy，由 webhook API 端点直接处理）
+_SPIDER_MAP: dict[str, type[BaseIngestSpider]] = {
+    SourceType.API: ApiIngestSpider,
+    SourceType.HTML: HtmlIngestSpider,
+    SourceType.FILE: FileIngestSpider,
+    SourceType.RSS: RssIngestSpider,
+    SourceType.DATABASE: DatabaseIngestSpider,
+}
+
+
 def _resolve_spider(source_type: str) -> type[BaseIngestSpider]:
-    """按源类型解析 Spider 类."""
-    if source_type == SourceType.API:
-        return ApiIngestSpider
-    if source_type == SourceType.HTML:
-        return HtmlIngestSpider
-    if source_type == SourceType.FILE:
-        return FileIngestSpider
-    if source_type == SourceType.RSS:
-        return RssIngestSpider
+    """按源类型解析 Spider 类.
+
+    WEBHOOK 源类型不经 Scrapy spider（由 ``POST /ingest/webhook/{token}`` 端点
+    直接处理），返回基类占位并记日志。未知源类型抛 ``IngestError``。
+    """
+    spider_cls = _SPIDER_MAP.get(source_type)
+    if spider_cls is not None:
+        return spider_cls
+    if source_type == SourceType.WEBHOOK:
+        logger.warning("WEBHOOK 源类型不经 Scrapy spider，应通过 POST /ingest/webhook/{token} 触发")
+        return BaseIngestSpider
     if source_type in dict(SourceType.choices):
         logger.warning("源类型 %s 的专用 spider 尚未实现，使用 BaseIngestSpider 占位", source_type)
         return BaseIngestSpider
@@ -239,11 +276,16 @@ def _build_spider_kwargs(task: IngestTask) -> dict[str, Any]:
         }
         for m in task.field_mappings.all()
     ]
+    request_config = cast(dict[str, Any], task.request_config or {})
+    # 增量策略需要 last_sync_at，通过 request_config 透传（避免改 BaseIngestSpider 签名）
+    # API_UPDATED_AT / DB_TIMESTAMP / HTML_FINGERPRINT 均可能使用
+    if task.last_sync_at is not None:
+        request_config = {**request_config, "__last_sync_at__": task.last_sync_at.isoformat()}
     return {
         "source_url": task.source_url,
         "parse_config": cast(dict[str, Any], task.parse_config or {}),
         "headers": task.get_headers(),
-        "request_config": cast(dict[str, Any], task.request_config or {}),
+        "request_config": request_config,
         "mappings": mappings,
         "target_datasource_id": task.target_datasource_id,
         "target_table": task.target_table,
@@ -252,6 +294,8 @@ def _build_spider_kwargs(task: IngestTask) -> dict[str, Any]:
         "clean_config": cast(dict[str, Any], task.clean_config or {}),
         "validation_config": cast(dict[str, Any], task.validation_config or {}),
         "task_id": task.pk,
+        # 增量策略配置（P8-Q4）：spider 按策略类型决定是否注入增量参数
+        "incremental_config": cast(dict[str, Any], task.incremental_config or {}),
     }
 
 

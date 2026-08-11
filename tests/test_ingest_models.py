@@ -48,7 +48,7 @@ class TestEnums:
     """枚举值校验."""
 
     def test_source_type_choices(self) -> None:
-        assert {st.value for st in SourceType} == {"api", "html", "file", "rss"}
+        assert {st.value for st in SourceType} == {"api", "html", "file", "rss", "database", "webhook"}
 
     def test_conflict_strategy_matches_sync_semantics(self) -> None:
         assert {c.value for c in ConflictStrategy} == {"upsert", "skip", "error"}

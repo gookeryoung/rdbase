@@ -60,6 +60,7 @@ class IngestTaskCreateIn(BaseModel):
     cron_expression: str = ""
     clean_config: dict[str, Any] = {}
     validation_config: dict[str, Any] = {}
+    incremental_config: dict[str, Any] = {}
     field_mappings: list[IngestFieldMappingIn] = []
 
 
@@ -86,6 +87,7 @@ class IngestTaskUpdateIn(BaseModel):
     status: str | None = None
     clean_config: dict[str, Any] | None = None
     validation_config: dict[str, Any] | None = None
+    incremental_config: dict[str, Any] | None = None
     field_mappings: list[IngestFieldMappingIn] | None = None
 
 
@@ -110,6 +112,8 @@ class IngestTaskOut(BaseModel):
     cron_expression: str
     clean_config: dict[str, Any]
     validation_config: dict[str, Any]
+    incremental_config: dict[str, Any] = {}
+    webhook_token: str | None = None
     next_run_at: datetime | None = None
     last_run_at: datetime | None = None
     last_sync_at: datetime | None = None
@@ -214,6 +218,30 @@ class IngestTriggerOut(BaseModel):
     returncode: int
     log: IngestLogOut | None = None
     stderr: str = ""
+
+
+class WebhookReceiveOut(BaseModel):
+    """Webhook 接收结果输出（iter-54）.
+
+    外部应用通过 ``POST /ingest/webhook/{token}`` 推送数据后返回的同步处理结果。
+    payload 经完整 pipeline 链（清洗 → 校验 → 字段映射 → 写入）同步处理，
+    返回读取/写入/跳过行数与质量分。
+
+    Attributes:
+        task_id: 爬取任务 ID。
+        log_id: 对应的 IngestLog ID（每次 webhook 接收产生一条日志）。
+        rows_read: 接收的原始行数。
+        rows_written: 成功写入目标表的行数。
+        rows_skipped: 跳过的行数（清洗丢弃/写入冲突）。
+        quality_score: 数据质量分（0-100，无校验规则时为 100）。
+    """
+
+    task_id: int
+    log_id: int
+    rows_read: int
+    rows_written: int
+    rows_skipped: int
+    quality_score: float = 100.0
 
 
 class IngestQualityReportOut(BaseModel):

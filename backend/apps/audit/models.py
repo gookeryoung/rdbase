@@ -71,6 +71,7 @@ class AuditAction(models.TextChoices):
     SYNC_TRIGGER = "sync.trigger", "触发同步"
     INGEST_TRIGGER = "ingest.trigger", "触发爬取"
     WEBHOOK_DELIVER = "webhook.deliver", "Webhook 投递"
+    WEBHOOK_RECEIVE = "webhook.receive", "Webhook 接收"
 
 
 class AuditSource(models.TextChoices):

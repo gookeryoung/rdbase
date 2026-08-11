@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -34,6 +35,27 @@ class SourceType(models.TextChoices):
     HTML = "html", "网页 HTML"
     FILE = "file", "文件下载"
     RSS = "rss", "RSS/Atom"
+    DATABASE = "database", "数据库直连"
+    WEBHOOK = "webhook", "Webhook 被动接收"
+
+
+class IncrementalStrategy(models.TextChoices):
+    """增量爬取策略枚举（P8-Q4）.
+
+    - NONE：全量爬取（默认，不影响现有任务）。
+    - API_UPDATED_AT：API 源按 ``updated_at`` 查询参数传递上次同步时间。
+    - HTML_FINGERPRINT：HTML 源按页面内容指纹跳过未变页面。
+    - DB_TIMESTAMP：DB 源在 SQL WHERE 子句中按 ``timestamp_field > last_sync_at`` 过滤。
+    """
+
+    NONE = "none", "全量"
+    API_UPDATED_AT = "api_updated_at", "API 按 updated_at 参数"
+    HTML_FINGERPRINT = "html_fingerprint", "HTML 按内容指纹"
+    DB_TIMESTAMP = "db_timestamp", "DB 按 timestamp_field"
+
+
+# Webhook token 随机字节数（secrets.token_urlsafe 编码后约 43 字符）
+_WEBHOOK_TOKEN_RANDOM_BYTES = 32
 
 
 class IngestStatus(models.TextChoices):
@@ -132,6 +154,9 @@ class IngestTask(models.Model):
     clean_config = models.JSONField(default=dict, blank=True, verbose_name="清洗配置")
     # 校验配置：ValidationPipeline 按此配置执行质量校验（P8-Q2 启用，预留字段）
     validation_config = models.JSONField(default=dict, blank=True, verbose_name="校验配置")
+    # 增量策略配置（P8-Q4）：strategy=none 时透传不影响现有任务
+    # 结构示例：{"strategy": "api_updated_at", "param_name": "updated_since", "format": "%Y-%m-%d"}
+    incremental_config = models.JSONField(default=dict, blank=True, verbose_name="增量策略配置")
     # 敏感请求头（含 API Key/Cookie 等）整体 JSON 加密存储
     headers_encrypted = models.TextField(blank=True, default="", verbose_name="加密请求头")
     auth_type = models.CharField(
@@ -139,6 +164,15 @@ class IngestTask(models.Model):
         choices=AuthType.choices,
         default=AuthType.NONE,
         verbose_name="鉴权类型",
+    )
+    # Webhook 接收 token（仅 source_type=WEBHOOK 时使用，自动生成）
+    # 通过 POST /ingest/webhook/{token} 被动接收数据，URL 路径中携带此 token 鉴权
+    webhook_token = models.CharField(
+        max_length=64,
+        unique=True,
+        null=True,
+        blank=True,
+        verbose_name="Webhook 接收 token",
     )
 
     # 目标写入
@@ -211,6 +245,35 @@ class IngestTask(models.Model):
     def is_schedulable(self) -> bool:
         """是否可调度（启用且有 cron 表达式）."""
         return bool(self.is_active and self.scheduler_enabled and self.cron_expression)
+
+    @property
+    def incremental_strategy(self) -> str:
+        """从 incremental_config 中提取策略枚举值（默认 NONE）."""
+        cfg = self.incremental_config or {}
+        if not isinstance(cfg, dict):
+            return IncrementalStrategy.NONE
+        return str(cfg.get("strategy", IncrementalStrategy.NONE))
+
+    def save(self, *args: Any, **kwargs: Any) -> None:  # type: ignore[missing-override-decorator, override]
+        """保存时按 source_type 自动维护 webhook_token.
+
+        - source_type=WEBHOOK 且 webhook_token 为空：自动生成（仅一次，避免覆盖已有 token）。
+        - source_type 非 WEBHOOK：清空 webhook_token（保持一致性，避免遗留孤儿 token）。
+        """
+        if self.source_type == SourceType.WEBHOOK and not self.webhook_token:
+            self.webhook_token = self.generate_webhook_token()
+        elif self.source_type != SourceType.WEBHOOK and self.webhook_token:
+            self.webhook_token = None
+        super().save(*args, **kwargs)
+
+    @staticmethod
+    def generate_webhook_token() -> str:
+        """生成 URL 安全的 Webhook 接收 token（约 43 字符）.
+
+        使用 ``secrets.token_urlsafe`` 生成密码学安全的随机串；调用方应在
+        ``save`` 前检查 ``webhook_token`` 是否已存在，避免覆盖。
+        """
+        return secrets.token_urlsafe(_WEBHOOK_TOKEN_RANDOM_BYTES)
 
     def set_headers(self, headers: dict[str, str]) -> None:
         """加密并保存请求头字典.
@@ -638,6 +701,7 @@ __all__ = [
     "AlertLevel",
     "AuthType",
     "ConflictStrategy",
+    "IncrementalStrategy",
     "IngestAlert",
     "IngestFieldMapping",
     "IngestLog",

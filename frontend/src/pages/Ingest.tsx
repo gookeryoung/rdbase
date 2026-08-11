@@ -85,6 +85,7 @@ const sourceTypeLabel: Record<IngestSourceType, string> = {
   html: "HTML",
   file: "文件",
   rss: "RSS",
+  webhook: "Webhook",
 };
 
 // 冲突策略标签
@@ -133,6 +134,8 @@ const defaultParseConfig = (sourceType: IngestSourceType): Record<string, unknow
       return { format: "csv", encoding: "utf-8", delimiter: ",", sheet: "", items_path: "" };
     case "rss":
       return { include_feed_metadata: false };
+    case "webhook":
+      return {};
   }
 };
 
@@ -163,6 +166,7 @@ const createEmptyTask = (): IngestTaskCreate => ({
   cron_expression: "",
   clean_config: {},
   validation_config: {},
+  incremental_config: { strategy: "none" },
   field_mappings: [emptyMapping()],
 });
 
@@ -201,6 +205,7 @@ export default function IngestPage() {
   const [editingTask, setEditingTask] = useState<IngestTaskCreate | null>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editingHasHeaders, setEditingHasHeaders] = useState(false);
+  const [editingWebhookToken, setEditingWebhookToken] = useState<string | null>(null);
   const [headersDraft, setHeadersDraft] = useState<{ key: string; value: string }[]>([]);
   const [fieldsDraftJson, setFieldsDraftJson] = useState("");
   const [fieldsJsonError, setFieldsJsonError] = useState<string>("");
@@ -326,6 +331,7 @@ export default function IngestPage() {
     setEditingTask(empty);
     setEditingId(null);
     setEditingHasHeaders(false);
+    setEditingWebhookToken(null);
     setHeadersDraft([]);
     setFieldsDraftJson("{}");
     setFieldsJsonError("");
@@ -355,6 +361,7 @@ export default function IngestPage() {
       cron_expression: task.cron_expression,
       clean_config: { ...task.clean_config },
       validation_config: { ...task.validation_config },
+      incremental_config: { ...task.incremental_config },
       field_mappings: task.field_mappings.map((m) => ({
         source_field: m.source_field,
         target_field: m.target_field,
@@ -366,6 +373,7 @@ export default function IngestPage() {
     setEditingTask(draft);
     setEditingId(task.id);
     setEditingHasHeaders(task.has_headers);
+    setEditingWebhookToken(task.webhook_token);
     setHeadersDraft([]);
     const fieldsCfg = (task.parse_config?.fields as Record<string, unknown> | undefined) ?? {};
     setFieldsDraftJson(JSON.stringify(fieldsCfg, null, 2));
@@ -408,6 +416,35 @@ export default function IngestPage() {
       ...editingTask,
       request_config: { ...editingTask.request_config, [key]: value },
     });
+  };
+
+  // 增量策略字段更新
+  const updateIncrementalField = (key: string, value: unknown) => {
+    if (!editingTask) return;
+    setEditingTask({
+      ...editingTask,
+      incremental_config: { ...editingTask.incremental_config, [key]: value },
+    });
+  };
+
+  // 增量策略切换（按策略重置对应字段为默认值）
+  const handleStrategyChange = (strategy: string) => {
+    if (!editingTask) return;
+    let newConfig: Record<string, unknown>;
+    switch (strategy) {
+      case "api_updated_at":
+        newConfig = { strategy, param_name: "updated_since", format: "iso" };
+        break;
+      case "db_timestamp":
+        newConfig = { strategy, timestamp_field: "", sql_param: "last_sync_at" };
+        break;
+      case "html_fingerprint":
+      case "none":
+      default:
+        newConfig = { strategy };
+        break;
+    }
+    setEditingTask({ ...editingTask, incremental_config: newConfig });
   };
 
   // 字段映射增删改
@@ -479,6 +516,15 @@ export default function IngestPage() {
       message.warning("启用调度时须填写 Cron 表达式");
       return;
     }
+    const incrementalStrategy =
+      (editingTask.incremental_config?.strategy as string) ?? "none";
+    if (
+      incrementalStrategy === "db_timestamp" &&
+      !(editingTask.incremental_config?.timestamp_field as string)?.trim()
+    ) {
+      message.warning("db_timestamp 策略需要填写时间字段名");
+      return;
+    }
 
     // HTML fields 配置校验
     let finalParseConfig = { ...editingTask.parse_config };
@@ -546,6 +592,7 @@ export default function IngestPage() {
         parse_config: finalParseConfig,
         clean_config: finalCleanConfig,
         validation_config: finalValidationConfig,
+        incremental_config: editingTask.incremental_config ?? { strategy: "none" },
         field_mappings: validMappings,
         headers: shouldSendHeaders ? headers : undefined,
       };
@@ -1065,11 +1112,30 @@ export default function IngestPage() {
                       { value: "html", label: "网页 HTML" },
                       { value: "file", label: "文件下载" },
                       { value: "rss", label: "RSS/Atom" },
+                      { value: "webhook", label: "Webhook 推送" },
                     ]}
                   />
                 </Form.Item>
               </Col>
             </Row>
+
+            {editingTask.source_type === "webhook" && (
+              <Alert
+                type="info"
+                showIcon
+                message="Webhook 接收 URL"
+                description={
+                  editingWebhookToken ? (
+                    <Text code copyable>
+                      POST /ingest/webhook/{editingWebhookToken}
+                    </Text>
+                  ) : (
+                    <Text type="secondary">保存后自动生成 Webhook URL</Text>
+                  )
+                }
+                style={{ marginBottom: 16 }}
+              />
+            )}
 
             <Row gutter={16}>
               <Col span={16}>
@@ -1488,6 +1554,94 @@ export default function IngestPage() {
                 </Form.Item>
               </Col>
             </Row>
+
+            {/* 增量策略配置 */}
+            <Text strong style={{ display: "block", marginTop: 16 }}>
+              增量策略
+            </Text>
+            <Row gutter={16} style={{ marginTop: 8 }}>
+              <Col span={8}>
+                <Form.Item label="策略">
+                  <Select
+                    value={
+                      (editingTask.incremental_config?.strategy as string) ?? "none"
+                    }
+                    onChange={handleStrategyChange}
+                    options={[
+                      { value: "none", label: "全量（默认）" },
+                      { value: "api_updated_at", label: "API 按 updated_at 参数" },
+                      { value: "html_fingerprint", label: "HTML 按内容指纹" },
+                      { value: "db_timestamp", label: "DB 按 timestamp_field" },
+                    ]}
+                  />
+                </Form.Item>
+              </Col>
+            </Row>
+            {((editingTask.incremental_config?.strategy as string) ?? "none") ===
+              "api_updated_at" && (
+                <Row gutter={16}>
+                  <Col span={8}>
+                    <Form.Item label="参数名">
+                      <Input
+                        value={
+                          (editingTask.incremental_config?.param_name as string) ??
+                          "updated_since"
+                        }
+                        onChange={(e) =>
+                          updateIncrementalField("param_name", e.target.value)
+                        }
+                        placeholder="updated_since"
+                      />
+                    </Form.Item>
+                  </Col>
+                  <Col span={8}>
+                    <Form.Item label="时间格式">
+                      <Input
+                        value={
+                          (editingTask.incremental_config?.format as string) ?? "iso"
+                        }
+                        onChange={(e) =>
+                          updateIncrementalField("format", e.target.value)
+                        }
+                        placeholder="iso"
+                      />
+                    </Form.Item>
+                  </Col>
+                </Row>
+              )}
+            {((editingTask.incremental_config?.strategy as string) ?? "none") ===
+              "db_timestamp" && (
+                <Row gutter={16}>
+                  <Col span={8}>
+                    <Form.Item label="时间字段名" required>
+                      <Input
+                        value={
+                          (editingTask.incremental_config?.timestamp_field as string) ??
+                          ""
+                        }
+                        onChange={(e) =>
+                          updateIncrementalField("timestamp_field", e.target.value)
+                        }
+                        placeholder="updated_at"
+                      />
+                    </Form.Item>
+                  </Col>
+                  <Col span={8}>
+                    <Form.Item label="SQL 参数名">
+                      <Input
+                        value={
+                          (editingTask.incremental_config?.sql_param as string) ??
+                          "last_sync_at"
+                        }
+                        onChange={(e) =>
+                          updateIncrementalField("sql_param", e.target.value)
+                        }
+                        placeholder="last_sync_at"
+                      />
+                    </Form.Item>
+                  </Col>
+                </Row>
+              )}
 
             {/* 字段映射 */}
             <Space

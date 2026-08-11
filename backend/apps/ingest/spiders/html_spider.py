@@ -17,10 +17,22 @@ parse_config 结构::
         "next_page_attr": "href",                   // 可选，链接属性名（默认 href）
         "next_page_max": 10                         // 可选，最大翻页数
     }
+
+增量策略 HTML_FINGERPRINT（incremental_config）::
+
+    {
+        "strategy": "html_fingerprint"
+    }
+
+启用增量时计算首页 HTML 的 SHA-256 指纹，与上次存储的指纹比对：
+- 指纹一致：页面未变化，跳过本次爬取（不产出 item，不翻页）。
+- 指纹不一致：正常爬取，新指纹经 ``crawler.stats`` 回传给 engine 持久化到
+  ``task.incremental_config._last_fingerprint``。
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections.abc import Iterator
 from typing import Any
@@ -30,9 +42,13 @@ from lxml import html as lxml_html  # type: ignore[import-not-found]
 from scrapy.http import Request, Response  # type: ignore[import-not-found]
 from selectolax.parser import HTMLParser  # type: ignore[import-not-found]
 
+from apps.ingest.models import IncrementalStrategy
 from apps.ingest.spiders.base import BaseIngestSpider
 
 logger = logging.getLogger(__name__)
+
+# crawler.stats 中存储 HTML 指纹的 key（engine 读取后写回 task.incremental_config）
+_STAT_HTML_FINGERPRINT = "_html_fingerprint"
 
 
 class HtmlIngestSpider(BaseIngestSpider):
@@ -57,12 +73,28 @@ class HtmlIngestSpider(BaseIngestSpider):
     def parse(self, response: Response, **kwargs: Any) -> Iterator[Any]:  # type: ignore[missing-override-decorator, override]
         """解析 HTML 响应，提取行并翻页.
 
+        增量策略 HTML_FINGERPRINT 仅检查首页（page=1）内容指纹；翻页请求不检查
+        指纹（避免多页场景下后续页变化被忽略）。
+
         Args:
             response: Scrapy 下载器返回的响应对象。
             kwargs: 回调参数（含 page 当前页码）。
         """
         body = response.text
         selector_type = str(self.parse_config.get("selector_type", "css")).lower()
+
+        # 增量策略：HTML_FINGERPRINT 检查首页指纹
+        page = kwargs.get("page", 1)
+        strategy = str(self.incremental_config.get("strategy", IncrementalStrategy.NONE))
+        if strategy == IncrementalStrategy.HTML_FINGERPRINT and page <= 1:
+            fingerprint = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            stored = str(self.incremental_config.get("_last_fingerprint", ""))
+            if stored and fingerprint == stored:
+                logger.info("HTML_FINGERPRINT 命中，首页未变化，跳过爬取: task_id=%s", self.task_id)
+                return
+            # 记录新指纹到 stats，engine 读取后写回 task.incremental_config
+            if self.crawler is not None:
+                self.crawler.stats.set_value(_STAT_HTML_FINGERPRINT, fingerprint)
 
         yield from self._extract_rows(body, selector_type)
 
