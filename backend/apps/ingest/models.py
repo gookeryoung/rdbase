@@ -589,8 +589,9 @@ class IngestQualityReport(models.Model):
             qs = qs.filter(task_id=task_id)
 
         # 取全部候选报告到内存按 (field, rule) 分组（监控场景报告数有限，避免 N 次查询）
+        # 按 created_at 倒序，相同 created_at 时按 id 倒序（确保同秒内创建的记录顺序稳定）
         reports = list(
-            qs.order_by("-created_at").values(
+            qs.order_by("-created_at", "-id").values(
                 "field",
                 "rule",
                 "pass_rate",

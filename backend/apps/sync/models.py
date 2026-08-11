@@ -375,7 +375,8 @@ class SyncAlert(models.Model):
     class Meta:
         verbose_name = "同步告警"
         verbose_name_plural = "同步告警"
-        ordering = ["-created_at"]
+        # 按 created_at 倒序，相同 created_at 时按 id 倒序（确保同秒内创建的记录顺序稳定）
+        ordering = ["-created_at", "-id"]
 
     def __str__(self) -> str:  # type: ignore[missing-override-decorator]
         return f"[{self.level}] {self.config.name}: {self.message[:40]}"  # type: ignore[bad-return]
