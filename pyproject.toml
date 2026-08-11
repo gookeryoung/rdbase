@@ -16,7 +16,6 @@ dependencies = [
     "django-cors-headers>=4.4",
     # 多数据库连接抽象层（连接外部 MySQL/PostgreSQL/SQLite）
     "sqlalchemy>=2.0",
-    "mysqlclient>=2.2",
     "psycopg[binary]>=3.2",
     # 凭证加密
     "cryptography>=43.0",
@@ -44,6 +43,7 @@ requires-python = ">=3.10"
 version = "0.1.0"
 
 [project.optional-dependencies]
+mysql = ["mysqlclient>=2.2"]
 lint = ["pyrefly>=1.1.1", "ruff>=0.8.0"]
 test = [
     "pytest>=8.0.0",
@@ -82,6 +82,8 @@ exclude = [
     "dbs",
     "backend/media",
 ]
+# 注意：scrapy→parsel→lxml.etree 传递导入无法被 AST 分析追踪，
+# 需在 Makefile fspack target 中用 --keep-module lxml.etree 保留
 
 [tool.fspack.entries]
 # 多入口：键=exe 名，值=入口脚本相对项目根的路径

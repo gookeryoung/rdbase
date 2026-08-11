@@ -11,10 +11,10 @@ help: ## 显示帮助信息
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z].*:.*##/ {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 sync: ## 安装后端开发依赖
-	uv sync --group dev
+	uv sync --group dev --extra mysql
 
 dev: ## 安装前后端全部依赖
-	uv sync --group dev
+	uv sync --group dev --extra mysql
 	cd $(FRONTEND_DIR) && bun install
 
 test: ## 运行测试（不含覆盖率）
@@ -72,5 +72,8 @@ fspack: ## fspack 打包 Windows .exe + NSIS 安装包（需联网下载 embed p
 	cd $(BACKEND_DIR) && uv run python manage.py collectstatic --noinput
 	rm -rf $(BACKEND_DIR)/staticfiles/spa
 	cp -r $(FRONTEND_DIR)/dist $(BACKEND_DIR)/staticfiles/spa
-	fsp b --target windows --mirror aliyun
+	rm -rf dist
+	PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
+	PIP_TRUSTED_HOST=mirrors.aliyun.com \
+	fsp b --mirror aliyun --keep-module lxml.etree
 	fsp p --target windows --format nsis
